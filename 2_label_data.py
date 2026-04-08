@@ -56,7 +56,7 @@ print(f"  F_coherence mean={df['F_coherence'].mean():.4f}  std={df['F_coherence'
 # Requires simultaneous large shifts — filters out daily measurement noise.
 RECAL_THRESHOLD = 0.25
 RECAL_MIN_COLS  = 3
-LEAD_DAYS       = 7
+LEAD_DAYS       = 1
 
 print(f"Detecting IBM recalibration events (threshold={int(RECAL_THRESHOLD*100)}%, min_cols={RECAL_MIN_COLS})...")
 
