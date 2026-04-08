@@ -137,7 +137,7 @@ print(f"  F_coherence mean={df['F_coherence'].mean():.4f}  std={df['F_coherence'
 
 # ── 6. LABEL: BAYESIAN CHANGE POINT DETECTION ON F_COMPOSITE ─────────────────
 #
-# METHOD: Bayesian Online Change Point Detection (BOCPD)
+# METHOD: PELT — Pruned Exact Linear Time (Killick, Fearnhead & Eckley, JASA 2012)
 #   Adams & MacKay (2007), "Bayesian Online Changepoint Detection"
 #   arXiv:0710.3742
 #
@@ -149,7 +149,7 @@ print(f"  F_coherence mean={df['F_coherence'].mean():.4f}  std={df['F_coherence'
 #
 # LABELING LOGIC:
 #   1. Compute F_composite per row (product of 3 fidelities)
-#   2. For each qubit on each backend, run BOCPD on the F_composite time series
+#   2. For each qubit on each backend, run PELT on the F_composite time series
 #   3. A change point = the qubit's fidelity distribution has structurally shifted
 #   4. Label = 1 (drifted) for all rows AFTER a detected change point
 #      Label = 0 (stable) for all rows BEFORE the first change point
@@ -176,7 +176,7 @@ except ImportError:
 df['F_composite'] = df['F_bell'] * df['F_gate'] * df['F_coherence']
 df['drifted'] = 0   # default stable
 
-print("Running Bayesian Change Point Detection per qubit per backend...")
+print("Running PELT change point detection per qubit per backend...")
 
 groups = df.groupby(['backend', 'qubit_id'])
 total_changepoints = 0
@@ -186,9 +186,9 @@ for (backend, qubit), idx in groups.groups.items():
     signal = group['F_composite'].values
 
     if len(signal) < 6:
-        continue   # not enough history for BOCPD
+        continue   # not enough history for PELT
 
-    # Step 2: BOCPD via ruptures — Pelt algorithm with rbf cost
+    # Step 2: PELT via ruptures — RBF cost function
     # min_size=3: minimum segment length (at least 3 days per regime)
     # pen=1.5:    penalty term controlling sensitivity
     #             lower = more change points detected (more sensitive)
@@ -345,19 +345,64 @@ if len(drift_rows) > 0:
                alpha=0.7, linewidth=0.9,
                label=f'Drift event (n={len(drift_rows)})', zorder=1)
 
+# ═════════════════════════════════════════════════════════════════════════════
+# FIGURE 1: F_composite over time with PELT drift regions
+# ═════════════════════════════════════════════════════════════════════════════
+print("Generating Figure 1: F_composite + PELT drift regions...")
+
+fig1_data = df[
+    (df['backend']  == fig1_backend) &
+    (df['qubit_id'] == fig1_qubit)
+].copy().sort_values('timestamp').reset_index(drop=True)
+
+fig, ax = plt.subplots(figsize=(9, 4))
+
+ax.plot(fig1_data['timestamp'], fig1_data['F_composite'],
+        color='steelblue', linewidth=1.8,
+        label='F_composite = F_bell × F_gate × F_coherence', zorder=3)
+
+# Shade drifted/stable regions
+prev_idx   = 0
+prev_drift = int(fig1_data['drifted'].iloc[0])
+for i in range(1, len(fig1_data)):
+    curr_drift = int(fig1_data['drifted'].iloc[i])
+    if curr_drift != prev_drift or i == len(fig1_data) - 1:
+        color = 'crimson'   if prev_drift == 1 else 'steelblue'
+        alpha = 0.15        if prev_drift == 1 else 0.06
+        ax.axvspan(fig1_data['timestamp'].iloc[prev_idx],
+                   fig1_data['timestamp'].iloc[i],
+                   color=color, alpha=alpha, zorder=1)
+        prev_idx   = i
+        prev_drift = curr_drift
+
+# Reference baseline line
+first_drift_idx = fig1_data[fig1_data['drifted'] == 1].index.min() \
+                  if fig1_data['drifted'].sum() > 0 else len(fig1_data)
+ref_mean = fig1_data.loc[:first_drift_idx - 1, 'F_composite'].mean() \
+           if first_drift_idx > 0 else fig1_data['F_composite'].mean()
+ax.axhline(ref_mean, color='orange', linewidth=1.6, linestyle='--',
+           label=f'Reference baseline = {ref_mean:.4f}', zorder=4)
+
+from matplotlib.patches import Patch
+ax.legend(handles=[
+    ax.lines[0], ax.lines[1],
+    Patch(facecolor='crimson',   alpha=0.4, label='Drifted regime (PELT)'),
+    Patch(facecolor='steelblue', alpha=0.25, label='Stable regime (PELT)'),
+], fontsize=9)
+
 ax.set_title(
-    f'Qubit Stability Over Time — {fig1_backend} Qubit {fig1_qubit}\n'
-    f'Red = BOCPD-detected drift regimes (Adams & MacKay 2007 | Kelly et al. Nat. Commun. 2020)',
-    fontsize=12, fontweight='bold', pad=10
+    f'Composite Fidelity Over Time — {fig1_backend} Qubit {fig1_qubit}\n'
+    f'PELT change point detection (Killick et al. 2012) — '
+    f'red = regime shifted below reference baseline → labeled drifted=1',
+    fontsize=11, fontweight='bold', pad=10
 )
 ax.set_xlabel('Date', fontsize=11)
-ax.set_ylabel('T1 Relaxation Time (µs)', fontsize=11)
-ax.legend(fontsize=10)
+ax.set_ylabel('F_composite  (F_bell × F_gate × F_coherence)', fontsize=10)
+ax.set_ylim(0, 1.05)
 ax.grid(alpha=0.3)
 plt.tight_layout()
 plt.savefig('figures/fig_qubit_stability.png', dpi=300, bbox_inches='tight')
 plt.close()
-print("  ✓ figures/fig_qubit_stability.png")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # FIGURE 2: Feature Distributions — stable vs drifted
@@ -405,7 +450,7 @@ for ax, feat, label in zip(axes, features, feat_labels):
 
 plt.suptitle(
     'Analytical Fidelity Feature Distributions: Stable vs Drifted\n'
-    'Labels assigned via BOCPD on F_composite (Adams & MacKay 2007 | Kelly et al. Nat. Commun. 2020)',
+    'Labels assigned via PELT on F_composite (Killick et al. 2012 | Kelly et al. Nat. Commun. 2020)',
     fontsize=12, fontweight='bold', y=1.02
 )
 plt.tight_layout()
@@ -420,5 +465,6 @@ print(f"{'='*55}")
 print(f"  Total rows    : {total:,}")
 print(f"  Drift events  : {drift_count:,} ({drift_pct}%)")
 print(f"  Stable        : {stable_count:,} ({100-drift_pct}%)")
-print(f"  Method        : BOCPD on F_composite = F_bell × F_gate × F_coherence")
+print(f"  Method        : PELT on F_composite = F_bell × F_gate × F_coherence")
 print(f"  Citations     : Adams & MacKay (2007) | Kelly et al. Nat. Commun. (2020)")
+print(f"\n  NEXT: python 3_validate_data.py")
