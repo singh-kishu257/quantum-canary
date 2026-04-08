@@ -35,6 +35,7 @@ qubit_col   = df['qubit_id'].values
 def add_rolling(group):
     group['T1_rolling_mean'] = group['T1_us'].rolling(window=7, min_periods=3).mean()
     group['cz_rolling_mean'] = group['cz_error'].rolling(window=7, min_periods=3).mean()
+    group['ro_rolling_mean'] = group['readout_error'].rolling(window=7, min_periods=3).mean()
     return group
 
 df = df.groupby(['backend','qubit_id'], group_keys=False).apply(add_rolling)
@@ -45,15 +46,20 @@ df['qubit_id'] = qubit_col
 # ── 4. LABEL: T1 DROP OR CZ ERROR RISE ≥15% (same logic as QC1) ──────────────
 # Completely independent of the 3 fidelity features below.
 # Physically grounded: T1 drop = decoherence worsening, CZ rise = gate degrading.
-THRESHOLD = 0.15
+THRESHOLD_T1      = 0.07   # T1 drops 7% below rolling mean
+THRESHOLD_READOUT = 0.05   # readout error rises 5% above rolling mean
+THRESHOLD_CZ      = 1.00   # CZ error doubles (100% rise above rolling mean)
 
 def label_drift(row):
-    if pd.isna(row['T1_rolling_mean']) or pd.isna(row['cz_rolling_mean']):
+    if pd.isna(row['T1_rolling_mean']) or pd.isna(row['cz_rolling_mean']) or pd.isna(row['ro_rolling_mean']):
         return 0
-    t1_drop = (row['T1_rolling_mean'] - row['T1_us']) / row['T1_rolling_mean']
-    cz_val  = row['cz_error'] if not pd.isna(row['cz_error']) else row['cz_rolling_mean']
-    cz_rise = (cz_val - row['cz_rolling_mean']) / row['cz_rolling_mean']
-    return 1 if (t1_drop >= THRESHOLD or cz_rise >= THRESHOLD) else 0
+    t1_drop = (row['T1_rolling_mean'] - row['T1_us'])          / row['T1_rolling_mean']
+    cz_val  = row['cz_error'] if not pd.isna(row['cz_error'])  else row['cz_rolling_mean']
+    cz_rise = (cz_val - row['cz_rolling_mean'])                 / row['cz_rolling_mean']
+    ro_rise = (row['readout_error'] - row['ro_rolling_mean'])   / row['ro_rolling_mean']
+    return 1 if (t1_drop >= THRESHOLD_T1 or
+                 cz_rise >= THRESHOLD_CZ or
+                 ro_rise >= THRESHOLD_READOUT) else 0
 
 df['drifted'] = df.apply(label_drift, axis=1)
 
@@ -200,5 +206,5 @@ print(f"{'='*50}")
 print(f"  Total rows  : {len(df):,}")
 print(f"  Drift (1)   : {drift_count:,} ({drift_pct}%)")
 print(f"  Stable (0)  : {stable_count:,} ({100-drift_pct}%)")
-print(f"  Threshold   : {int(THRESHOLD*100)}% T1 drop OR CZ error rise")
+print(f"  Thresholds  : T1 drop >=7% | CZ doubles | Readout rise >=5%")
 print(f"  Features    : F_bell, F_gate, F_coherence (independent)")
