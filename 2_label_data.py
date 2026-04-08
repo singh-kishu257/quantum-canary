@@ -173,11 +173,13 @@ if drift_count < 50:
 else:
     print("  ✓ Sufficient drift events for training.\n")
 
-# ── 7. CHRONOLOGICAL TRAIN / VAL / TEST SPLIT ─────────────────────────────────
-# Strictly chronological — no random shuffling.
-# Future data must not leak into training.
-# 70% train | 15% val | 15% test
-n      = len(df)
+# ── 8b. BUILD FEATURES DATAFRAME FIRST (needed for split below) ──────────────
+features_df = df[['F_bell', 'F_gate', 'F_coherence', 'drifted']].copy()
+
+# ── 10. CHRONOLOGICAL TRAIN / VAL / TEST SPLIT ───────────────────────────────
+# Based on features_data.csv row count — this is what downstream scripts use.
+# 70% train | 15% val | 15% test  — strictly chronological, no data leakage.
+n      = len(features_df)
 i_val  = int(n * 0.70)
 i_test = int(n * 0.85)
 
@@ -193,7 +195,7 @@ print(f"  Train: {len(split['train']):,} rows")
 print(f"  Val:   {len(split['val']):,} rows")
 print(f"  Test:  {len(split['test']):,} rows\n")
 
-# ── 8. SAVE LABELED DATASET ───────────────────────────────────────────────────
+# ── 8. SAVE LABELED DATASET (full) ───────────────────────────────────────────
 keep_cols = [
     'timestamp', 'backend', 'qubit_id',
     'T1_us', 'T2_us',
@@ -203,7 +205,14 @@ keep_cols = [
     'drifted'
 ]
 df[keep_cols].to_csv('data/ibm_calibration_labeled.csv', index=False)
-print("  ✓ Saved data/ibm_calibration_labeled.csv\n")
+print("  ✓ Saved data/ibm_calibration_labeled.csv")
+
+# ── 9. SAVE FEATURES-ONLY DATASET ────────────────────────────────────────────
+# This is the file the MLP trains on — only the 3 fidelity features + label.
+# No raw calibration columns. Clean input for all downstream scripts.
+features_df = df[['F_bell', 'F_gate', 'F_coherence', 'drifted']].copy()
+features_df.to_csv('data/features_data.csv', index=False)
+print("  ✓ Saved data/features_data.csv\n")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # FIGURE 1: Qubit Stability — T1 over time with drift markers
@@ -297,14 +306,26 @@ for ax, feat, label, thresh in zip(axes, features, feat_labels, thresholds):
     ax.hist(drifted_df[feat], bins=bins, alpha=0.6, color='crimson',
             label=f'Drifted (n={len(drifted_df):,})', density=True)
 
-    # Fault-tolerance threshold line
-    ax.axvline(thresh, color='black', linewidth=1.8, linestyle='--',
-               label=f'FT threshold = {thresh}')
+    # Stable mean — dashed blue
+    stable_mean = stable_df[feat].mean()
+    ax.axvline(stable_mean, color='steelblue', linewidth=1.8,
+               linestyle='--', label=f'Stable mean = {stable_mean:.4f}')
+
+    # Drifted mean — dashed red
+    if len(drifted_df) > 0:
+        drifted_mean = drifted_df[feat].mean()
+        ax.axvline(drifted_mean, color='crimson', linewidth=1.8,
+                   linestyle='--', label=f'Drifted mean = {drifted_mean:.4f}')
+
+    # Fault-tolerance threshold — solid black
+    # Derived from Barends et al. 2014: 0.99^n per-gate surface code threshold
+    ax.axvline(thresh, color='black', linewidth=2.0, linestyle='-',
+               label=f'Fault-tolerance threshold\n(0.99^n, Barends et al. 2014) = {thresh}')
 
     ax.set_title(label, fontsize=11, fontweight='bold')
     ax.set_xlabel('Fidelity', fontsize=10)
     ax.set_ylabel('Density', fontsize=10)
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7.5)
     ax.grid(alpha=0.3)
 
 plt.suptitle(
@@ -328,3 +349,4 @@ print(f"\n  Thresholds (Barends et al. 2014):")
 print(f"    F_bell      < {THRESH_BELL}  → drifted")
 print(f"    F_gate      < {THRESH_GATE}  → drifted")
 print(f"    F_coherence < {THRESH_COHERENCE}  → drifted")
+print(f"\n  NEXT: python 3_validate_data.py")
