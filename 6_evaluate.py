@@ -21,16 +21,18 @@ with open('data/split_indices.json') as f:
 with open('results/baseline_results.json') as f:
     baseline = json.load(f)
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
+FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence', 'z_F_composite']
 X = df[FEATURES].values
 y = df['drifted'].values
 
 X_test = X[split['test']]
 y_test = y[split['test']]
 
-scaler_mean  = np.load('models/scaler_mean.npy')
-scaler_scale = np.load('models/scaler_scale.npy')
-X_test_scaled = (X_test - scaler_mean) / scaler_scale
+from sklearn.preprocessing import StandardScaler
+X_train = X[split['train']]
+scaler  = StandardScaler()
+scaler.fit(X_train)
+X_test_scaled = scaler.transform(X_test)
 
 # ── 2. ENSEMBLE PREDICTIONS ON TEST SET ──────────────────────────────────────
 print("Loading 10 models and predicting on test set...")
@@ -176,3 +178,4 @@ print(f"  Improvement     : {improvement}%")
 print(f"  Recall          : {recall}")
 print(f"  Precision       : {precision}")
 print(f"{'='*45}")
+print(f"\n  NEXT: python 7_canary_circuits.py")

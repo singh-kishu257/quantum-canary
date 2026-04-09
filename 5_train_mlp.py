@@ -19,7 +19,7 @@ df = pd.read_csv('data/features_data.csv')
 with open('data/split_indices.json') as f:
     split = json.load(f)
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
+FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence', 'z_F_composite']
 X = df[FEATURES].values
 y = df['drifted'].values
 
@@ -28,11 +28,14 @@ X_val   = X[split['val']];   y_val   = y[split['val']]
 X_test  = X[split['test']];  y_test  = y[split['test']]
 
 # ── 2. SCALE ──────────────────────────────────────────────────────────────────
-scaler_mean  = np.load('models/scaler_mean.npy')
-scaler_scale = np.load('models/scaler_scale.npy')
-X_train = (X_train - scaler_mean) / scaler_scale
-X_val   = (X_val   - scaler_mean) / scaler_scale
-X_test  = (X_test  - scaler_mean) / scaler_scale
+from sklearn.preprocessing import StandardScaler
+scaler  = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_val   = scaler.transform(X_val)
+X_test  = scaler.transform(X_test)
+np.save('models/scaler_mean.npy',  scaler.mean_)
+np.save('models/scaler_scale.npy', scaler.scale_)
+print(f"Scaler fit on {X_train.shape[1]} features.\n")
 
 # ── 3. CLASS WEIGHT ───────────────────────────────────────────────────────────
 n_total  = len(y_train)
@@ -46,7 +49,7 @@ def build_mlp(seed):
     tf.random.set_seed(seed)
     np.random.seed(seed)
     model = keras.Sequential([
-        keras.layers.Input(shape=(3,)),
+        keras.layers.Input(shape=(4,)),
         keras.layers.Dense(64, activation='relu'),
         keras.layers.Dense(32, activation='relu'),
         keras.layers.Dense(16, activation='relu'),
