@@ -109,15 +109,59 @@ print(f"  F_bell      mean={df['F_bell'].mean():.4f}  std={df['F_bell'].std():.4
 print(f"  F_gate      mean={df['F_gate'].mean():.4f}  std={df['F_gate'].std():.4f}")
 print(f"  F_coherence mean={df['F_coherence'].mean():.4f}  std={df['F_coherence'].std():.4f}\n")
 
+# ── 5b. ROLLING Z-SCORE FEATURES ─────────────────────────────────────────────
+# KEY INSIGHT: Drift is a relative concept — deviation from recent baseline.
+# Absolute fidelity values (0.97–0.99) are blind to drift because IBM hardware
+# is uniformly high quality. Z-scores measure HOW MUCH each fidelity deviated
+# from its own recent history — same language as the T1/CZ drift labels.
+#
+# z_F = (F_today - 7day_rolling_mean_F) / 7day_rolling_std_F
+#
+# Negative z-score = fidelity worse than recent baseline → drift signal.
+# This is physically equivalent to what a canary circuit measures in deployment:
+# not "is hardware good?" but "is hardware worse than usual?"
+
+print("Computing rolling z-score features...")
+
+ROLL_WINDOW = 7
+MIN_PERIODS = 3
+
+backend_col = df['backend'].values
+qubit_col   = df['qubit_id'].values
+
+def add_fidelity_rolling(group):
+    for feat in ['F_bell', 'F_gate', 'F_coherence']:
+        group[f'{feat}_roll_mean'] = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).mean()
+        group[f'{feat}_roll_std']  = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).std()
+    return group
+
+df = df.groupby(['backend','qubit_id'], group_keys=False).apply(add_fidelity_rolling)
+df = df.reset_index(drop=True)
+df['backend']  = backend_col
+df['qubit_id'] = qubit_col
+
+# Compute z-scores — clip to [-5, 5] to handle outliers
+EPS = 1e-8
+for feat in ['F_bell', 'F_gate', 'F_coherence']:
+    df[f'z_{feat}'] = (
+        (df[feat] - df[f'{feat}_roll_mean']) /
+        (df[f'{feat}_roll_std'] + EPS)
+    ).clip(-5, 5).fillna(0)
+
+print(f"  z_F_bell      mean={df['z_F_bell'].mean():.4f}  std={df['z_F_bell'].std():.4f}")
+print(f"  z_F_gate      mean={df['z_F_gate'].mean():.4f}  std={df['z_F_gate'].std():.4f}")
+print(f"  z_F_coherence mean={df['z_F_coherence'].mean():.4f}  std={df['z_F_coherence'].std():.4f}\n")
+
 # ── 6. SAVE ───────────────────────────────────────────────────────────────────
 full_cols = ['timestamp','backend','qubit_id','T1_us','T2_us',
              'sx_error','x_error','cz_error','readout_error',
              't_sx_ns','t_x_ns','t_cz_ns',
-             'F_bell','F_gate','F_coherence','drifted']
+             'F_bell','F_gate','F_coherence',
+             'z_F_bell','z_F_gate','z_F_coherence','drifted']
 df[full_cols].to_csv('data/ibm_calibration_labeled.csv', index=False)
 print("  ✓ Saved data/ibm_calibration_labeled.csv")
 
-feat_df = df[['F_bell','F_gate','F_coherence','drifted']].copy()
+feat_df = df[['z_F_bell','z_F_gate','z_F_coherence','drifted']].copy()
 feat_df.to_csv('data/features_data.csv', index=False)
 print("  ✓ Saved data/features_data.csv")
 
@@ -171,8 +215,8 @@ print("  ✓ figures/fig_qubit_stability.png")
 print("Generating Figure 2: Feature Distributions...")
 s_df = df[df['drifted']==0]
 d_df = df[df['drifted']==1]
-feats = ['F_bell','F_gate','F_coherence']
-flabs = ['Bell State Fidelity','Gate Error Canary (8X)','Coherence Fidelity (Ramsey)']
+feats = ['z_F_bell','z_F_gate','z_F_coherence']
+flabs = ['Bell State Z-Score','Gate Error Z-Score','Coherence Z-Score']
 
 fig, axes = plt.subplots(1, 3, figsize=(13, 4))
 for ax, feat, lab in zip(axes, feats, flabs):
@@ -207,4 +251,5 @@ print(f"  Total rows  : {len(df):,}")
 print(f"  Drift (1)   : {drift_count:,} ({drift_pct}%)")
 print(f"  Stable (0)  : {stable_count:,} ({100-drift_pct}%)")
 print(f"  Thresholds  : T1 drop >=7% | CZ doubles | Readout rise >=5%")
-print(f"  Features    : F_bell, F_gate, F_coherence (independent)")
+print(f"  Features    : z_F_bell, z_F_gate, z_F_coherence (rolling z-scores)")
+print(f"\n  NEXT: python 3_validate_data.py")
