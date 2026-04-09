@@ -130,7 +130,7 @@ backend_col = df['backend'].values
 qubit_col   = df['qubit_id'].values
 
 def add_fidelity_rolling(group):
-    for feat in ['F_bell', 'F_gate', 'F_coherence']:
+    for feat in ['F_bell', 'F_gate', 'F_coherence', 'T1_us', 'cz_error', 'readout_error']:
         group[f'{feat}_roll_mean'] = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).mean()
         group[f'{feat}_roll_std']  = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).std()
     return group
@@ -140,24 +140,33 @@ df = df.reset_index(drop=True)
 df['backend']  = backend_col
 df['qubit_id'] = qubit_col
 
-# Compute z-scores — clip to [-5, 5] to handle outliers
 EPS = 1e-8
+# Fidelity z-scores
 for feat in ['F_bell', 'F_gate', 'F_coherence']:
     df[f'z_{feat}'] = (
         (df[feat] - df[f'{feat}_roll_mean']) /
         (df[f'{feat}_roll_std'] + EPS)
     ).clip(-5, 5).fillna(0)
 
-print(f"  z_F_bell      mean={df['z_F_bell'].mean():.4f}  std={df['z_F_bell'].std():.4f}")
-print(f"  z_F_gate      mean={df['z_F_gate'].mean():.4f}  std={df['z_F_gate'].std():.4f}")
-print(f"  z_F_coherence mean={df['z_F_coherence'].mean():.4f}  std={df['z_F_coherence'].std():.4f}\n")
+# Raw IBM parameter z-scores — directly mirror label logic
+# z_T1 negative = T1 dropped (drift signal)
+# z_cz positive = CZ rose (drift signal)
+# z_readout positive = readout worsened (drift signal)
+df['z_T1']      = ((df['T1_us']        - df['T1_us_roll_mean'])        / (df['T1_us_roll_std']        + EPS)).clip(-5,5).fillna(0)
+df['z_cz']      = ((df['cz_error']     - df['cz_error_roll_mean'])     / (df['cz_error_roll_std']     + EPS)).clip(-5,5).fillna(0)
+df['z_readout'] = ((df['readout_error'] - df['readout_error_roll_mean'])/ (df['readout_error_roll_std'] + EPS)).clip(-5,5).fillna(0)
+
+print(f"  z_F_bell  mean={df['z_F_bell'].mean():.4f}  z_F_gate mean={df['z_F_gate'].mean():.4f}  z_F_coh mean={df['z_F_coherence'].mean():.4f}")
+print(f"  z_T1      mean={df['z_T1'].mean():.4f}  z_cz mean={df['z_cz'].mean():.4f}  z_ro mean={df['z_readout'].mean():.4f}\n")
 
 # ── 6. SAVE ───────────────────────────────────────────────────────────────────
 full_cols = ['timestamp','backend','qubit_id','T1_us','T2_us',
              'sx_error','x_error','cz_error','readout_error',
              't_sx_ns','t_x_ns','t_cz_ns',
              'F_bell','F_gate','F_coherence',
-             'z_F_bell','z_F_gate','z_F_coherence','drifted']
+             'z_F_bell','z_F_gate','z_F_coherence',
+             'z_T1','z_cz','z_readout','drifted']
+full_cols = [c for c in full_cols if c in df.columns]
 df[full_cols].to_csv('data/ibm_calibration_labeled.csv', index=False)
 print("  ✓ Saved data/ibm_calibration_labeled.csv")
 

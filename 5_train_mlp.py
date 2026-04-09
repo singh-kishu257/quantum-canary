@@ -47,11 +47,12 @@ def build_mlp(seed):
     np.random.seed(seed)
     model = keras.Sequential([
         keras.layers.Input(shape=(3,)),
+        keras.layers.Dense(64, activation='relu'),
+        keras.layers.Dense(32, activation='relu'),
         keras.layers.Dense(16, activation='relu'),
-        keras.layers.Dense(8,  activation='relu'),
         keras.layers.Dense(1,  activation='sigmoid'),
     ])
-    model.compile(optimizer='adam',
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0005),
                   loss='binary_crossentropy',
                   metrics=['accuracy', keras.metrics.AUC(name='auc')])
     return model
@@ -68,13 +69,13 @@ print("Training 10 MLP models...\n")
 for seed in range(10):
     model = build_mlp(seed)
     early_stop = keras.callbacks.EarlyStopping(
-        monitor='val_loss', patience=15,
+        monitor='val_loss', patience=25,
         restore_best_weights=True, verbose=0)
 
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=150, batch_size=32,
+        epochs=300, batch_size=64,
         class_weight=class_weight,
         callbacks=[early_stop],
         verbose=0
