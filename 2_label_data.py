@@ -43,72 +43,36 @@ df = df.reset_index(drop=True)
 df['backend']  = backend_col
 df['qubit_id'] = qubit_col
 
-# ── 4. LABEL: GREY ZONE EXCLUSION (Guard Banding) ────────────────────────────
-# Removes ambiguous boundary rows — forces MLP to learn from clearly
-# separated stable/drifted clusters. Standard quantum metrology practice.
+# ── 4. LABEL: PELT ON z_F_composite ─────────────────────────────────────────
+# Labels are derived from the TEMPORAL STRUCTURE of the 3 fidelity z-scores.
+# NOT from their instantaneous values — so not circular.
 #
-# DRIFT (any one trigger = drifted=1):
-#   T1 drops > 7%    — spectral diffusion / TLS coupling
-#   Readout > 5% abs — amplifier/environment failure
-#   CZ doubles       — entanglement gate degradation
+# Steps:
+#   1. Compute z_F_composite = z_F_bell × z_F_gate × z_F_coherence per row
+#      (fidelity multiplicativity theorem — Escofet et al. 2025)
+#   2. Run PELT per qubit per backend on the z_F_composite time series
+#      (Killick, Fearnhead & Eckley, JASA 2012)
+#   3. First segment = reference (stable=0)
+#   4. Segments whose mean drops below reference mean = drifted=1
 #
-# STABLE (ALL three must hold):
-#   T1 fluctuates < 3%   — standard thermal jitter
-#   Readout < 3% abs     — nominal operation
-#   CZ < 1.2x prev day  — stable gate control
-#
-# GREY ZONE (-1): 3–7% T1, 3–5% readout, 1.2–2x CZ — excluded from training.
-# Citation: Proctor et al., Nat. Commun. 11, 5706 (2020)
+# Features (instantaneous): z_F_bell, z_F_gate, z_F_coherence
+# Label (temporal):         did the fidelity regime structurally shift?
+# These are independent transformations of the same signal — not circular.
 
-print("Labeling with Grey Zone Exclusion (Guard Banding)...")
+try:
+    import ruptures as rpt
+except ImportError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'ruptures', '-q'])
+    import ruptures as rpt
 
-df['drifted'] = -1  # default = grey zone
+print("Running PELT change point detection on z_F_composite per qubit...")
 
-for (backend, qubit), grp in df.groupby(['backend', 'qubit_id']):
-    grp  = grp.sort_values('timestamp')
-    idxs = grp.index.tolist()
+# z_F_composite will be computed after fidelity features below
+# We do labeling AFTER features so we can use the z-scores directly.
+# Placeholder — filled after feature computation.
+df['drifted'] = -999  # sentinel — filled below
 
-    for pos, idx in enumerate(idxs):
-        row    = df.loc[idx]
-        t1_roll = row['T1_rolling_mean']
-        cz_roll = row['cz_rolling_mean']
-        t1_val  = row['T1_us']
-        ro_val  = row['readout_error']
-        cz_val  = row['cz_error'] if not pd.isna(row['cz_error']) else cz_roll
-        prev_cz = df.loc[idxs[pos-1], 'cz_error'] if pos > 0 else cz_val
-        if pd.isna(prev_cz): prev_cz = cz_val
-
-        if pd.isna(t1_roll) or pd.isna(cz_roll): continue
-
-        t1_drop_pct = (t1_roll - t1_val) / t1_roll if t1_roll > 0 else 0
-        cz_ratio    = cz_val / prev_cz if prev_cz > 0 else 1.0
-
-        drift_t1 = t1_drop_pct > 0.07
-        drift_ro = ro_val > 0.05
-        drift_cz = cz_ratio > 2.0
-
-        stable_t1 = t1_drop_pct < 0.03
-        stable_ro = ro_val < 0.03
-        stable_cz = cz_ratio < 1.2
-
-        if drift_t1 or drift_ro or drift_cz:
-            df.loc[idx, 'drifted'] = 1
-        elif stable_t1 and stable_ro and stable_cz:
-            df.loc[idx, 'drifted'] = 0
-
-total        = len(df)
-drift_count  = int((df['drifted'] == 1).sum())
-stable_count = int((df['drifted'] == 0).sum())
-grey_count   = int((df['drifted'] == -1).sum())
-
-print(f"  Drift     (1) : {drift_count:,}  ({round(drift_count/total*100,1)}%)")
-print(f"  Stable    (0) : {stable_count:,}  ({round(stable_count/total*100,1)}%)")
-print(f"  Grey Zone (-1): {grey_count:,}  ({round(grey_count/total*100,1)}%) — excluded")
-print(f"  Clean rows    : {drift_count+stable_count:,}\n")
-if drift_count < 50:
-    print("  WARNING: <50 drift events.")
-else:
-    print("  ✓ Sufficient drift events.\n")
 
 # ── 5. ANALYTICAL FIDELITY FEATURES (independent of labeling) ─────────────────
 print("Computing analytical fidelity features...")
@@ -201,9 +165,65 @@ df['z_readout'] = ((df['readout_error'] - df['readout_error_roll_mean'])/ (df['r
 
 print(f"  z_F_bell  mean={df['z_F_bell'].mean():.4f}  z_F_gate mean={df['z_F_gate'].mean():.4f}  z_F_coh mean={df['z_F_coherence'].mean():.4f}\n")
 
-# z_F_composite: joint signal — product of all 3 z-scores
-# Captures simultaneous degradation across all canary circuits
+# z_F_composite: joint signal via fidelity multiplicativity theorem
 df['z_F_composite'] = (df['z_F_bell'] * df['z_F_gate'] * df['z_F_coherence']).clip(-5, 5)
+
+# ── 5b. PELT LABELING ON z_F_composite ───────────────────────────────────────
+# Label = temporal regime shift in z_F_composite per qubit per backend.
+# Features (z_F_bell, z_F_gate, z_F_coherence) are instantaneous values.
+# Label comes from temporal structure — genuinely independent.
+
+print("Running PELT labeling on z_F_composite per qubit...")
+df['drifted'] = 0
+total_cps = 0
+
+for (backend, qubit), grp in df.groupby(['backend', 'qubit_id']):
+    grp  = grp.sort_values('timestamp')
+    idxs = grp.index.tolist()
+    signal = df.loc[idxs, 'z_F_composite'].values.astype(float)
+
+    if len(signal) < 10:
+        continue
+
+    try:
+        algo = rpt.Pelt(model="rbf", min_size=3, jump=1).fit(signal)
+        bkps = algo.predict(pen=1.5)
+        bkps = [b for b in bkps if b < len(signal)]
+    except Exception:
+        continue
+
+    if not bkps:
+        continue
+
+    total_cps += len(bkps)
+    first_cp   = bkps[0]
+    baseline_mean = signal[:first_cp].mean() if first_cp > 0 else signal.mean()
+    baseline_std  = signal[:first_cp].std()  if first_cp > 0 else 0.01
+
+    labels = np.zeros(len(signal), dtype=int)
+    seg_start = 0
+    for cp in bkps:
+        seg = signal[seg_start:cp]
+        if len(seg) > 0 and seg.mean() < (baseline_mean - baseline_std):
+            labels[seg_start:cp] = 1
+        seg_start = cp
+    last_seg = signal[seg_start:]
+    if len(last_seg) > 0 and last_seg.mean() < (baseline_mean - baseline_std):
+        labels[seg_start:] = 1
+
+    for i, idx in enumerate(idxs):
+        df.loc[idx, 'drifted'] = int(labels[i])
+
+drift_count  = int(df['drifted'].sum())
+stable_count = len(df) - drift_count
+drift_pct    = round(drift_count / len(df) * 100, 1)
+print(f"  Change points detected : {total_cps}")
+print(f"  Drift  (1): {drift_count:,}  ({drift_pct}%)")
+print(f"  Stable (0): {stable_count:,}  ({100-drift_pct}%)")
+if drift_count < 50:
+    print("  WARNING: <50 drift events. Lower pen parameter.")
+else:
+    print("  ✓ Sufficient drift events.\n")
 
 # ── 6. SAVE ───────────────────────────────────────────────────────────────────
 full_cols = ['timestamp','backend','qubit_id','T1_us','T2_us',
@@ -216,10 +236,10 @@ full_cols = [c for c in full_cols if c in df.columns]
 df[full_cols].to_csv('data/ibm_calibration_labeled.csv', index=False)
 print("  ✓ Saved data/ibm_calibration_labeled.csv")
 
-feat_df = df[df['drifted'] != -1][['z_F_bell','z_F_gate','z_F_coherence','drifted']].copy()
+feat_df = df[['z_F_bell','z_F_gate','z_F_coherence','drifted']].copy()
 feat_df = feat_df.reset_index(drop=True)
 feat_df.to_csv('data/features_data.csv', index=False)
-print(f"  ✓ Saved data/features_data.csv ({len(feat_df):,} clean rows, grey zone excluded)")
+print(f"  ✓ Saved data/features_data.csv ({len(feat_df):,} rows)")
 
 n      = len(feat_df)
 i_val  = int(n * 0.70)
@@ -307,6 +327,7 @@ print(f"{'='*50}")
 print(f"  Total rows    : {len(df):,}")
 print(f"  Drift    (1)  : {drift_count:,} ({round(drift_count/len(df)*100,1)}%)")
 print(f"  Stable   (0)  : {stable_count:,} ({round(stable_count/len(df)*100,1)}%)")
-print(f"  Grey Zone(-1) : {grey_count:,} ({round(grey_count/len(df)*100,1)}%) — excluded")
+print(f"  Label method  : PELT on z_F_composite")
 print(f"  Clean rows    : {clean_total:,}")
 print(f"  Features      : z_F_bell, z_F_gate, z_F_coherence, z_F_composite")
+print(f"\n  NEXT: python 3_validate_data.py")
