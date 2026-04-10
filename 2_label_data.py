@@ -134,12 +134,18 @@ df['F_gate'] = (
     np.exp(-(8 * df['t_x_ns']) / T2_ns)
 ).clip(0, 1)
 
-# Coherence Canary (Ramsey / 2H) — T1 + T2 decay during 2*t_sx
+# Coherence Canary (Ramsey / 2H) — T2 decay during free evolution wait
+# Circuit: H → wait(t_wait) → H → measure
+# The T2 decay happens DURING the wait, not during the gates.
+# t_wait = 1000 ns (1 µs) — fixed wait time programmed into the circuit.
+# Chosen to be sensitive to T2 degradation while remaining short enough
+# for rapid canary deployment on IBM hardware.
+T_WAIT_NS = 1000.0  # ns — fixed Ramsey wait time
+
 df['F_coherence'] = (
     (1 - df['sx_error'])**2 *
     (1 - df['readout_error']) *
-    0.5 * (1 + np.exp(-(2 * df['t_sx_ns']) / T1_ns) *
-               np.exp(-(2 * df['t_sx_ns']) / T2_ns))
+    0.5 * (1 + np.exp(-T_WAIT_NS / T2_ns))
 ).clip(0, 1)
 
 print(f"  F_bell      mean={df['F_bell'].mean():.4f}  std={df['F_bell'].std():.4f}")
