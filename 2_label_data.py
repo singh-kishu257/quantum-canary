@@ -216,7 +216,7 @@ full_cols = [c for c in full_cols if c in df.columns]
 df[full_cols].to_csv('data/ibm_calibration_labeled.csv', index=False)
 print("  ✓ Saved data/ibm_calibration_labeled.csv")
 
-feat_df = df[df['drifted'] != -1][['z_F_bell','z_F_gate','z_F_coherence','z_F_composite','drifted']].copy()
+feat_df = df[df['drifted'] != -1][['z_F_bell','z_F_gate','z_F_coherence','drifted']].copy()
 feat_df = feat_df.reset_index(drop=True)
 feat_df.to_csv('data/features_data.csv', index=False)
 print(f"  ✓ Saved data/features_data.csv ({len(feat_df):,} clean rows, grey zone excluded)")
@@ -310,4 +310,3 @@ print(f"  Stable   (0)  : {stable_count:,} ({round(stable_count/len(df)*100,1)}%
 print(f"  Grey Zone(-1) : {grey_count:,} ({round(grey_count/len(df)*100,1)}%) — excluded")
 print(f"  Clean rows    : {clean_total:,}")
 print(f"  Features      : z_F_bell, z_F_gate, z_F_coherence, z_F_composite")
-print(f"\n  NEXT: python 3_validate_data.py")

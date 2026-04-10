@@ -19,7 +19,7 @@ df = pd.read_csv('data/features_data.csv')
 with open('data/split_indices.json') as f:
     split = json.load(f)
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence', 'z_F_composite']
+FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
 X = df[FEATURES].values
 y = df['drifted'].values
 
@@ -49,13 +49,12 @@ def build_mlp(seed):
     tf.random.set_seed(seed)
     np.random.seed(seed)
     model = keras.Sequential([
-        keras.layers.Input(shape=(4,)),
-        keras.layers.Dense(64, activation='relu'),
-        keras.layers.Dense(32, activation='relu'),
+        keras.layers.Input(shape=(3,)),
         keras.layers.Dense(16, activation='relu'),
+        keras.layers.Dense(8,  activation='relu'),
         keras.layers.Dense(1,  activation='sigmoid'),
     ])
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0005),
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001),
                   loss='binary_crossentropy',
                   metrics=['accuracy', keras.metrics.AUC(name='auc')])
     return model
