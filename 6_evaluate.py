@@ -21,7 +21,7 @@ with open('data/split_indices.json') as f:
 with open('results/baseline_results.json') as f:
     baseline = json.load(f)
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence', 'z_F_composite']
+FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
 X = df[FEATURES].values
 y = df['drifted'].values
 

@@ -1,9 +1,9 @@
 {
   "threshold_classifier": {
-    "accuracy": 0.4049,
-    "precision": 0.4049,
+    "accuracy": 0.4296,
+    "precision": 0.4296,
     "recall": 1.0,
-    "f1": 0.5764,
-    "auc": 0.6104
+    "f1": 0.601,
+    "auc": 0.7534
   }
 }
