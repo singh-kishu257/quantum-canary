@@ -19,7 +19,7 @@ df = pd.read_csv('data/features_data.csv')
 with open('data/split_indices.json') as f:
     split = json.load(f)
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
+FEATURES = ['F_bell', 'F_gate', 'F_coherence']
 X = df[FEATURES].values
 y = df['drifted'].values
 
@@ -54,7 +54,7 @@ def build_mlp(seed):
         keras.layers.Dense(8,  activation='relu'),
         keras.layers.Dense(1,  activation='sigmoid'),
     ])
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001),
+    model.compile(optimizer='adam',
                   loss='binary_crossentropy',
                   metrics=['accuracy', keras.metrics.AUC(name='auc')])
     return model
@@ -71,13 +71,13 @@ print("Training 10 MLP models...\n")
 for seed in range(10):
     model = build_mlp(seed)
     early_stop = keras.callbacks.EarlyStopping(
-        monitor='val_loss', patience=25,
+        monitor='val_loss', patience=15,
         restore_best_weights=True, verbose=0)
 
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=300, batch_size=64,
+        epochs=100, batch_size=16,
         class_weight=class_weight,
         callbacks=[early_stop],
         verbose=0

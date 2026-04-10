@@ -15,7 +15,7 @@ print("Loading data/features_data.csv ...")
 df = pd.read_csv('data/features_data.csv')
 print(f"  {len(df):,} rows\n")
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
+FEATURES = ['F_bell', 'F_gate', 'F_coherence']
 
 # ── 2. CLASS BALANCE ──────────────────────────────────────────────────────────
 drift_count  = int(df['drifted'].sum())

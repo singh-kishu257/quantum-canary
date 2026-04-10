@@ -20,7 +20,7 @@ df = pd.read_csv('data/features_data.csv')
 with open('data/split_indices.json') as f:
     split = json.load(f)
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
+FEATURES = ['F_bell', 'F_gate', 'F_coherence']
 X = df[FEATURES].values
 y = df['drifted'].values
 
