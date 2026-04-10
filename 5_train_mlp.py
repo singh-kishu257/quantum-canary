@@ -19,7 +19,7 @@ df = pd.read_csv('data/features_data.csv')
 with open('data/split_indices.json') as f:
     split = json.load(f)
 
-FEATURES = ['F_bell', 'F_gate', 'F_coherence']
+FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
 X = df[FEATURES].values
 y = df['drifted'].values
 
@@ -28,14 +28,11 @@ X_val   = X[split['val']];   y_val   = y[split['val']]
 X_test  = X[split['test']];  y_test  = y[split['test']]
 
 # ── 2. SCALE ──────────────────────────────────────────────────────────────────
-from sklearn.preprocessing import StandardScaler
-scaler  = StandardScaler()
-X_train = scaler.fit_transform(X_train)
-X_val   = scaler.transform(X_val)
-X_test  = scaler.transform(X_test)
-np.save('models/scaler_mean.npy',  scaler.mean_)
-np.save('models/scaler_scale.npy', scaler.scale_)
-print(f"Scaler fit on {X_train.shape[1]} features.\n")
+scaler_mean  = np.load('models/scaler_mean.npy')
+scaler_scale = np.load('models/scaler_scale.npy')
+X_train = (X_train - scaler_mean) / scaler_scale
+X_val   = (X_val   - scaler_mean) / scaler_scale
+X_test  = (X_test  - scaler_mean) / scaler_scale
 
 # ── 3. CLASS WEIGHT ───────────────────────────────────────────────────────────
 n_total  = len(y_train)
@@ -77,7 +74,7 @@ for seed in range(10):
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=100, batch_size=16,
+        epochs=150, batch_size=32,
         class_weight=class_weight,
         callbacks=[early_stop],
         verbose=0

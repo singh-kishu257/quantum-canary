@@ -28,11 +28,9 @@ y = df['drifted'].values
 X_test = X[split['test']]
 y_test = y[split['test']]
 
-from sklearn.preprocessing import StandardScaler
-X_train = X[split['train']]
-scaler  = StandardScaler()
-scaler.fit(X_train)
-X_test_scaled = scaler.transform(X_test)
+scaler_mean  = np.load('models/scaler_mean.npy')
+scaler_scale = np.load('models/scaler_scale.npy')
+X_test_scaled = (X_test - scaler_mean) / scaler_scale
 
 # ── 2. ENSEMBLE PREDICTIONS ON TEST SET ──────────────────────────────────────
 print("Loading 10 models and predicting on test set...")
@@ -178,4 +176,3 @@ print(f"  Improvement     : {improvement}%")
 print(f"  Recall          : {recall}")
 print(f"  Precision       : {precision}")
 print(f"{'='*45}")
-print(f"\n  NEXT: python 7_canary_circuits.py")
