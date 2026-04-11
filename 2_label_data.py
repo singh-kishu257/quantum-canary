@@ -33,9 +33,11 @@ backend_col = df['backend'].values
 qubit_col   = df['qubit_id'].values
 
 def add_rolling(group):
-    group['T1_rolling_mean'] = group['T1_us'].rolling(window=7, min_periods=3).mean()
-    group['cz_rolling_mean'] = group['cz_error'].rolling(window=7, min_periods=3).mean()
-    group['ro_rolling_mean'] = group['readout_error'].rolling(window=7, min_periods=3).mean()
+    # IMPORTANT: shift(1) to avoid using today's value in its own baseline.
+    # This preserves strict temporal causality for labels/features.
+    group['T1_rolling_mean'] = group['T1_us'].rolling(window=7, min_periods=3).mean().shift(1)
+    group['cz_rolling_mean'] = group['cz_error'].rolling(window=7, min_periods=3).mean().shift(1)
+    group['ro_rolling_mean'] = group['readout_error'].rolling(window=7, min_periods=3).mean().shift(1)
     return group
 
 df = df.groupby(['backend','qubit_id'], group_keys=False).apply(add_rolling)
@@ -131,8 +133,9 @@ qubit_col   = df['qubit_id'].values
 
 def add_fidelity_rolling(group):
     for feat in ['F_bell', 'F_gate', 'F_coherence']:
-        group[f'{feat}_roll_mean'] = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).mean()
-        group[f'{feat}_roll_std']  = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).std()
+        group[f'{feat}_roll_mean'] = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).mean().shift(1)
+        group[f'{feat}_roll_std']  = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).std().shift(1)
+        group[f'{feat}_lag1']      = group[feat].shift(1)
     return group
 
 df = df.groupby(['backend','qubit_id'], group_keys=False).apply(add_fidelity_rolling)
@@ -148,6 +151,16 @@ for feat in ['F_bell', 'F_gate', 'F_coherence']:
         (df[f'{feat}_roll_std'] + EPS)
     ).clip(-5, 5).fillna(0)
 
+# Additional temporal features (still independent from label rules):
+# 1) %-change vs 7-day baseline and 2) one-step momentum.
+for feat in ['F_bell', 'F_gate', 'F_coherence']:
+    df[f'delta_{feat}'] = (
+        (df[feat] - df[f'{feat}_roll_mean']) / (df[f'{feat}_roll_mean'] + EPS)
+    ).clip(-1, 1).fillna(0)
+    df[f'momentum_{feat}'] = (
+        (df[feat] - df[f'{feat}_lag1']) / (df[f'{feat}_lag1'] + EPS)
+    ).clip(-1, 1).fillna(0)
+
 print(f"  z_F_bell      mean={df['z_F_bell'].mean():.4f}  std={df['z_F_bell'].std():.4f}")
 print(f"  z_F_gate      mean={df['z_F_gate'].mean():.4f}  std={df['z_F_gate'].std():.4f}")
 print(f"  z_F_coherence mean={df['z_F_coherence'].mean():.4f}  std={df['z_F_coherence'].std():.4f}\n")
@@ -161,7 +174,12 @@ full_cols = ['timestamp','backend','qubit_id','T1_us','T2_us',
 df[full_cols].to_csv('data/ibm_calibration_labeled.csv', index=False)
 print("  ✓ Saved data/ibm_calibration_labeled.csv")
 
-feat_df = df[['z_F_bell','z_F_gate','z_F_coherence','drifted']].copy()
+feature_columns = [
+    'z_F_bell', 'z_F_gate', 'z_F_coherence',
+    'delta_F_bell', 'delta_F_gate', 'delta_F_coherence',
+    'momentum_F_bell', 'momentum_F_gate', 'momentum_F_coherence'
+]
+feat_df = df[feature_columns + ['drifted']].copy()
 feat_df.to_csv('data/features_data.csv', index=False)
 print("  ✓ Saved data/features_data.csv")
 
@@ -251,5 +269,5 @@ print(f"  Total rows  : {len(df):,}")
 print(f"  Drift (1)   : {drift_count:,} ({drift_pct}%)")
 print(f"  Stable (0)  : {stable_count:,} ({100-drift_pct}%)")
 print(f"  Thresholds  : T1 drop >=7% | CZ doubles | Readout rise >=5%")
-print(f"  Features    : z_F_bell, z_F_gate, z_F_coherence (rolling z-scores)")
+print(f"  Features    : z-score + delta + momentum for F_bell/F_gate/F_coherence")
 print(f"\n  NEXT: python 3_validate_data.py")

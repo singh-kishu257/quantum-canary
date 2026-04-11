@@ -1,6 +1,6 @@
 # 5_train_mlp.py — Quantum Canary Prototype 2
-# Trains a 10-model MLP ensemble on F_bell, F_gate, F_coherence.
-# Architecture: 3 → 16 → 8 → 1 (sigmoid), 10 seeds, early stopping.
+# Trains a 10-model MLP ensemble on engineered canary temporal features.
+# Architecture: D → 64 → 32 → 16 → 1 (sigmoid), 10 seeds, early stopping.
 
 import pandas as pd
 import numpy as np
@@ -19,7 +19,11 @@ df = pd.read_csv('data/features_data.csv')
 with open('data/split_indices.json') as f:
     split = json.load(f)
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
+FEATURES = [
+    'z_F_bell', 'z_F_gate', 'z_F_coherence',
+    'delta_F_bell', 'delta_F_gate', 'delta_F_coherence',
+    'momentum_F_bell', 'momentum_F_gate', 'momentum_F_coherence'
+]
 X = df[FEATURES].values
 y = df['drifted'].values
 
@@ -46,9 +50,12 @@ def build_mlp(seed):
     tf.random.set_seed(seed)
     np.random.seed(seed)
     model = keras.Sequential([
-        keras.layers.Input(shape=(3,)),
+        keras.layers.Input(shape=(len(FEATURES),)),
+        keras.layers.Dense(64, activation='relu'),
+        keras.layers.Dropout(0.25),
+        keras.layers.Dense(32, activation='relu'),
+        keras.layers.Dropout(0.15),
         keras.layers.Dense(16, activation='relu'),
-        keras.layers.Dense(8,  activation='relu'),
         keras.layers.Dense(1,  activation='sigmoid'),
     ])
     model.compile(optimizer='adam',
@@ -103,9 +110,13 @@ print(f"Std seed AUC     : {round(np.std(val_aucs),  4)}")
 # Load baseline
 with open('results/baseline_results.json') as f:
     baseline = json.load(f)
-thresh_auc  = baseline['threshold_classifier']['auc']
-improvement = round((ensemble_val_auc - thresh_auc) / abs(thresh_auc) * 100, 1)
-print(f"Threshold AUC    : {thresh_auc}")
+threshold_auc = baseline['threshold_classifier']['auc']
+logreg_auc = baseline.get('logistic_regression', {}).get('auc', threshold_auc)
+best_traditional_auc = max(threshold_auc, logreg_auc)
+improvement = round((ensemble_val_auc - best_traditional_auc) / abs(best_traditional_auc) * 100, 1)
+print(f"Threshold AUC    : {threshold_auc}")
+print(f"LogReg AUC       : {logreg_auc}")
+print(f"Best traditional : {best_traditional_auc}")
 print(f"Improvement      : {improvement}%")
 
 # ── 7. FIGURE 1: Val Loss all 10 seeds overlaid on one plot ──────────────────
@@ -154,8 +165,9 @@ np.save('results/val_aucs.npy', np.array(val_aucs))
 print(f"\n{'='*45}")
 print(f"  TRAINING COMPLETE")
 print(f"  Ensemble Val AUC : {ensemble_val_auc}")
-print(f"  Threshold AUC    : {thresh_auc}")
+print(f"  Traditional AUC  : {best_traditional_auc}")
 print(f"  Improvement      : {improvement}%")
+print(f"  Target checks    : AUC>0.90? {'YES' if ensemble_val_auc > 0.90 else 'NO'} | "
+      f"Improvement>=20%? {'YES' if improvement >= 20 else 'NO'}")
 print(f"{'='*45}")
 print(f"\n  NEXT: python 6_evaluate.py")
-
