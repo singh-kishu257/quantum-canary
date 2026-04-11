@@ -1,9 +1,9 @@
 {
   "mlp_ensemble": {
-    "auc": 0.7959,
-    "accuracy": 0.7391,
-    "precision": 0.4767,
-    "recall": 0.6797,
-    "f1": 0.5604
+    "auc": 0.7645,
+    "accuracy": 0.719,
+    "precision": 0.6643,
+    "recall": 0.6495,
+    "f1": 0.6568
   }
 }
