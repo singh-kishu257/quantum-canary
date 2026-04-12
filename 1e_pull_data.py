@@ -35,7 +35,7 @@ os.makedirs('data', exist_ok=True)
 SHOTS        = 1000
 N_STABLE     = 5000
 N_DRIFTED    = 5000
-BACKEND_NAME = 'ibm_torino'  # change to any accessible backend
+BACKEND_NAME = 'ibm_kingston'  # change to any accessible backend
 
 # ── CREDENTIALS ───────────────────────────────────────────────────────────────
 with open('api_token.txt',    'r') as f: token    = f.read().strip()
@@ -50,7 +50,7 @@ print(f'✓ Loaded backend: {BACKEND_NAME}\n')
 # ── CANARY CIRCUITS ───────────────────────────────────────────────────────────
 def make_bell():
     qc = QuantumCircuit(2, 2)
-    qc.h(0)
+    qc.h(0) 
     qc.cx(0, 1)
     qc.measure([0, 1], [0, 1])
     return qc
