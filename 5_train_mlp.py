@@ -21,8 +21,8 @@ with open('data/split_indices.json') as f:
 
 FEATURES = [
     'z_F_bell', 'z_F_gate', 'z_F_coherence',
-    'delta_F_bell', 'delta_F_gate', 'delta_F_coherence',
-    'momentum_F_bell', 'momentum_F_gate', 'momentum_F_coherence'
+    'delta_F_bell', 'delta_F_gate',
+    'momentum_F_bell', 'momentum_F_gate',
 ]
 X = df[FEATURES].values
 y = df['drifted'].values

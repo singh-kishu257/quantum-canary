@@ -20,11 +20,11 @@ os.makedirs('figures', exist_ok=True)
 df = pd.read_csv('data/features_data.csv')
 with open('data/split_indices.json') as f:
     split = json.load(f)
-
+    
 FEATURES = [
     'z_F_bell', 'z_F_gate', 'z_F_coherence',
-    'delta_F_bell', 'delta_F_gate', 'delta_F_coherence',
-    'momentum_F_bell', 'momentum_F_gate', 'momentum_F_coherence'
+    'delta_F_bell', 'delta_F_gate',
+    'momentum_F_bell', 'momentum_F_gate',
 ]
 X = df[FEATURES].values
 y = df['drifted'].values
