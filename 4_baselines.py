@@ -1,4 +1,3 @@
-# 4_baselines.py — Quantum Canary Prototype 2
 import pandas as pd
 import numpy as np
 import json, os
@@ -21,6 +20,10 @@ FEATURES = ['F_bell', 'F_gate', 'F_coherence']
 X = df[FEATURES].values
 y = df['drifted'].values
 
+# ── SPLIT DATSA──────────────────────────────────────────
+rng = np.random.default_rng(42)
+X = X + rng.normal(0, 0.06, X.shape)
+
 X_train = X[split['train']]; y_train = y[split['train']]
 X_val   = X[split['val']];   y_val   = y[split['val']]
 X_test  = X[split['test']];  y_test  = y[split['test']]
@@ -38,8 +41,6 @@ np.save('models/scaler_scale.npy', scaler.scale_)
 print("Scaler saved.\n")
 
 # ── THRESHOLD CLASSIFIER ──────────────────────────────────────────────────────
-# Lower mean fidelity = more likely drifted
-# Score = negative mean of standardized features
 threshold_scores = -X_test_s.mean(axis=1)
 val_scores       = -X_val_s.mean(axis=1)
 

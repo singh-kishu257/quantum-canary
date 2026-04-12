@@ -2,62 +2,40 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # PHYSICS-INFORMED HYBRID DATASET CONSTRUCTION
 #
-# PROBLEM WITH IBM CALIBRATION DATA:
-#   IBM publishes calibration snapshots AFTER recalibration — hardware is at
-#   its best at snapshot time. Standard IBM data is dominated by healthy
-#   post-calibration states, with drift events visible only as statistical
-#   outliers relative to each qubit's own baseline.
+# DATASET DESIGN RATIONALE:
 #
-# SOLUTION — TWO-SOURCE HYBRID DATASET:
-#   Source 1 (sim_data.csv, 12,000 rows):
-#     Qiskit Aer simulation with physically grounded noise models drawn from
-#     IBM Heron r2 parameter distributions (Carroll 2022, ISCA 2025).
-#     Covers the mid-cycle drift regime that IBM calibration data cannot.
+#   Stable class  (label=0): 6,000 sim stable + 1,500 IBM extreme stable
+#     IBM stable rows anchor the model in real hardware behavior.
+#     The IBM stable outline tracks the simulation stable distribution
+#     almost perfectly — these rows genuinely teach "healthy real hardware."
 #
-#   Source 2 (all_backends_raw.csv, ~3,000 extreme rows):
-#     Real IBM calibration snapshots where drift is unambiguous — either
-#     clearly stable (hardware at peak) or clearly drifted (anomalous).
-#     Grey zone rows discarded. Analytical fidelity proxy formulas estimate
-#     what the canary circuits would have measured.
+#   Drifted class (label=1): 6,000 sim drifted ONLY
+#     IBM extreme drifted rows are NOT included in the drifted class.
+#     Reason: even rows with T1 drop >=35% produce fidelity values nearly
+#     identical to stable rows (IBM T1 baseline is so high that a 55% drop
+#     from 300us to 135us barely affects a 640ns circuit).
+#     Including them would contaminate the decision boundary the MLP needs
+#     to learn, adding noise rather than signal.
+#
+#   Result: 13,500 total rows, real hardware anchored on stable side,
+#     simulation covers the drift regime IBM calibration data cannot.
 #
 # LABELING PHYSICS:
+#   EXTREME STABLE (label=0) — ALL conditions:
+#     T1 within +-8% of 30-day rolling median
+#     CZ within +20% of rolling median (or missing)
+#     Readout within +20% of rolling median
 #
-#   EXTREME STABLE (label=0) — ALL THREE conditions must hold:
-#     T1 within ±8% of 30-day rolling median
-#     CZ error within +20% of rolling median (or missing)
-#     Readout error within +20% of rolling median
-#     → Hardware in healthy operational regime. All metrics within
-#       normal daily variation. Computations are reliable.
+#   EXTREME DRIFTED (IBM) — ANY condition (used for diagnostics only):
+#     T1 dropped >=35% (TLS spectral diffusion, Carroll et al. 2022)
+#     CZ rose >=100% (gate miscalibration, ISCA 2025)
+#     Readout rose >=50% (measurement chain degraded)
 #
-#   EXTREME DRIFTED (label=1) — ANY ONE condition sufficient:
-#     T1 dropped >=35% below rolling median
-#       ← TLS spectral diffusion event (Carroll et al. 2022:
-#          T1 fluctuations 30-50% from defect resonance)
-#     CZ error rose >=100% above median
-#       ← Gate severely miscalibrated (ISCA 2025: 2Q errors
-#          reach up to 5x between calibrations)
-#     Readout error rose >=50% above median
-#       ← Measurement chain degraded beyond reliable operation
-#     → Hardware has undergone a genuine drift event. Computational
-#       results are materially compromised.
-#
-#   GREY ZONE — discarded:
-#     Mild degradation in post-recalibration snapshots is ambiguous.
-#     Could be normal qubit-to-qubit variation, not true drift.
-#     Including it would inject noise into label assignments.
-#
-# WHY PERCENTAGE DEVIATION NOT Z-SCORES:
-#   Some qubits have very stable T1 over their 30-day window (near-zero std).
-#   Z-scores explode in this case. Percentage deviation is scale-invariant,
-#   physically interpretable, and robust to near-zero denominators.
-#
-# FIDELITY PROXY FORMULAS (updated for new circuit depths):
-#   F_bell:      H + CX   → t_circuit = t_sx + t_cz   (unchanged)
-#   F_coherence: H x20    → t_circuit = 20 x t_sx     (was 2 x t_sx)
-#   F_gate:      X x20    → t_circuit = 20 x t_x      (was 8 x t_x)
-#   These match the actual canary circuits in 1e_pull_data.py exactly.
-#   Using actual per-row gate durations from IBM calibration data.
-#   Reference: Escofet et al. 2025 (analytical depolarizing fidelity model)
+# FIDELITY PROXY FORMULAS (match actual canary circuits in 1e_pull_data.py):
+#   F_bell      : H + CX   = t_sx + t_cz ns
+#   F_coherence : H x 20   = 20 x t_sx ns
+#   F_gate      : X x 20   = 20 x t_x  ns
+#   Reference   : Escofet et al. 2025
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -81,23 +59,16 @@ print(f"  {len(df):,} rows | backends: {list(df['backend'].unique())}")
 print(f"  Date range: {df['timestamp'].min().date()} to {df['timestamp'].max().date()}\n")
 
 # ── 2. FILL MISSING GATE DURATIONS ───────────────────────────────────────────
-# Use actual per-row values from IBM. Only fall back for NaN.
-# ibm_fez: t_sx~24ns, ibm_kingston: t_sx~32ns, ibm_marrakesh: t_sx~36ns
 df['t_sx_ns'] = df['t_sx_ns'].fillna(30.0)
 df['t_x_ns']  = df['t_x_ns'].fillna(30.0)
 df['t_cz_ns'] = df['t_cz_ns'].fillna(75.0)
 df['x_error'] = df['x_error'].fillna(df['sx_error'])
-
-# Remove physically impossible CZ values (> 0.5 = measurement artifact)
 df.loc[df['cz_error'] > 0.5, 'cz_error'] = np.nan
 
 # ── 3. 30-DAY ROLLING BASELINE PER QUBIT ─────────────────────────────────────
-# Median not mean: median is robust to the outlier drift events themselves.
-# If a qubit has occasional TLS spikes, mean baseline would be pulled down,
-# making subsequent spikes harder to detect. Median is resistant to outliers.
-# min_periods=14: need 2 weeks of data before baseline is reliable.
-# shift(1): strict temporal causality — today never contaminates its own baseline.
-
+# Median: robust to outlier drift events in the time series.
+# shift(1): strict temporal causality.
+# min_periods=14: require 2 weeks of data before baseline is reliable.
 print("Computing 30-day rolling baselines (median, shift-1 causality)...")
 
 backend_col = df['backend'].values
@@ -106,8 +77,6 @@ qubit_col   = df['qubit_id'].values
 def add_rolling(group):
     group['T1_roll_med'] = group['T1_us'].rolling(
         window=30, min_periods=14).median().shift(1)
-    group['T1_roll_std'] = group['T1_us'].rolling(
-        window=30, min_periods=14).std().shift(1)
     group['CZ_roll_med'] = group['cz_error'].rolling(
         window=30, min_periods=14).median().shift(1)
     group['RO_roll_med'] = group['readout_error'].rolling(
@@ -118,11 +87,10 @@ df = df.groupby(['backend', 'qubit_id'], group_keys=False).apply(add_rolling)
 df = df.reset_index(drop=True)
 df['backend']  = backend_col
 df['qubit_id'] = qubit_col
-
 df = df.dropna(subset=['T1_roll_med', 'RO_roll_med']).reset_index(drop=True)
 print(f"  Rows with valid baselines: {len(df):,}\n")
 
-# ── 4. PERCENTAGE DEVIATIONS FROM BASELINE ───────────────────────────────────
+# ── 4. PERCENTAGE DEVIATIONS ──────────────────────────────────────────────────
 EPS = 1e-8
 
 df['pct_T1_drop'] = (
@@ -144,8 +112,8 @@ df['pct_RO_rise'] = (
     (df['readout_error'] - df['RO_roll_med']) / (df['RO_roll_med'] + EPS)
 ).clip(-1, 10)
 
-# ── 5. CLASSIFY INTO ZONES ────────────────────────────────────────────────────
-print("Classifying into extreme stable / extreme drifted / grey zone...")
+# ── 5. CLASSIFY IBM ZONES ────────────────────────────────────────────────────
+print("Classifying IBM rows into extreme stable / extreme drifted / grey zone...")
 
 def classify_zone(row):
     if pd.isna(row['T1_roll_med']) or row['T1_roll_med'] <= 0:
@@ -156,15 +124,15 @@ def classify_zone(row):
     ro_rise = row['pct_RO_rise']
     cz_rise = row['pct_CZ_rise']
 
-    # EXTREME DRIFTED — any single severe anomaly is sufficient
+    # Extreme drifted (for diagnostics — not used in training drifted class)
     if t1_drop >= 0.35:
-        return 'extreme_drifted'      # TLS event: T1 >=35% below baseline
+        return 'extreme_drifted'
     if not pd.isna(cz_rise) and cz_rise >= 1.00:
-        return 'extreme_drifted'      # Gate miscalibration: CZ doubled
+        return 'extreme_drifted'
     if ro_rise >= 0.50:
-        return 'extreme_drifted'      # Readout degraded >=50%
+        return 'extreme_drifted'
 
-    # EXTREME STABLE — all metrics must simultaneously be near baseline
+    # Extreme stable — all metrics simultaneously near baseline
     t1_ok = t1_dev <= 0.08
     ro_ok = ro_rise <= 0.20
     cz_ok = pd.isna(cz_rise) or (cz_rise <= 0.20)
@@ -174,34 +142,26 @@ def classify_zone(row):
     return 'grey'
 
 df['zone'] = df.apply(classify_zone, axis=1)
-
 zone_counts = df['zone'].value_counts()
 print(f"  Extreme stable  : {zone_counts.get('extreme_stable',  0):,}")
-print(f"  Extreme drifted : {zone_counts.get('extreme_drifted', 0):,}")
+print(f"  Extreme drifted : {zone_counts.get('extreme_drifted', 0):,} (diagnostics only — not in training drifted class)")
 print(f"  Grey zone       : {zone_counts.get('grey', 0):,} (discarded)\n")
 
 # ── 6. ANALYTICAL FIDELITY PROXY FORMULAS ────────────────────────────────────
-# Estimates what the 3 canary circuits would have measured on this hardware.
-# CRITICAL: Circuit depths match 1e_pull_data.py exactly:
-#   F_coherence: 20 H gates x t_sx (not 2 x t_sx as in older versions)
-#   F_gate:      20 X gates x t_x  (not 8 x t_x)
-# Using actual per-row gate durations from the IBM calibration record.
-
 print("Computing analytical fidelity proxy formulas...")
-print("  F_bell      : H + CX   = t_sx + t_cz ns (per-row gate times)")
-print("  F_coherence : H x 20   = 20 x t_sx ns")
-print("  F_gate      : X x 20   = 20 x t_x  ns")
+print("  F_bell      : H + CX  = t_sx + t_cz ns")
+print("  F_coherence : H x 20  = 20 x t_sx ns")
+print("  F_gate      : X x 20  = 20 x t_x  ns")
 
 T2_ns      = (df['T2_us'] * 1e3).replace(0, np.nan)
 T1_us_safe = df['T1_us'].replace(0, np.nan).fillna(df['T1_us'].median())
 T1_ns      = T1_us_safe * 1e3
 T2_ns      = T2_ns.fillna(T1_ns * 0.9)
-T2_ns      = T2_ns.clip(upper=2.0 * T1_ns)   # Physical: T2 <= 2*T1
+T2_ns      = T2_ns.clip(upper=2.0 * T1_ns)
 T2_ns      = T2_ns.replace(0, np.nan).fillna(T1_ns * 0.9)
 
 cz = df['cz_error'].fillna(df['sx_error'])
 
-# Bell state: H(q0), CX(q0->q1), measure
 t_bell = df['t_sx_ns'] + df['t_cz_ns']
 df['F_bell'] = (
     (1 - df['sx_error']) *
@@ -211,7 +171,6 @@ df['F_bell'] = (
     np.exp(-t_bell / T2_ns)
 ).clip(0, 1)
 
-# Coherence: H x 20 (identity) — maximally sensitive to T2
 t_coh = 20.0 * df['t_sx_ns']
 df['F_coherence'] = (
     (1 - df['sx_error'])**20 *
@@ -219,7 +178,6 @@ df['F_coherence'] = (
     0.5 * (1 + np.exp(-t_coh / T1_ns) * np.exp(-t_coh / T2_ns))
 ).clip(0, 1)
 
-# Gate error: X x 20 (identity) — error amplification
 t_gate = 20.0 * df['t_x_ns']
 df['F_gate'] = (
     (1 - df['x_error'])**20 *
@@ -228,37 +186,28 @@ df['F_gate'] = (
     np.exp(-t_gate / T2_ns)
 ).clip(0, 1)
 
-print(f"\n  IBM fidelity means by zone:")
-print(df.groupby('zone')[['F_bell','F_coherence','F_gate']].mean().round(4))
+# ── 7. EXTRACT EXTREME IBM STABLE ROWS ONLY ───────────────────────────────────
+# Only stable rows are used in training.
+# Drifted IBM rows are saved for reference/diagnostics but NOT added to
+# the training drifted class — their fidelity values overlap too heavily
+# with stable rows to help the MLP learn the drift boundary.
 
-# ── 7. EXTRACT EXTREME IBM ROWS ───────────────────────────────────────────────
-# Sort by unambiguity: stable = closest to baseline first,
-# drifted = most extreme T1 drops first (clearest TLS events)
-
-N_IBM_MAX = 1500
+N_IBM_STABLE = 1500
 
 ibm_stable_df  = df[df['zone'] == 'extreme_stable'].copy()
-ibm_drifted_df = df[df['zone'] == 'extreme_drifted'].copy()
+ibm_stable_sel = ibm_stable_df.sort_values(
+    'pct_T1_dev', ascending=True).head(N_IBM_STABLE).copy()
+ibm_stable_sel['drifted'] = 0
 
-ibm_stable_sel  = ibm_stable_df.sort_values(
-    'pct_T1_dev', ascending=True).head(N_IBM_MAX).copy()
-ibm_drifted_sel = ibm_drifted_df.sort_values(
-    'pct_T1_drop', ascending=False).head(N_IBM_MAX).copy()
-
-ibm_stable_sel['drifted']  = 0
-ibm_drifted_sel['drifted'] = 1
-
-print(f"\nExtreme IBM rows selected:")
-print(f"  Stable  (label=0): {len(ibm_stable_sel):,}")
-print(f"  Drifted (label=1): {len(ibm_drifted_sel):,}")
-print(f"\n  IBM stable fidelity means:")
+print(f"\nExtreme IBM stable rows selected: {len(ibm_stable_sel):,}")
+print(f"  IBM stable fidelity means:")
 print(ibm_stable_sel[['F_bell','F_coherence','F_gate']].mean().round(4))
-print(f"\n  IBM drifted fidelity means:")
-print(ibm_drifted_sel[['F_bell','F_coherence','F_gate']].mean().round(4))
-print(f"\n  IBM drifted T1 drop distribution:")
-print(ibm_drifted_sel['pct_T1_drop'].describe().round(3))
+print(f"\n  Note: IBM drifted rows NOT included in training drifted class.")
+print(f"  Reason: IBM T1 baseline so high that even 55% T1 drops produce")
+print(f"  fidelity values indistinguishable from stable hardware.")
+print(f"  Simulation drifted data covers this regime accurately.")
 
-# Save labeled IBM file for reference
+# Save full labeled IBM file for reference
 full_cols = ['timestamp', 'backend', 'qubit_id', 'T1_us', 'T2_us',
              'sx_error', 'x_error', 'cz_error', 'readout_error',
              't_sx_ns', 't_x_ns', 't_cz_ns',
@@ -277,23 +226,29 @@ print(f"  Sim fidelity means by class:")
 print(sim_clean.groupby('drifted')[['F_bell','F_coherence','F_gate']].mean().round(4))
 
 # ── 9. COMBINE ────────────────────────────────────────────────────────────────
-ibm_feat = ['F_bell', 'F_coherence', 'F_gate', 'drifted']
-ibm_combined = pd.concat(
-    [ibm_stable_sel[ibm_feat], ibm_drifted_sel[ibm_feat]],
+# Stable class:  sim stable (6,000) + IBM stable (1,500) = 7,500
+# Drifted class: sim drifted (6,000) only
+# Total: 13,500 rows
+
+ibm_feat     = ['F_bell', 'F_coherence', 'F_gate', 'drifted']
+combined     = pd.concat(
+    [sim_clean, ibm_stable_sel[ibm_feat]],
     ignore_index=True
 )
-combined = pd.concat([sim_clean, ibm_combined], ignore_index=True)
 combined = combined.sample(frac=1, random_state=42).reset_index(drop=True)
 
+n_stable  = (combined['drifted'] == 0).sum()
+n_drifted = (combined['drifted'] == 1).sum()
 drift_rate = round(combined['drifted'].mean() * 100, 1)
 
 print(f"\nCombined dataset:")
-print(f"  Simulation rows  : {len(sim_clean):,}")
-print(f"  Extreme IBM rows : {len(ibm_combined):,}")
-print(f"  Total            : {len(combined):,}")
-print(f"  Stable  (0)      : {(combined['drifted']==0).sum():,}")
-print(f"  Drifted (1)      : {(combined['drifted']==1).sum():,}")
-print(f"  Drift rate       : {drift_rate}%")
+print(f"  Sim stable    : 6,000  (simulation)")
+print(f"  IBM stable    : {len(ibm_stable_sel):,}  (real hardware anchor)")
+print(f"  Sim drifted   : 6,000  (simulation — IBM drifted excluded)")
+print(f"  Total         : {len(combined):,}")
+print(f"  Stable  (0)   : {n_stable:,}")
+print(f"  Drifted (1)   : {n_drifted:,}")
+print(f"  Drift rate    : {drift_rate}%")
 
 print(f"\n  Combined fidelity means by class:")
 print(combined.groupby('drifted')[['F_bell','F_coherence','F_gate']].mean().round(4))
@@ -309,6 +264,12 @@ print(f"\n  Class separation (stable - drifted):")
 print(f"    F_bell      : {sep_bell:.4f}")
 print(f"    F_coherence : {sep_coh:.4f}")
 print(f"    F_gate      : {sep_gate:.4f}")
+
+min_sep = min(sep_bell, sep_coh, sep_gate)
+if min_sep >= 0.05:
+    print(f"\n  GOOD: all features show >=0.05 separation. Proceed.")
+else:
+    print(f"\n  WARNING: separation below 0.05 on some features.")
 
 # ── 10. SAVE ──────────────────────────────────────────────────────────────────
 combined[['F_bell', 'F_coherence', 'F_gate', 'drifted']].to_csv(
@@ -369,12 +330,12 @@ drift_dates  = fd[fd['zone']=='extreme_drifted']['timestamp']
 stable_dates = fd[fd['zone']=='extreme_stable']['timestamp']
 if len(drift_dates) > 0:
     ax.axvline(drift_dates.iloc[0], color='crimson', alpha=0.8, lw=0.8,
-               label=f'Extreme drift (n={len(drift_dates)})')
+               label=f'Extreme drift events (n={len(drift_dates)})')
 if len(stable_dates) > 0:
     ax.axvline(stable_dates.iloc[0], color='steelblue', alpha=0.4, lw=0.8,
-               label=f'Extreme stable (n={len(stable_dates)})')
+               label=f'Extreme stable events (n={len(stable_dates)})')
 ax.set_title(f'Qubit stability — {fig1_backend} qubit {fig1_qubit}\n'
-             f'Grey zone discarded · extreme events only kept',
+             f'IBM stable rows anchor training · grey zone discarded',
              fontsize=9, fontweight='bold')
 ax.set_xlabel('Date', fontsize=9); ax.set_ylabel('T1 (µs)', fontsize=9)
 ax.legend(fontsize=7); ax.grid(alpha=0.3)
@@ -391,24 +352,21 @@ s_sim = sim_clean[sim_clean['drifted']==0]
 d_sim = sim_clean[sim_clean['drifted']==1]
 
 for ax, feat, lab in zip(axes, feats, flabs):
-    all_vals = pd.concat([s_sim[feat], d_sim[feat],
-                          ibm_stable_sel[feat], ibm_drifted_sel[feat]])
+    all_vals = pd.concat([s_sim[feat], d_sim[feat], ibm_stable_sel[feat]])
     bins = np.linspace(all_vals.quantile(0.01), all_vals.quantile(0.99), 55)
     ax.hist(s_sim[feat], bins=bins, alpha=0.5, color='steelblue',
             label=f'Sim stable (n={len(s_sim):,})', density=True)
     ax.hist(d_sim[feat], bins=bins, alpha=0.5, color='crimson',
             label=f'Sim drifted (n={len(d_sim):,})', density=True)
-    ax.hist(ibm_stable_sel[feat], bins=bins, alpha=0.5, color='navy',
-            label=f'IBM stable (n={len(ibm_stable_sel):,})',
-            density=True, histtype='step', linewidth=2)
-    ax.hist(ibm_drifted_sel[feat], bins=bins, alpha=0.5, color='darkred',
-            label=f'IBM drifted (n={len(ibm_drifted_sel):,})',
+    ax.hist(ibm_stable_sel[feat], bins=bins, alpha=0.6, color='navy',
+            label=f'IBM stable anchor (n={len(ibm_stable_sel):,})',
             density=True, histtype='step', linewidth=2)
     ax.set_title(lab, fontsize=10, fontweight='bold')
     ax.set_xlabel('Fidelity', fontsize=9); ax.set_ylabel('Density', fontsize=9)
-    ax.legend(fontsize=6); ax.grid(alpha=0.3)
-plt.suptitle('Canary circuit fidelity distributions\n'
-             'Simulation (filled) + extreme IBM snapshots (outline)',
+    ax.legend(fontsize=7); ax.grid(alpha=0.3)
+
+plt.suptitle('Training data fidelity distributions\n'
+             'Sim drifted (red) vs sim+IBM stable (blue) · IBM anchors real hardware behavior',
              fontsize=10, fontweight='bold', y=1.02)
 plt.tight_layout()
 plt.savefig('figures/fig_feature_distributions.png', dpi=300, bbox_inches='tight')
@@ -419,18 +377,17 @@ print("  ✓ figures/fig_feature_distributions.png")
 print(f"\n{'='*60}")
 print(f"  LABELING COMPLETE")
 print(f"{'='*60}")
-print(f"  Simulation rows      : {len(sim_clean):,}")
-print(f"  Extreme IBM stable   : {len(ibm_stable_sel):,}")
-print(f"  Extreme IBM drifted  : {len(ibm_drifted_sel):,}")
-print(f"  Grey zone discarded  : {zone_counts.get('grey', 0):,}")
-print(f"  Total training rows  : {len(combined):,}")
-print(f"  Drift rate           : {drift_rate}%")
+print(f"  Sim stable         : 6,000")
+print(f"  IBM stable anchor  : {len(ibm_stable_sel):,}  ← real hardware grounding")
+print(f"  Sim drifted        : 6,000  ← IBM drifted excluded (no boundary signal)")
+print(f"  Grey zone          : {zone_counts.get('grey', 0):,}  discarded")
+print(f"  Total              : {len(combined):,}")
+print(f"  Drift rate         : {drift_rate}%")
+print(f"\n  Class separation:")
+print(f"    F_bell      : {sep_bell:.4f}")
+print(f"    F_coherence : {sep_coh:.4f}")
+print(f"    F_gate      : {sep_gate:.4f}")
 print(f"\n  Labeling physics:")
 print(f"    Stable  : T1 within +-8% AND CZ/readout within +20% of 30d median")
-print(f"    Drifted : T1 drop >=35% (TLS) OR CZ rise >=100% OR readout rise >=50%")
-print(f"    Refs    : Carroll et al. 2022 · ISCA 2025")
-print(f"\n  Fidelity formula circuit depths:")
-print(f"    F_bell      : H + CX  = t_sx + t_cz ns (actual per-row gate times)")
-print(f"    F_coherence : H x 20  = 20 x t_sx ns")
-print(f"    F_gate      : X x 20  = 20 x t_x  ns")
-print(f"    Ref         : Escofet et al. 2025")
+print(f"    Drifted : T1 drop >=35% (TLS) OR CZ >=100% OR readout >=50%")
+print(f"    Refs    : Carroll et al. 2022 · ISCA 2025 · Escofet et al. 2025")
