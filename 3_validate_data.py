@@ -15,7 +15,14 @@ print("Loading data/features_data.csv ...")
 df = pd.read_csv('data/features_data.csv')
 print(f"  {len(df):,} rows\n")
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
+FEATURES = [
+    'z_F_bell', 'z_F_gate', 'z_F_coherence',
+    'delta_F_bell', 'delta_F_gate', 'delta_F_coherence',
+    'momentum_F_bell', 'momentum_F_gate', 'momentum_F_coherence',
+    'rel_t1_drop', 'rel_cz_rise', 'rel_ro_rise',
+    'log_t1_us', 'log_t2_us',
+    'sx_error_clipped', 'cz_error_clipped', 'ro_error_clipped'
+]
 
 # ── 2. CLASS BALANCE ──────────────────────────────────────────────────────────
 drift_count  = int(df['drifted'].sum())
@@ -49,11 +56,20 @@ else:
     print(missing)
 
 # ── 5. RANGE CHECK ────────────────────────────────────────────────────────────
-print("\n── Range Check (all values should be 0–1) ──")
+print("\n── Range Check (feature-family specific bounds) ──")
 for f in FEATURES:
     lo = df[f].min()
     hi = df[f].max()
-    ok = "✓" if lo >= 0 and hi <= 1 else "WARNING"
+    if f.startswith('z_'):
+        ok = "✓" if lo >= -5 and hi <= 5 else "WARNING"
+    elif f.startswith('rel_'):
+        ok = "✓" if lo >= -1 and hi <= 3 else "WARNING"
+    elif f.startswith('log_'):
+        ok = "✓" if lo >= 0 else "WARNING"
+    elif f.endswith('_clipped'):
+        ok = "✓" if lo >= 0 and hi <= 1 else "WARNING"
+    else:
+        ok = "✓" if lo >= -1 and hi <= 1 else "WARNING"
     print(f"  {f}: [{lo:.6f}, {hi:.6f}]  {ok}")
 
 # ── 6. SPLIT VERIFICATION ─────────────────────────────────────────────────────
@@ -68,18 +84,19 @@ for name, idx in split.items():
 
 # ── 7. FIGURE: CORRELATION MATRIX ────────────────────────────────────────────
 print("\nGenerating Figure: Feature Correlation Matrix...")
-corr = df[FEATURES + ['drifted']].corr()
+corr_cols = FEATURES + ['drifted']
+corr = df[corr_cols].corr()
 
-fig, ax = plt.subplots(figsize=(5, 4))
-im = ax.imshow(corr, cmap='coolwarm', vmin=-1, vmax=1)
+fig, ax = plt.subplots(figsize=(9, 7))
+im = ax.imshow(corr.values, cmap='coolwarm', vmin=-1, vmax=1)
 plt.colorbar(im, ax=ax)
-labels = ['F_bell', 'F_gate', 'F_coh', 'Drifted']
-ax.set_xticks(range(4)); ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
-ax.set_yticks(range(4)); ax.set_yticklabels(labels, fontsize=9)
-for i in range(4):
-    for j in range(4):
+labels = corr_cols
+ax.set_xticks(range(len(labels))); ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
+ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels, fontsize=8)
+for i in range(len(labels)):
+    for j in range(len(labels)):
         ax.text(j, i, f'{corr.iloc[i,j]:.2f}',
-                ha='center', va='center', fontsize=9,
+                ha='center', va='center', fontsize=7,
                 color='white' if abs(corr.iloc[i,j]) > 0.5 else 'black')
 ax.set_title('Feature Correlation Matrix', fontsize=11, fontweight='bold')
 plt.tight_layout()

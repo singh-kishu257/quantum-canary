@@ -1,6 +1,6 @@
 # 5_train_mlp.py — Quantum Canary Prototype 2
-# Trains a 10-model MLP ensemble on F_bell, F_gate, F_coherence.
-# Architecture: 3 → 16 → 8 → 1 (sigmoid), 10 seeds, early stopping.
+# Trains a 10-model MLP ensemble on engineered canary temporal features.
+# Architecture: D → 64 → 32 → 16 → 1 (sigmoid), 10 seeds, early stopping.
 
 import pandas as pd
 import numpy as np
@@ -19,7 +19,14 @@ df = pd.read_csv('data/features_data.csv')
 with open('data/split_indices.json') as f:
     split = json.load(f)
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
+FEATURES = [
+    'z_F_bell', 'z_F_gate', 'z_F_coherence',
+    'delta_F_bell', 'delta_F_gate', 'delta_F_coherence',
+    'momentum_F_bell', 'momentum_F_gate', 'momentum_F_coherence',
+    'rel_t1_drop', 'rel_cz_rise', 'rel_ro_rise',
+    'log_t1_us', 'log_t2_us',
+    'sx_error_clipped', 'cz_error_clipped', 'ro_error_clipped'
+]
 X = df[FEATURES].values
 y = df['drifted'].values
 
@@ -46,12 +53,18 @@ def build_mlp(seed):
     tf.random.set_seed(seed)
     np.random.seed(seed)
     model = keras.Sequential([
-        keras.layers.Input(shape=(3,)),
-        keras.layers.Dense(16, activation='relu'),
-        keras.layers.Dense(8,  activation='relu'),
+        keras.layers.Input(shape=(len(FEATURES),)),
+        keras.layers.Dense(128, activation='relu'),
+        keras.layers.BatchNormalization(),
+        keras.layers.Dropout(0.30),
+        keras.layers.Dense(64, activation='relu'),
+        keras.layers.BatchNormalization(),
+        keras.layers.Dropout(0.20),
+        keras.layers.Dropout(0.15),
+        keras.layers.Dense(32, activation='relu'),
         keras.layers.Dense(1,  activation='sigmoid'),
     ])
-    model.compile(optimizer='adam',
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=5e-4),
                   loss='binary_crossentropy',
                   metrics=['accuracy', keras.metrics.AUC(name='auc')])
     return model
@@ -68,15 +81,18 @@ print("Training 10 MLP models...\n")
 for seed in range(10):
     model = build_mlp(seed)
     early_stop = keras.callbacks.EarlyStopping(
-        monitor='val_loss', patience=15,
+        monitor='val_auc', mode='max', patience=20,
         restore_best_weights=True, verbose=0)
+    reduce_lr = keras.callbacks.ReduceLROnPlateau(
+        monitor='val_auc', mode='max', factor=0.5, patience=6, min_lr=1e-6, verbose=0
+    )
 
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=150, batch_size=32,
+        epochs=220, batch_size=64,
         class_weight=class_weight,
-        callbacks=[early_stop],
+        callbacks=[early_stop, reduce_lr],
         verbose=0
     )
 
@@ -103,9 +119,11 @@ print(f"Std seed AUC     : {round(np.std(val_aucs),  4)}")
 # Load baseline
 with open('results/baseline_results.json') as f:
     baseline = json.load(f)
-thresh_auc  = baseline['threshold_classifier']['auc']
-improvement = round((ensemble_val_auc - thresh_auc) / abs(thresh_auc) * 100, 1)
-print(f"Threshold AUC    : {thresh_auc}")
+threshold_auc = baseline['threshold_classifier']['auc']
+logreg_auc = baseline.get('logistic_regression', {}).get('auc', threshold_auc)
+improvement = round((ensemble_val_auc - threshold_auc) / abs(threshold_auc) * 100, 1)
+print(f"Threshold AUC    : {threshold_auc}")
+print(f"LogReg AUC       : {logreg_auc}")
 print(f"Improvement      : {improvement}%")
 
 # ── 7. FIGURE 1: Val Loss all 10 seeds overlaid on one plot ──────────────────
@@ -154,8 +172,9 @@ np.save('results/val_aucs.npy', np.array(val_aucs))
 print(f"\n{'='*45}")
 print(f"  TRAINING COMPLETE")
 print(f"  Ensemble Val AUC : {ensemble_val_auc}")
-print(f"  Threshold AUC    : {thresh_auc}")
+print(f"  Threshold AUC    : {threshold_auc}")
 print(f"  Improvement      : {improvement}%")
+print(f"  Target checks    : AUC>0.90? {'YES' if ensemble_val_auc > 0.90 else 'NO'} | "
+      f"Improvement>=20%? {'YES' if improvement >= 20 else 'NO'}")
 print(f"{'='*45}")
 print(f"\n  NEXT: python 6_evaluate.py")
-

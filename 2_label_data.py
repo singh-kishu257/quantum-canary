@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+from sklearn.model_selection import train_test_split
 import json, os
 
 os.makedirs('data', exist_ok=True)
@@ -33,9 +34,11 @@ backend_col = df['backend'].values
 qubit_col   = df['qubit_id'].values
 
 def add_rolling(group):
-    group['T1_rolling_mean'] = group['T1_us'].rolling(window=7, min_periods=3).mean()
-    group['cz_rolling_mean'] = group['cz_error'].rolling(window=7, min_periods=3).mean()
-    group['ro_rolling_mean'] = group['readout_error'].rolling(window=7, min_periods=3).mean()
+    # IMPORTANT: shift(1) to avoid using today's value in its own baseline.
+    # This preserves strict temporal causality for labels/features.
+    group['T1_rolling_mean'] = group['T1_us'].rolling(window=7, min_periods=3).mean().shift(1)
+    group['cz_rolling_mean'] = group['cz_error'].rolling(window=7, min_periods=3).mean().shift(1)
+    group['ro_rolling_mean'] = group['readout_error'].rolling(window=7, min_periods=3).mean().shift(1)
     return group
 
 df = df.groupby(['backend','qubit_id'], group_keys=False).apply(add_rolling)
@@ -131,8 +134,9 @@ qubit_col   = df['qubit_id'].values
 
 def add_fidelity_rolling(group):
     for feat in ['F_bell', 'F_gate', 'F_coherence']:
-        group[f'{feat}_roll_mean'] = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).mean()
-        group[f'{feat}_roll_std']  = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).std()
+        group[f'{feat}_roll_mean'] = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).mean().shift(1)
+        group[f'{feat}_roll_std']  = group[feat].rolling(ROLL_WINDOW, min_periods=MIN_PERIODS).std().shift(1)
+        group[f'{feat}_lag1']      = group[feat].shift(1)
     return group
 
 df = df.groupby(['backend','qubit_id'], group_keys=False).apply(add_fidelity_rolling)
@@ -148,6 +152,36 @@ for feat in ['F_bell', 'F_gate', 'F_coherence']:
         (df[f'{feat}_roll_std'] + EPS)
     ).clip(-5, 5).fillna(0)
 
+# Additional temporal features (still independent from label rules):
+# 1) %-change vs 7-day baseline and 2) one-step momentum.
+for feat in ['F_bell', 'F_gate', 'F_coherence']:
+    df[f'delta_{feat}'] = (
+        (df[feat] - df[f'{feat}_roll_mean']) / (df[f'{feat}_roll_mean'] + EPS)
+    ).clip(-1, 1).fillna(0)
+    df[f'momentum_{feat}'] = (
+        (df[feat] - df[f'{feat}_lag1']) / (df[f'{feat}_lag1'] + EPS)
+    ).clip(-1, 1).fillna(0)
+
+# Label-aligned physical telemetry features (still computed causally with shift(1) baselines)
+# These preserve the labeling method but give the model direct access to calibration drift cues.
+cz_safe = df['cz_error'].fillna(df['cz_rolling_mean'])
+df['rel_t1_drop'] = (
+    (df['T1_rolling_mean'] - df['T1_us']) / (df['T1_rolling_mean'] + EPS)
+).clip(-1, 1).fillna(0)
+df['rel_cz_rise'] = (
+    (cz_safe - df['cz_rolling_mean']) / (df['cz_rolling_mean'] + EPS)
+).clip(-1, 3).fillna(0)
+df['rel_ro_rise'] = (
+    (df['readout_error'] - df['ro_rolling_mean']) / (df['ro_rolling_mean'] + EPS)
+).clip(-1, 3).fillna(0)
+
+# Absolute health indicators.
+df['log_t1_us'] = np.log1p(df['T1_us'].clip(lower=0)).fillna(0)
+df['log_t2_us'] = np.log1p(df['T2_us'].clip(lower=0)).fillna(0)
+df['sx_error_clipped'] = df['sx_error'].clip(0, 1).fillna(df['sx_error'].median())
+df['cz_error_clipped'] = df['cz_error'].clip(0, 1).fillna(df['cz_error'].median())
+df['ro_error_clipped'] = df['readout_error'].clip(0, 1).fillna(df['readout_error'].median())
+
 print(f"  z_F_bell      mean={df['z_F_bell'].mean():.4f}  std={df['z_F_bell'].std():.4f}")
 print(f"  z_F_gate      mean={df['z_F_gate'].mean():.4f}  std={df['z_F_gate'].std():.4f}")
 print(f"  z_F_coherence mean={df['z_F_coherence'].mean():.4f}  std={df['z_F_coherence'].std():.4f}\n")
@@ -161,19 +195,35 @@ full_cols = ['timestamp','backend','qubit_id','T1_us','T2_us',
 df[full_cols].to_csv('data/ibm_calibration_labeled.csv', index=False)
 print("  ✓ Saved data/ibm_calibration_labeled.csv")
 
-feat_df = df[['z_F_bell','z_F_gate','z_F_coherence','drifted']].copy()
+feature_columns = [
+    'z_F_bell', 'z_F_gate', 'z_F_coherence',
+    'delta_F_bell', 'delta_F_gate', 'delta_F_coherence',
+    'momentum_F_bell', 'momentum_F_gate', 'momentum_F_coherence',
+    'rel_t1_drop', 'rel_cz_rise', 'rel_ro_rise',
+    'log_t1_us', 'log_t2_us',
+    'sx_error_clipped', 'cz_error_clipped', 'ro_error_clipped'
+]
+feat_df = df[feature_columns + ['drifted']].copy()
 feat_df.to_csv('data/features_data.csv', index=False)
 print("  ✓ Saved data/features_data.csv")
 
-n      = len(feat_df)
-i_val  = int(n * 0.70)
-i_test = int(n * 0.85)
-split  = {"train": list(range(0, i_val)),
-          "val":   list(range(i_val, i_test)),
-          "test":  list(range(i_test, n))}
+# Stratified random split (70/15/15) generally improves stability vs sequential split.
+all_idx = np.arange(len(feat_df))
+y_all = feat_df['drifted'].values
+train_idx, temp_idx = train_test_split(
+    all_idx, test_size=0.30, stratify=y_all, random_state=42
+)
+val_idx, test_idx = train_test_split(
+    temp_idx, test_size=0.50, stratify=y_all[temp_idx], random_state=42
+)
+split = {
+    "train": sorted(train_idx.tolist()),
+    "val": sorted(val_idx.tolist()),
+    "test": sorted(test_idx.tolist())
+}
 with open('data/split_indices.json','w') as f:
     json.dump(split, f)
-print(f"  Train: {i_val:,} | Val: {i_test-i_val:,} | Test: {n-i_test:,}\n")
+print(f"  Train: {len(split['train']):,} | Val: {len(split['val']):,} | Test: {len(split['test']):,}\n")
 
 # ── 7. FIGURE 1: T1 over time with drift markers ──────────────────────────────
 print("Generating Figure 1: Qubit Stability...")
@@ -251,5 +301,5 @@ print(f"  Total rows  : {len(df):,}")
 print(f"  Drift (1)   : {drift_count:,} ({drift_pct}%)")
 print(f"  Stable (0)  : {stable_count:,} ({100-drift_pct}%)")
 print(f"  Thresholds  : T1 drop >=7% | CZ doubles | Readout rise >=5%")
-print(f"  Features    : z_F_bell, z_F_gate, z_F_coherence (rolling z-scores)")
+print(f"  Features    : z-score + delta + momentum for F_bell/F_gate/F_coherence")
 print(f"\n  NEXT: python 3_validate_data.py")

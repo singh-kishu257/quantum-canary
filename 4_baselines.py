@@ -11,6 +11,7 @@ from sklearn.metrics import (accuracy_score, precision_score, recall_score,
                              f1_score, roc_auc_score, roc_curve,
                              confusion_matrix, ConfusionMatrixDisplay)
 from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
 
 os.makedirs('results', exist_ok=True)
 os.makedirs('figures', exist_ok=True)
@@ -20,7 +21,14 @@ df = pd.read_csv('data/features_data.csv')
 with open('data/split_indices.json') as f:
     split = json.load(f)
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
+FEATURES = [
+    'z_F_bell', 'z_F_gate', 'z_F_coherence',
+    'delta_F_bell', 'delta_F_gate', 'delta_F_coherence',
+    'momentum_F_bell', 'momentum_F_gate', 'momentum_F_coherence',
+    'rel_t1_drop', 'rel_cz_rise', 'rel_ro_rise',
+    'log_t1_us', 'log_t2_us',
+    'sx_error_clipped', 'cz_error_clipped', 'ro_error_clipped'
+]
 X = df[FEATURES].values
 y = df['drifted'].values
 
@@ -42,21 +50,21 @@ np.save('models/scaler_scale.npy', scaler.scale_)
 print("Scaler saved.\n")
 
 # ── 3. THRESHOLD CLASSIFIER ───────────────────────────────────────────────────
-# Predicts drifted=1 if the mean of the 3 standardized features < 0
-# (i.e. below the training mean). Simple, interpretable baseline.
+# Predicts drifted=1 if the mean of standardized features < threshold.
+# Simple, interpretable baseline.
 # Score = negative mean of features (higher = more likely drifted)
 threshold_scores = -X_test.mean(axis=1)
 
 # Find best threshold on validation set
 val_scores = -X_val.mean(axis=1)
-best_thresh, best_auc = 0.0, 0.0
+best_thresh, best_f1 = 0.0, -1.0
 for t in np.linspace(val_scores.min(), val_scores.max(), 200):
     preds = (val_scores >= t).astype(int)
     if len(np.unique(preds)) < 2:
         continue
-    auc = roc_auc_score(y_val, val_scores)
-    if auc > best_auc:
-        best_auc = auc
+    f1 = f1_score(y_val, preds, zero_division=0)
+    if f1 > best_f1:
+        best_f1 = f1
         best_thresh = t
 
 thresh_preds = (threshold_scores >= best_thresh).astype(int)
@@ -76,18 +84,43 @@ print("── Threshold Classifier (Test Set) ──")
 for k, v in thresh_metrics.items():
     print(f"  {k:10s}: {v}")
 
+# ── 4. LOGISTIC REGRESSION BASELINE ──────────────────────────────────────────
+logreg = LogisticRegression(
+    class_weight='balanced',
+    max_iter=2000,
+    random_state=42
+)
+logreg.fit(X_train, y_train)
+logreg_scores = logreg.predict_proba(X_test)[:, 1]
+logreg_preds = (logreg_scores >= 0.5).astype(int)
+logreg_metrics = metrics(y_test, logreg_preds, logreg_scores)
+
+print("\n── Logistic Regression (Test Set) ──")
+for k, v in logreg_metrics.items():
+    print(f"  {k:10s}: {v}")
+
 # Save results
 with open('results/baseline_results.json', 'w') as f:
-    json.dump({'threshold_classifier': thresh_metrics}, f, indent=2)
+    json.dump(
+        {
+            'threshold_classifier': thresh_metrics,
+            'logistic_regression': logreg_metrics
+        },
+        f,
+        indent=2
+    )
 print("\n  ✓ Saved results/baseline_results.json")
 
-# ── 4. FIGURE: ROC CURVE ──────────────────────────────────────────────────────
+# ── 5. FIGURE: ROC CURVE ──────────────────────────────────────────────────────
 print("\nGenerating Baseline ROC curve...")
 fpr, tpr, _ = roc_curve(y_test, threshold_scores)
+fpr_lr, tpr_lr, _ = roc_curve(y_test, logreg_scores)
 
 fig, ax = plt.subplots(figsize=(5, 5))
 ax.plot(fpr, tpr, color='darkorange', lw=2,
         label=f'Threshold Classifier (AUC={thresh_metrics["auc"]})')
+ax.plot(fpr_lr, tpr_lr, color='steelblue', lw=2,
+        label=f'Logistic Regression (AUC={logreg_metrics["auc"]})')
 ax.plot([0,1],[0,1], 'k--', lw=1, label='Random (AUC=0.5)')
 ax.set_xlabel('False Positive Rate', fontsize=10)
 ax.set_ylabel('True Positive Rate', fontsize=10)
@@ -103,5 +136,6 @@ print("  ✓ figures/fig_baseline_roc.png")
 print(f"\n{'='*45}")
 print(f"  BASELINE COMPLETE")
 print(f"  Threshold AUC: {thresh_metrics['auc']}")
+print(f"  Logistic AUC : {logreg_metrics['auc']}")
 print(f"  MLP must beat this.")
 print(f"{'='*45}")

@@ -21,7 +21,14 @@ with open('data/split_indices.json') as f:
 with open('results/baseline_results.json') as f:
     baseline = json.load(f)
 
-FEATURES = ['z_F_bell', 'z_F_gate', 'z_F_coherence']
+FEATURES = [
+    'z_F_bell', 'z_F_gate', 'z_F_coherence',
+    'delta_F_bell', 'delta_F_gate', 'delta_F_coherence',
+    'momentum_F_bell', 'momentum_F_gate', 'momentum_F_coherence',
+    'rel_t1_drop', 'rel_cz_rise', 'rel_ro_rise',
+    'log_t1_us', 'log_t2_us',
+    'sx_error_clipped', 'cz_error_clipped', 'ro_error_clipped'
+]
 X = df[FEATURES].values
 y = df['drifted'].values
 
@@ -51,8 +58,9 @@ precision = round(precision_score(y_test, ensemble_labels, zero_division=0), 4)
 recall    = round(recall_score(y_test, ensemble_labels, zero_division=0), 4)
 f1        = round(f1_score(y_test, ensemble_labels, zero_division=0), 4)
 
-thresh_auc = baseline['threshold_classifier']['auc']
-improvement = round((auc - thresh_auc) / abs(thresh_auc) * 100, 1)
+threshold_auc = baseline['threshold_classifier']['auc']
+logreg_auc = baseline.get('logistic_regression', {}).get('auc', threshold_auc)
+improvement = round((auc - threshold_auc) / abs(threshold_auc) * 100, 1)
 
 print(f"\n── MLP Ensemble Test Set Results ──")
 print(f"  AUC       : {auc}")
@@ -60,7 +68,8 @@ print(f"  Accuracy  : {accuracy}")
 print(f"  Precision : {precision}")
 print(f"  Recall    : {recall}")
 print(f"  F1        : {f1}")
-print(f"  Threshold AUC : {thresh_auc}")
+print(f"  Threshold AUC : {threshold_auc}")
+print(f"  LogReg AUC    : {logreg_auc}")
 print(f"  Improvement   : {improvement}%")
 
 results = {
@@ -82,7 +91,7 @@ fig, ax = plt.subplots(figsize=(5.5, 5.5))
 ax.plot(fpr_mlp, tpr_mlp, color='crimson', lw=2.5,
         label=f'Neural Canary MLP (AUC={auc})')
 ax.plot(fpr_th, tpr_th, color='darkorange', lw=2,
-        label=f'Threshold Classifier (AUC={thresh_auc})')
+        label=f'Threshold Classifier (AUC={threshold_auc})')
 ax.plot([0,1],[0,1],'k--', lw=1, label='Random (AUC=0.5)')
 ax.set_xlabel('False Positive Rate', fontsize=10)
 ax.set_ylabel('True Positive Rate', fontsize=10)
@@ -106,9 +115,9 @@ print("  ✓ figures/fig_confusion_matrix.png")
 
 # ── 6. FIGURE: AUC COMPARISON BAR CHART ──────────────────────────────────────
 fig, ax = plt.subplots(figsize=(5, 4))
-models  = ['Threshold\nClassifier', 'Neural Canary\nMLP Ensemble']
-aucs    = [thresh_auc, auc]
-colors  = ['darkorange', 'crimson']
+models  = ['Threshold', 'Logistic\nRegression', 'Neural Canary\nMLP Ensemble']
+aucs    = [threshold_auc, logreg_auc, auc]
+colors  = ['darkorange', 'steelblue', 'crimson']
 bars    = ax.bar(models, aucs, color=colors, width=0.45, edgecolor='black', linewidth=0.8)
 ax.set_ylim(0, 1.0)
 ax.set_ylabel('AUC', fontsize=11)
@@ -116,7 +125,7 @@ ax.set_title('AUC Comparison — Test Set', fontsize=11, fontweight='bold')
 for bar, val in zip(bars, aucs):
     ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
             f'{val}', ha='center', va='bottom', fontsize=11, fontweight='bold')
-ax.annotate(f'+{improvement}% AUC', xy=(1, auc), xytext=(0.5, auc + 0.07),
+ax.annotate(f'+{improvement}% vs threshold', xy=(2, auc), xytext=(1.1, auc + 0.07),
             fontsize=11, fontweight='bold', color='crimson',
             arrowprops=dict(arrowstyle='->', color='crimson'))
 ax.grid(axis='y', alpha=0.3)
@@ -138,7 +147,7 @@ for drop_feat in FEATURES:
         model = keras.models.load_model(f'models/mlp_seed_{seed}.keras')
         # Use only the remaining features — retrain would be ideal but
         # for ablation we zero out the dropped feature
-        full = np.zeros((len(X_abl), 3))
+        full = np.zeros((len(X_abl), len(FEATURES)))
         for i, f in enumerate(remaining):
             full[:, FEATURES.index(f)] = X_abl[:, i]
         preds_abl.append(model.predict(full, verbose=0).flatten())
@@ -148,7 +157,7 @@ for drop_feat in FEATURES:
 
 # Ablation figure
 fig, ax = plt.subplots(figsize=(6, 4))
-feat_labels = ['Without\nz_F_bell', 'Without\nz_F_gate', 'Without\nz_F_coherence']
+feat_labels = [f'Without\n{f}' for f in FEATURES]
 abl_aucs    = [ablation[f] for f in FEATURES]
 drops       = [round(auc - a, 4) for a in abl_aucs]
 bars = ax.bar(feat_labels, abl_aucs, color='steelblue',
@@ -171,7 +180,7 @@ print("  ✓ figures/fig_ablation.png")
 print(f"\n{'='*45}")
 print(f"  EVALUATION COMPLETE")
 print(f"  MLP Test AUC    : {auc}")
-print(f"  Threshold AUC   : {thresh_auc}")
+print(f"  Threshold AUC   : {threshold_auc}")
 print(f"  Improvement     : {improvement}%")
 print(f"  Recall          : {recall}")
 print(f"  Precision       : {precision}")
