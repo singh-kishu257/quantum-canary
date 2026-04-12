@@ -7,18 +7,13 @@ import os
 
 os.makedirs('figures', exist_ok=True)
 
-# ── 1. LOAD ───────────────────────────────────────────────────────────────────
 print("Loading data/features_data.csv ...")
 df = pd.read_csv('data/features_data.csv')
 print(f"  {len(df):,} rows\n")
 
-FEATURES = [
-    'z_F_bell', 'z_F_gate', 'z_F_coherence',
-    'delta_F_bell', 'delta_F_gate',
-    'momentum_F_bell', 'momentum_F_gate',
-]
+FEATURES = ['F_bell', 'F_gate', 'F_coherence']
 
-# ── 2. CLASS BALANCE ──────────────────────────────────────────────────────────
+# ── CLASS BALANCE ─────────────────────────────────────────────────────────────
 drift_count  = int(df['drifted'].sum())
 stable_count = len(df) - drift_count
 drift_pct    = round(drift_count / len(df) * 100, 1)
@@ -31,7 +26,7 @@ if drift_pct < 10:
 else:
     print("  ✓ Class balance acceptable.\n")
 
-# ── 3. FEATURE STATISTICS ─────────────────────────────────────────────────────
+# ── FEATURE STATISTICS ────────────────────────────────────────────────────────
 print("── Feature Statistics ──")
 print(df[FEATURES].describe().round(6).to_string())
 
@@ -41,7 +36,7 @@ print(df.groupby('drifted')[FEATURES].mean().round(6).to_string())
 print("\n── Feature Std: Stable vs Drifted ──")
 print(df.groupby('drifted')[FEATURES].std().round(6).to_string())
 
-# ── 4. MISSING VALUES ─────────────────────────────────────────────────────────
+# ── MISSING VALUES ────────────────────────────────────────────────────────────
 print("\n── Missing Values ──")
 missing = df[FEATURES].isnull().sum()
 if missing.sum() == 0:
@@ -49,18 +44,15 @@ if missing.sum() == 0:
 else:
     print(missing)
 
-# ── 5. RANGE CHECK ────────────────────────────────────────────────────────────
-print("\n── Range Check ──")
+# ── RANGE CHECK ───────────────────────────────────────────────────────────────
+print("\n── Range Check (fidelity values should be 0–1) ──")
 for f in FEATURES:
     lo = df[f].min()
     hi = df[f].max()
-    if f.startswith('z_'):
-        ok = "✓" if lo >= -5 and hi <= 5 else "WARNING"
-    else:
-        ok = "✓" if lo >= -1 and hi <= 1 else "WARNING"
+    ok = "✓" if lo >= 0 and hi <= 1 else "WARNING"
     print(f"  {f}: [{lo:.6f}, {hi:.6f}]  {ok}")
 
-# ── 6. SPLIT VERIFICATION ─────────────────────────────────────────────────────
+# ── SPLIT VERIFICATION ────────────────────────────────────────────────────────
 print("\n── Split Verification ──")
 with open('data/split_indices.json') as f:
     split = json.load(f)
@@ -70,20 +62,20 @@ for name, idx in split.items():
     d_pct  = round(subset['drifted'].mean() * 100, 1)
     print(f"  {name:5s}: {len(idx):,} rows | drift={d_pct}%")
 
-# ── 7. FIGURE: CORRELATION MATRIX ────────────────────────────────────────────
+# ── CORRELATION MATRIX ────────────────────────────────────────────────────────
 print("\nGenerating Figure: Feature Correlation Matrix...")
 corr_cols = FEATURES + ['drifted']
-corr = df[corr_cols].corr()
+corr      = df[corr_cols].corr()
 
-fig, ax = plt.subplots(figsize=(9, 7))
+fig, ax = plt.subplots(figsize=(6, 5))
 im = ax.imshow(corr.values, cmap='coolwarm', vmin=-1, vmax=1)
 plt.colorbar(im, ax=ax)
-ax.set_xticks(range(len(corr_cols))); ax.set_xticklabels(corr_cols, rotation=45, ha='right', fontsize=8)
-ax.set_yticks(range(len(corr_cols))); ax.set_yticklabels(corr_cols, fontsize=8)
+ax.set_xticks(range(len(corr_cols))); ax.set_xticklabels(corr_cols, rotation=45, ha='right', fontsize=9)
+ax.set_yticks(range(len(corr_cols))); ax.set_yticklabels(corr_cols, fontsize=9)
 for i in range(len(corr_cols)):
     for j in range(len(corr_cols)):
         ax.text(j, i, f'{corr.iloc[i,j]:.2f}',
-                ha='center', va='center', fontsize=7,
+                ha='center', va='center', fontsize=9,
                 color='white' if abs(corr.iloc[i,j]) > 0.5 else 'black')
 ax.set_title('Feature Correlation Matrix', fontsize=11, fontweight='bold')
 plt.tight_layout()
