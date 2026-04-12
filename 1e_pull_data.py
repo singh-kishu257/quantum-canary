@@ -404,4 +404,3 @@ print(f"    Gate err  : 8 gates (448ns) → 20 gates (1120ns) — 2.5x amplifica
 
 print(f"\n  ✓ Saved: data/sim_data.csv")
 print(f"  ✓ Saved: data/sim_data_diagnostics.csv")
-print(f"\n  NEXT: python 2_label_data.py")
