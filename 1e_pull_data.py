@@ -392,4 +392,3 @@ print(f"    Readout increase   : {PARAM_RANGES['drifted']['ro01_mean']/PARAM_RAN
 
 print(f"\n  ✓ Saved: data/synthetic_data.csv")
 print(f"  ✓ Saved: data/synthetic_data_diagnostics.csv (with noise params)")
-print(f"\n  NEXT: python 2_label_data.py")
