@@ -1,7 +1,4 @@
 # 3_validate_data.py — Quantum Canary Prototype 2
-# Validates the labeled dataset before training.
-# Checks class balance, feature statistics, and separation.
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,8 +14,8 @@ print(f"  {len(df):,} rows\n")
 
 FEATURES = [
     'z_F_bell', 'z_F_gate', 'z_F_coherence',
-    'delta_F_bell', 'delta_F_gate', 'delta_F_coherence',
-    'momentum_F_bell', 'momentum_F_gate', 'momentum_F_coherence'
+    'delta_F_bell', 'delta_F_gate',
+    'momentum_F_bell', 'momentum_F_gate',
 ]
 
 # ── 2. CLASS BALANCE ──────────────────────────────────────────────────────────
@@ -53,7 +50,7 @@ else:
     print(missing)
 
 # ── 5. RANGE CHECK ────────────────────────────────────────────────────────────
-print("\n── Range Check (expected clipped range: z in [-5,5], delta/momentum in [-1,1]) ──")
+print("\n── Range Check ──")
 for f in FEATURES:
     lo = df[f].min()
     hi = df[f].max()
@@ -69,8 +66,8 @@ with open('data/split_indices.json') as f:
     split = json.load(f)
 
 for name, idx in split.items():
-    subset     = df.iloc[idx]
-    d_pct      = round(subset['drifted'].mean() * 100, 1)
+    subset = df.iloc[idx]
+    d_pct  = round(subset['drifted'].mean() * 100, 1)
     print(f"  {name:5s}: {len(idx):,} rows | drift={d_pct}%")
 
 # ── 7. FIGURE: CORRELATION MATRIX ────────────────────────────────────────────
@@ -81,11 +78,10 @@ corr = df[corr_cols].corr()
 fig, ax = plt.subplots(figsize=(9, 7))
 im = ax.imshow(corr.values, cmap='coolwarm', vmin=-1, vmax=1)
 plt.colorbar(im, ax=ax)
-labels = corr_cols
-ax.set_xticks(range(len(labels))); ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
-ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels, fontsize=8)
-for i in range(len(labels)):
-    for j in range(len(labels)):
+ax.set_xticks(range(len(corr_cols))); ax.set_xticklabels(corr_cols, rotation=45, ha='right', fontsize=8)
+ax.set_yticks(range(len(corr_cols))); ax.set_yticklabels(corr_cols, fontsize=8)
+for i in range(len(corr_cols)):
+    for j in range(len(corr_cols)):
         ax.text(j, i, f'{corr.iloc[i,j]:.2f}',
                 ha='center', va='center', fontsize=7,
                 color='white' if abs(corr.iloc[i,j]) > 0.5 else 'black')
