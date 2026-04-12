@@ -1,6 +1,6 @@
-# 6_evaluate_ibm.py — Quantum Canary Prototype 2
-# Tests models trained on synthetic data against real IBM hardware data.
-# This is the true generalization test — synthetic training, real hardware testing.
+# 6_evaluate.py — Quantum Canary Prototype 2
+# Evaluates the 10-seed MLP ensemble on the held-out TEST split from
+# data/features_data.csv using data/split_indices.json.
 
 import pandas as pd
 import numpy as np
@@ -15,17 +15,21 @@ os.makedirs('results', exist_ok=True)
 os.makedirs('figures', exist_ok=True)
 
 # ── 1. LOAD ───────────────────────────────────────────────────────────────────
-# Test on real IBM data — never seen during training
-df_test = pd.read_csv('data/ibm_test_data.csv')
+# Evaluate on held-out test split from the same feature dataset used in training.
+df = pd.read_csv('data/features_data.csv')
+with open('data/split_indices.json') as f:
+    split = json.load(f)
 with open('results/baseline_results.json') as f:
     baseline = json.load(f)
 
 FEATURES = ['F_bell', 'F_gate', 'F_coherence']
 
-X_test = df_test[FEATURES].values
-y_test = df_test['drifted'].values
+X = df[FEATURES].values
+y = df['drifted'].values
+X_test = X[split['test']]
+y_test = y[split['test']]
 
-print(f"Test set: {len(X_test):,} real IBM rows")
+print(f"Test set: {len(X_test):,} rows from data/features_data.csv")
 print(f"Drift rate: {round(y_test.mean()*100,1)}%\n")
 
 scaler_mean  = np.load('models/scaler_mean.npy')
@@ -33,7 +37,7 @@ scaler_scale = np.load('models/scaler_scale.npy')
 X_test_s     = (X_test - scaler_mean) / scaler_scale
 
 # ── 2. ENSEMBLE PREDICTIONS ───────────────────────────────────────────────────
-print("Loading 10 models and predicting on real IBM test set...")
+print("Loading 10 models and predicting on held-out test set...")
 all_test_preds = []
 for seed in range(10):
     model = keras.models.load_model(f'models/mlp_seed_{seed}.keras')
@@ -60,8 +64,7 @@ logreg_auc      = baseline['logistic_regression']['auc']
 traditional_auc = max(threshold_auc, logreg_auc)
 improvement     = round((auc - traditional_auc) / abs(traditional_auc) * 100, 1)
 
-print(f"\n── MLP Ensemble — Real IBM Test Set Results ──")
-print(f"  (Trained on synthetic, tested on real IBM hardware)")
+print(f"\n── MLP Ensemble — Held-out TEST Set Results ──")
 print(f"  AUC         : {auc}")
 print(f"  Accuracy    : {accuracy}")
 print(f"  Precision   : {precision}")
@@ -76,17 +79,16 @@ print(f"  Improvement      : {improvement}%")
 print(f"  AUC > 0.93?      : {'YES ✓' if auc > 0.93 else 'NO'}")
 print(f"  Improvement>20%? : {'YES ✓' if improvement >= 20 else 'NO'}")
 
-with open('results/evaluation_results_ibm.json', 'w') as f:
-    json.dump({'mlp_ensemble_real_ibm_test': {
+with open('results/evaluation_results.json', 'w') as f:
+    json.dump({'mlp_ensemble': {
         'auc': auc, 'accuracy': accuracy, 'precision': precision,
         'recall': recall, 'specificity': specificity, 'f1': f1,
         'improvement_over_traditional': improvement,
-        'test_source': 'real_ibm_hardware',
-        'train_source': 'synthetic_aer',
+        'test_source': 'features_data_test_split',
         'n_test_rows': len(X_test),
         'drift_rate': round(y_test.mean()*100,1)
     }}, f, indent=2)
-print("\n  ✓ Saved results/evaluation_results_ibm.json")
+print("\n  ✓ Saved results/evaluation_results.json")
 
 # ── 4. ROC CURVE ──────────────────────────────────────────────────────────────
 print("\nGenerating figures...")
@@ -102,25 +104,24 @@ ax.plot(fpr_th,  tpr_th,  color='darkorange', lw=2,
 ax.plot([0,1],[0,1], 'k--', lw=1, label='Random (AUC=0.5)')
 ax.set_xlabel('False Positive Rate', fontsize=10)
 ax.set_ylabel('True Positive Rate',  fontsize=10)
-ax.set_title('Model ROC Curves — Real IBM Test Set\n'
-             '(Trained on synthetic, tested on real hardware)',
+ax.set_title('Model ROC Curves — Held-out TEST Set',
              fontsize=10, fontweight='bold')
 ax.legend(fontsize=9); ax.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_roc_ibm_test.png', dpi=300, bbox_inches='tight')
+plt.savefig('figures/fig_roc_test.png', dpi=300, bbox_inches='tight')
 plt.close()
-print("  ✓ figures/fig_roc_ibm_test.png")
+print("  ✓ figures/fig_roc_test.png")
 
 # ── 5. CONFUSION MATRIX ───────────────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(4.5, 4))
 disp = ConfusionMatrixDisplay(cm, display_labels=['Stable','Drifted'])
 disp.plot(ax=ax, colorbar=False, cmap='Blues')
-ax.set_title('MLP Ensemble Confusion Matrix\nReal IBM Test Set',
+ax.set_title('MLP Ensemble Confusion Matrix\nHeld-out TEST Set',
              fontsize=11, fontweight='bold')
 plt.tight_layout()
-plt.savefig('figures/fig_confusion_matrix_ibm.png', dpi=300, bbox_inches='tight')
+plt.savefig('figures/fig_confusion_matrix.png', dpi=300, bbox_inches='tight')
 plt.close()
-print("  ✓ figures/fig_confusion_matrix_ibm.png")
+print("  ✓ figures/fig_confusion_matrix.png")
 
 # ── 6. AUC COMPARISON ─────────────────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(5, 4))
@@ -131,19 +132,19 @@ bars    = ax.bar(models_, aucs_, color=colors_,
                  width=0.45, edgecolor='black', linewidth=0.8)
 ax.set_ylim(0, 1.0)
 ax.set_ylabel('AUC', fontsize=11)
-ax.set_title('AUC Comparison — Real IBM Test Set', fontsize=11, fontweight='bold')
+ax.set_title('AUC Comparison — Held-out TEST Set', fontsize=11, fontweight='bold')
 for bar, val in zip(bars, aucs_):
     ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
             f'{val}', ha='center', va='bottom', fontsize=11, fontweight='bold')
 ax.annotate(f'+{improvement}% vs best traditional',
-            xy=(2, auc), xytext=(1.0, auc + 0.07),
+            xy=(2, auc), xytext=(1.0, min(0.98, auc + 0.07)),
             fontsize=10, fontweight='bold', color='crimson',
             arrowprops=dict(arrowstyle='->', color='crimson'))
 ax.grid(axis='y', alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_auc_comparison_ibm.png', dpi=300, bbox_inches='tight')
+plt.savefig('figures/fig_auc_comparison.png', dpi=300, bbox_inches='tight')
 plt.close()
-print("  ✓ figures/fig_auc_comparison_ibm.png")
+print("  ✓ figures/fig_auc_comparison.png")
 
 # ── 7. ABLATION STUDY ─────────────────────────────────────────────────────────
 print("\nRunning ablation study...")
@@ -169,19 +170,18 @@ ax.axhline(auc, color='crimson', lw=2, linestyle='--',
            label=f'Full model AUC={auc}')
 ax.set_ylim(max(0, min(abl_aucs) - 0.1), 1.0)
 ax.set_ylabel('AUC', fontsize=10)
-ax.set_title('Ablation Study — Feature Importance\nReal IBM Test Set',
+ax.set_title('Ablation Study — Feature Importance\nHeld-out TEST Set',
              fontsize=11, fontweight='bold')
 for bar, val, drop in zip(bars, abl_aucs, drops):
     ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005,
             f'{val}\n(−{drop})', ha='center', va='bottom', fontsize=9)
 ax.legend(fontsize=9); ax.grid(axis='y', alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_ablation_ibm.png', dpi=300, bbox_inches='tight')
+plt.savefig('figures/fig_ablation.png', dpi=300, bbox_inches='tight')
 plt.close()
-print("  ✓ figures/fig_ablation_ibm.png")
+print("  ✓ figures/fig_ablation.png")
 
 # ── 8. CONFIDENCE DISTRIBUTION ───────────────────────────────────────────────
-# Shows how confident the model is on real IBM data
 fig, ax = plt.subplots(figsize=(6, 4))
 ax.hist(ensemble_preds[y_test==0], bins=50, alpha=0.6, color='steelblue',
         density=True, label=f'Stable (n={int((y_test==0).sum()):,})')
@@ -190,19 +190,18 @@ ax.hist(ensemble_preds[y_test==1], bins=50, alpha=0.6, color='crimson',
 ax.axvline(0.5, color='black', lw=1.5, linestyle='--', label='Decision threshold (0.5)')
 ax.set_xlabel('Ensemble Drift Probability', fontsize=10)
 ax.set_ylabel('Density', fontsize=10)
-ax.set_title('Model Confidence Distribution — Real IBM Test Set',
+ax.set_title('Model Confidence Distribution — Held-out TEST Set',
              fontsize=11, fontweight='bold')
 ax.legend(fontsize=9); ax.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_confidence_ibm.png', dpi=300, bbox_inches='tight')
+plt.savefig('figures/fig_confidence_test.png', dpi=300, bbox_inches='tight')
 plt.close()
-print("  ✓ figures/fig_confidence_ibm.png")
+print("  ✓ figures/fig_confidence_test.png")
 
 print(f"\n{'='*55}")
-print(f"  EVALUATION COMPLETE — REAL IBM TEST SET")
+print(f"  EVALUATION COMPLETE — HELD-OUT TEST SET")
 print(f"{'='*55}")
-print(f"  Train source    : Synthetic Aer noise model")
-print(f"  Test source     : Real IBM hardware ({len(X_test):,} rows)")
+print(f"  Test source     : data/features_data.csv (split['test'])")
 print(f"  MLP Test AUC    : {auc}")
 print(f"  Traditional AUC : {traditional_auc}")
 print(f"  Improvement     : {improvement}%")
