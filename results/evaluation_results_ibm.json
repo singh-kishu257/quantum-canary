@@ -1,15 +1,15 @@
 {
   "mlp_ensemble_real_ibm_test": {
-    "auc": 0.9984,
-    "accuracy": 0.9857,
-    "precision": 0.9749,
-    "recall": 0.9933,
-    "specificity": 0.9796,
-    "f1": 0.984,
-    "improvement_over_traditional": 23.5,
+    "auc": 0.9859,
+    "accuracy": 0.9022,
+    "precision": 0.9819,
+    "recall": 0.8196,
+    "specificity": 0.9849,
+    "f1": 0.8934,
+    "improvement_over_traditional": 22.0,
     "test_source": "real_ibm_hardware",
     "train_source": "synthetic_aer",
-    "n_test_rows": 2025,
-    "drift_rate": 44.4
+    "n_test_rows": 2250,
+    "drift_rate": 50.0
   }
 }
