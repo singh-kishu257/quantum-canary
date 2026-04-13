@@ -1,16 +1,16 @@
 {
   "threshold_classifier": {
-    "accuracy": 0.7195,
-    "precision": 0.6517,
-    "recall": 0.7922,
-    "f1": 0.7151,
-    "auc": 0.8083
+    "accuracy": 0.6859,
+    "precision": 0.6609,
+    "recall": 0.7637,
+    "f1": 0.7086,
+    "auc": 0.7595
   },
   "logistic_regression": {
-    "accuracy": 0.7235,
-    "precision": 0.6767,
-    "recall": 0.7233,
-    "f1": 0.6992,
-    "auc": 0.8082
+    "accuracy": 0.703,
+    "precision": 0.7178,
+    "recall": 0.6689,
+    "f1": 0.6925,
+    "auc": 0.7599
   }
 }
