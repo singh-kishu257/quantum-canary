@@ -1,11 +1,14 @@
 {
   "mlp_ensemble": {
-    "auc": 1.0,
-    "accuracy": 0.9693,
-    "precision": 0.9422,
-    "recall": 1.0,
-    "specificity": 0.9387,
-    "f1": 0.9702,
-    "improvement_over_traditional": 36.1
+    "auc": 0.9984,
+    "accuracy": 0.9857,
+    "precision": 0.9749,
+    "recall": 0.9933,
+    "specificity": 0.9796,
+    "f1": 0.984,
+    "improvement_over_traditional": 23.5,
+    "test_source": "features_data_test_split",
+    "n_test_rows": 2025,
+    "drift_rate": 44.4
   }
 }
