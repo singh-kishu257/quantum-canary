@@ -7,7 +7,6 @@
     "specificity": 0.9059,
     "f1": 0.8751,
     "improvement_over_traditional": 26.4,
-    "test_source": "features_data_test_split",
     "n_test_rows": 2700,
     "drift_rate": 50.0
   }

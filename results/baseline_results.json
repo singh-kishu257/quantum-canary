@@ -1,16 +1,11 @@
 {
   "threshold_classifier": {
-    "accuracy": 0.6859,
-    "precision": 0.6609,
-    "recall": 0.7637,
-    "f1": 0.7086,
-    "auc": 0.7595
-  },
-  "logistic_regression": {
-    "accuracy": 0.703,
-    "precision": 0.7178,
-    "recall": 0.6689,
-    "f1": 0.6925,
-    "auc": 0.7599
+    "auc": 0.9028,
+    "accuracy": 0.8698,
+    "precision": 0.8731,
+    "recall": 0.9241,
+    "f1": 0.8979,
+    "threshold": 0.978741,
+    "rule": "mean(F_bell, F_gate, F_coherence) < threshold \u2192 drifted"
   }
 }
