@@ -1,21 +1,14 @@
 {
-    "mlp_auc": 0.9090488340192043,
-    "threshold_auc": 0.06583127572016462,
-    "logistic_auc": 0.9330455418381345,
-    "improvement": -2.5718688684429853,
-    "ablation": {
-        "bell": 0.8948861454046639,
-        "gate": 0.9367813443072703,
-        "coherence": 0.9144611796982167
-    },
-    "mutual_info": {
-        "bell": 0.409557502157297,
-        "gate": 0.40595276945469516,
-        "coherence": 0.4149096874738547
-    },
-    "permutation": {
-        "bell": 0.08800000000000001,
-        "gate": 0.04503703703703708,
-        "coherence": 0.040000000000000036
-    }
+  "mlp_ensemble": {
+    "auc": 0.9604,
+    "accuracy": 0.8785,
+    "precision": 0.9005,
+    "recall": 0.8511,
+    "specificity": 0.9059,
+    "f1": 0.8751,
+    "improvement_over_traditional": 26.4,
+    "test_source": "features_data_test_split",
+    "n_test_rows": 2700,
+    "drift_rate": 50.0
+  }
 }
