@@ -120,8 +120,9 @@ fpr_mlp, tpr_mlp, _ = roc_curve(y_test, ensemble_preds)
 fpr_th,  tpr_th,  _ = roc_curve(y_test, thresh_scores_for_auc)
 
 fig, ax = plt.subplots(figsize=(5.5, 5.5))
+ax.fill_between(fpr_mlp, tpr_mlp, alpha=0.15, color='crimson')
 ax.plot(fpr_mlp, tpr_mlp, color='crimson',    lw=2.5,
-        label=f'Neural Canary MLP (AUC={auc})')
+        label=f'Quantum Canary MLP (AUC={auc})')
 ax.plot(fpr_th,  tpr_th,  color='darkorange', lw=2,
         label=f'Threshold Classifier (AUC={threshold_auc})')
 ax.plot([0,1],[0,1], 'k--', lw=1, label='Random (AUC=0.5)')
