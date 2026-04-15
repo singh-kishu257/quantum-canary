@@ -150,7 +150,7 @@ print("  ✓ figures/fig_confusion_matrix.png")
 
 # ── 8. AUC COMPARISON ─────────────────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(5, 4))
-models_ = ['Threshold\nClassifier', 'Neural Canary\nMLP Ensemble']
+models_ = ['Threshold\nClassifier', 'Quantum Canary\nMLP Ensemble']
 aucs_   = [threshold_auc, auc]
 colors_ = ['darkorange', 'crimson']
 bars    = ax.bar(models_, aucs_, color=colors_,

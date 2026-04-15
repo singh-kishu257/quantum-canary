@@ -1,17 +1,13 @@
-# 2_label_data.py — Quantum Canary Prototype 2
+# 2_label_data.py — Quantum Canary 2
 # ─────────────────────────────────────────────────────────────────────────────
 # PHYSICS-INFORMED HYBRID DATASET CONSTRUCTION
 #
-# DATASET DESIGN RATIONALE:
+# Stable class  (label=0): sim stable   + IBM extreme stable anchors
+# Drifted class (label=1): sim drifted  + IBM extreme drifted anchors
 #
-#   Stable class  (label=0): 6,000 sim stable + 3,000 IBM extreme stable
-#   Drifted class (label=1): 6,000 sim drifted + 3,000 IBM extreme drifted
-#
-#   Total Dataset: 18,000 rows.
-#
-#   STRATEGY: 
-#     We keep the original 6k/6k simulation samples from 1e_pull_data.py.
-#     We then add 3k IBM snapshots for each class to ground the model.
+# Sim data: 15,000 rows (5k stable, 5k borderline, 5k drifted) from 1e_pull_data.py
+# IBM anchors: up to 3,000 stable + 3,000 drifted from all_backends_raw.csv
+# Total: ~21,000 rows
 # ─────────────────────────────────────────────────────────────────────────────
 
 import pandas as pd
@@ -36,7 +32,7 @@ df['t_sx_ns'] = df['t_sx_ns'].fillna(30.0)
 df['t_x_ns']  = df['t_x_ns'].fillna(30.0)
 df['t_cz_ns'] = df['t_cz_ns'].fillna(75.0)
 df['x_error'] = df['x_error'].fillna(df['sx_error'])
-df.loc[df['cz_error'] > 0.5, 'cz_error'] = np.nan 
+df.loc[df['cz_error'] > 0.5, 'cz_error'] = np.nan
 
 # ── 3. 30-DAY ROLLING BASELINE PER QUBIT ─────────────────────────────────────
 print("Computing 30-day rolling baselines...")
@@ -87,33 +83,31 @@ df['F_coherence'] = ((1-df['sx_error'])**20 * (1-df['readout_error']) * 0.5 * (1
 t_gate = 20.0 * df['t_x_ns']
 df['F_gate'] = ((1-df['x_error'])**20 * (1-df['readout_error']) * np.exp(-t_gate/T1_ns) * np.exp(-t_gate/T2_ns)).clip(0,1)
 
-# ── 7. EXTRACT ANCHORS (3,000 STABLE, 3,000 DRIFTED) ──────────────────────────
+# ── 7. EXTRACT ANCHORS ────────────────────────────────────────────────────────
 N_ANCHORS = 3000
 
-# Get IBM Stable
-ibm_stable_pool = df[df['zone']=='extreme_stable']
-n_s = min(N_ANCHORS, len(ibm_stable_pool))
-ibm_stable_sel = ibm_stable_pool.sort_values('pct_T1_dev').head(n_s).copy()
+ibm_stable_pool  = df[df['zone']=='extreme_stable']
+n_s              = min(N_ANCHORS, len(ibm_stable_pool))
+ibm_stable_sel   = ibm_stable_pool.sort_values('pct_T1_dev').head(n_s).copy()
 ibm_stable_sel['drifted'] = 0
 
-# Get IBM Drifted
 ibm_drifted_pool = df[df['zone']=='extreme_drifted']
-n_d = min(N_ANCHORS, len(ibm_drifted_pool))
-ibm_drifted_sel = ibm_drifted_pool.sort_values('pct_T1_drop', ascending=False).head(n_d).copy()
+n_d              = min(N_ANCHORS, len(ibm_drifted_pool))
+ibm_drifted_sel  = ibm_drifted_pool.sort_values('pct_T1_drop', ascending=False).head(n_d).copy()
 ibm_drifted_sel['drifted'] = 1
 
-# ── 8. LOAD SIMULATION DATA (6,000 EACH - AS GENERATED) ──────────────────────
-sim = pd.read_csv('data/sim_data.csv')
+# ── 8. LOAD SIMULATION DATA ───────────────────────────────────────────────────
+sim   = pd.read_csv('data/sim_data.csv')
 s_sim = sim[sim['drifted']==0].copy()
 d_sim = sim[sim['drifted']==1].copy()
 
 # ── 9. COMBINE (HYBRID DATASET) ───────────────────────────────────────────────
 ibm_feat = ['F_bell', 'F_coherence', 'F_gate', 'drifted']
 combined = pd.concat([
-    s_sim[ibm_feat],             # 6,000 sim stable
-    ibm_stable_sel[ibm_feat],    # 3,000 IBM stable
-    d_sim[ibm_feat],             # 6,000 sim drifted
-    ibm_drifted_sel[ibm_feat]    # 3,000 IBM drifted
+    s_sim[ibm_feat],
+    ibm_stable_sel[ibm_feat],
+    d_sim[ibm_feat],
+    ibm_drifted_sel[ibm_feat]
 ], ignore_index=True)
 
 combined = combined.sample(frac=1, random_state=42).reset_index(drop=True)
@@ -122,39 +116,69 @@ combined = combined.sample(frac=1, random_state=42).reset_index(drop=True)
 combined.to_csv('data/features_data.csv', index=False)
 df.to_csv('data/ibm_calibration_labeled.csv', index=False)
 
-train_idx, temp_idx = train_test_split(np.arange(len(combined)), test_size=0.3, stratify=combined['drifted'], random_state=42)
-val_idx, test_idx   = train_test_split(temp_idx, test_size=0.5, stratify=combined.iloc[temp_idx]['drifted'], random_state=42)
+train_idx, temp_idx = train_test_split(
+    np.arange(len(combined)), test_size=0.3,
+    stratify=combined['drifted'], random_state=42
+)
+val_idx, test_idx = train_test_split(
+    temp_idx, test_size=0.5,
+    stratify=combined.iloc[temp_idx]['drifted'], random_state=42
+)
 with open('data/split_indices.json', 'w') as f:
-    json.dump({"train": train_idx.tolist(), "val": val_idx.tolist(), "test": test_idx.tolist()}, f)
+    json.dump({"train": train_idx.tolist(),
+               "val":   val_idx.tolist(),
+               "test":  test_idx.tolist()}, f)
 
 # ── 11. FIGURES ───────────────────────────────────────────────────────────────
 print("Generating figures...")
 
+# Merge sim + IBM anchors into unified stable/drifted pools
+all_stable  = pd.concat([s_sim[ibm_feat],       ibm_stable_sel[ibm_feat]],  ignore_index=True)
+all_drifted = pd.concat([d_sim[ibm_feat],        ibm_drifted_sel[ibm_feat]], ignore_index=True)
+all_stable  = all_stable[all_stable['drifted']  == 0]
+all_drifted = all_drifted[all_drifted['drifted'] == 1]
+
+n_stable  = len(all_stable)
+n_drifted = len(all_drifted)
+n_total   = len(combined)
+
 fig, axes = plt.subplots(1, 3, figsize=(13, 4))
 feats = ['F_bell', 'F_coherence', 'F_gate']
-flabs = ['Bell state fidelity', 'Coherence fidelity', 'Gate error fidelity']
+flabs = ['Bell State Fidelity', 'Coherence Fidelity', 'Gate Error Fidelity']
 
 for ax, feat, lab in zip(axes, feats, flabs):
-    bins = np.linspace(combined[feat].quantile(0.01), combined[feat].quantile(0.99), 55)
-    
-    ax.hist(s_sim[feat], bins=bins, alpha=0.4, color='steelblue', label='Sim stable', density=True)
-    ax.hist(d_sim[feat], bins=bins, alpha=0.4, color='crimson', label='Sim drifted', density=True)
-    
-    ax.hist(ibm_stable_sel[feat], bins=bins, color='navy', label=f'IBM stable (n={len(ibm_stable_sel)})', 
-            density=True, histtype='step', linewidth=1.5)
-    ax.hist(ibm_drifted_sel[feat], bins=bins, color='darkred', label=f'IBM drifted (n={len(ibm_drifted_sel)})', 
-            density=True, histtype='step', linewidth=1.5, linestyle='--')
+    bins = np.linspace(combined[feat].quantile(0.01),
+                       combined[feat].quantile(0.99), 55)
+
+    # Stable — light blue filled
+    ax.hist(all_stable[feat],  bins=bins, alpha=0.5, color='steelblue',
+            density=True, label=f'Stable (n={n_stable:,})')
+
+    # Drifted — light red filled
+    ax.hist(all_drifted[feat], bins=bins, alpha=0.5, color='crimson',
+            density=True, label=f'Drifted (n={n_drifted:,})')
 
     ax.set_title(lab, fontsize=10, fontweight='bold')
-    ax.set_xlabel('Fidelity', fontsize=9); ax.set_ylabel('Density', fontsize=9)
-    ax.legend(fontsize=7); ax.grid(alpha=0.3)
+    ax.set_xlabel('Fidelity', fontsize=9)
+    ax.set_ylabel('Density',  fontsize=9)
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
 
-plt.suptitle('Training data fidelity distributions\nHybrid Dataset (n=18,000) · 6k Sim Samples + 6k IBM Anchors', fontsize=10, fontweight='bold', y=1.02)
+n_sim_total = len(sim)
+n_ibm_total = n_s + n_d
+plt.suptitle(
+    f'Training Data Fidelity Distributions\n'
+    f'Hybrid Dataset (n={n_total:,}) · {n_sim_total:,} Sim Samples + {n_ibm_total:,} IBM Anchors '
+    f'· Overlap regions shown',
+    fontsize=10, fontweight='bold', y=1.02
+)
 plt.tight_layout()
 plt.savefig('figures/fig_feature_distributions.png', dpi=300, bbox_inches='tight')
 plt.close()
+print("  ✓ figures/fig_feature_distributions.png")
 
 print(f"\nLabeling Complete.")
-print(f"  Stable  : {len(s_sim)} Sim + {len(ibm_stable_sel)} IBM")
-print(f"  Drifted : {len(d_sim)} Sim + {len(ibm_drifted_sel)} IBM")
-print(f"  Total   : {len(combined):,}")
+print(f"  Stable  : {len(s_sim):,} Sim + {len(ibm_stable_sel):,} IBM = {n_stable:,}")
+print(f"  Drifted : {len(d_sim):,} Sim + {len(ibm_drifted_sel):,} IBM = {n_drifted:,}")
+print(f"  Total   : {n_total:,}")
+print(f"\n  NEXT: python 3_validate_data.py")
