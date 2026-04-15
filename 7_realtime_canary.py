@@ -193,7 +193,7 @@ y_val    = y_all[split['val']]
 scaler = StandardScaler()
 scaler.fit(X_train)
 
-val_scores = X_val.mean(axis=1)
+val_scores  = X_val.mean(axis=1) + np.random.normal(0, 0.02, len(X_val))
 best_thresh, best_f1 = 0.0, -1.0
 for t in np.linspace(val_scores.min(), val_scores.max(), 500):
     preds = (val_scores < t).astype(int)
@@ -374,9 +374,19 @@ for round_idx in range(N_ROUNDS):
         job     = sampler.run(circuits, shots=SHOTS)
         result  = job.result()
 
-        counts_bell = result[0].data.c.get_counts()
-        counts_coh  = result[1].data.meas.get_counts()
-        counts_gate = result[2].data.meas.get_counts()
+        def get_counts(res_item):
+            """Extract counts regardless of classical register name."""
+            data = res_item.data
+            for attr in vars(data):
+                try:
+                    return getattr(data, attr).get_counts()
+                except Exception:
+                    continue
+            raise ValueError(f"Could not extract counts. Registers: {vars(data)}")
+
+        counts_bell = get_counts(result[0])
+        counts_coh  = get_counts(result[1])
+        counts_gate = get_counts(result[2])
 
         fb = f_bell(counts_bell)
         fc = f_single(counts_coh)

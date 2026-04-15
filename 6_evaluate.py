@@ -162,10 +162,6 @@ ax.set_title('AUC Comparison — Held-out Test Set',
 for bar, val in zip(bars, aucs_):
     ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
             f'{val}', ha='center', va='bottom', fontsize=11, fontweight='bold')
-ax.annotate(f'+{improvement}% improvement',
-            xy=(1, auc), xytext=(0.4, auc + 0.07),
-            fontsize=10, fontweight='bold', color='crimson',
-            arrowprops=dict(arrowstyle='->', color='crimson'))
 ax.grid(axis='y', alpha=0.3)
 plt.tight_layout()
 plt.savefig('figures/fig_auc_comparison.png', dpi=300, bbox_inches='tight')
