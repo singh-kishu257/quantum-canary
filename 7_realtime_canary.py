@@ -447,8 +447,7 @@ for round_idx in range(N_ROUNDS):
 
     if round_idx < N_ROUNDS - 1:
         next_time = datetime.now(timezone.utc)
-        print(f"\n  Next measurement in {args_interval} minutes  "
-              f"[Round {round_idx+2}/{N_ROUNDS}]\n")
+        print(f"\n  Next measurement in 15 minutes  [Round {round_idx+2}/{N_ROUNDS}]\n")
         time.sleep(INTERVAL_SECONDS)
 
 # ── DONE ──────────────────────────────────────────────────────────────────────
