@@ -1,7 +1,18 @@
 # 6_evaluate.py — Quantum Canary 2
-# Self-contained evaluation. Recreates the threshold baseline from scratch
-# and fits its own scaler on training data for the MLP. No external dependencies
-# beyond the saved .keras model files and data files.
+# ─────────────────────────────────────────────────────────────────────────────
+# Direct MLP vs Hotelling's T² comparison.
+#
+#
+# REFERENCE:
+#   Hotelling, H. (1947). Multivariate Quality Control. In Techniques of
+#   Statistical Analysis. McGraw-Hill.
+#
+# OUTPUT:
+#   results/evaluation_hotelling.json     — side-by-side metrics
+#   figures/fig_roc_vs_hotelling.png      — ROC comparison
+#   figures/fig_auc_vs_hotelling.png      — AUC bar chart
+#   figures/fig_confusion_hotelling.png   — T² confusion matrix
+# ─────────────────────────────────────────────────────────────────────────────
 
 import json
 import os
@@ -32,29 +43,45 @@ X_test  = X[split['test']];  y_test  = y[split['test']]
 
 print(f"Test set : {len(X_test):,} rows | drift={round(y_test.mean()*100,1)}%\n")
 
-# ── 2. THRESHOLD BASELINE (recreated exactly as in 4_baselines.py) ────────────
-# Rule: mean(F_bell, F_gate, F_coherence) < threshold → drifted
-# No scaling, no fitting to feature distributions. Pure rule.
+# ── 2. HOTELLING'S T² BASELINE ────────────────────────────────────────────────
+# Multivariate statistical process control (Hotelling 1947).
+# Fits the stable training distribution's mean vector μ and covariance Σ,
+# then scores each test sample by its Mahalanobis distance from μ:
+#     T²(x) = (x - μ)ᵀ · Σ⁻¹ · (x - μ)
+# High T² means the sample is statistically far from healthy hardware.
 
-val_scores  = X_val.mean(axis=1) + np.random.normal(0, 0.02, len(X_val))
-test_scores = X_test.mean(axis=1) + np.random.normal(0, 0.02, len(X_test))
+stable_train = X_train[y_train == 0]
+mu_vec       = stable_train.mean(axis=0)
+cov_matrix   = np.cov(stable_train, rowvar=False)
+# Regularize to prevent singular inversion when features are correlated
+cov_reg      = cov_matrix + 1e-6 * np.eye(cov_matrix.shape[0])
+cov_inv      = np.linalg.inv(cov_reg)
 
-best_thresh, best_f1 = 0.0, -1.0
-for t in np.linspace(val_scores.min(), val_scores.max(), 500):
-    preds = (val_scores < t).astype(int)
+def hotelling_t2(X, mu, inv_cov):
+    """Compute Hotelling's T² statistic for each row of X."""
+    d = X - mu
+    return np.einsum('ij,jk,ik->i', d, inv_cov, d)
+
+# Tune decision threshold on validation F1
+val_scores  = hotelling_t2(X_val,  mu_vec, cov_inv)
+test_scores = hotelling_t2(X_test, mu_vec, cov_inv)
+
+best_h, best_f1 = 0.0, -1.0
+for h in np.linspace(val_scores.min(), val_scores.max(), 500):
+    preds = (val_scores > h).astype(int)
     if len(np.unique(preds)) < 2:
         continue
     f1 = f1_score(y_val, preds, zero_division=0)
     if f1 > best_f1:
-        best_f1     = f1
-        best_thresh = t
+        best_f1 = f1
+        best_h  = h
 
-thresh_preds          = (test_scores < best_thresh).astype(int)
-thresh_scores_for_auc = -test_scores
-threshold_auc         = round(roc_auc_score(y_test, thresh_scores_for_auc), 4)
+hotelling_preds = (test_scores > best_h).astype(int)
+hotelling_auc   = round(roc_auc_score(y_test, test_scores), 4)
 
-print(f"Threshold classifier — AUC: {threshold_auc}")
-print(f"Rule: mean fidelity < {round(best_thresh, 4)} -> drifted\n")
+print(f"Hotelling's T² — AUC: {hotelling_auc}")
+print(f"Healthy mean μ: {mu_vec.round(5)}")
+print(f"Decision threshold h: {round(best_h, 4)}\n")
 
 # ── 3. SCALE FOR MLP ─────────────────────────────────────────────────────────
 scaler   = StandardScaler()
@@ -82,77 +109,98 @@ f1          = round(f1_score(y_test, ensemble_labels, zero_division=0),        4
 cm          = confusion_matrix(y_test, ensemble_labels)
 tn, fp, fn, tp = cm.ravel()
 specificity = round(tn / (tn + fp), 4)
-improvement = round((auc - threshold_auc) / abs(threshold_auc) * 100, 1)
+improvement = round((auc - hotelling_auc) / abs(hotelling_auc) * 100, 1)
 
-print(f"\n── MLP Ensemble — Test Set Results ──")
-print(f"  AUC              : {auc}")
-print(f"  Accuracy         : {accuracy}")
-print(f"  Precision        : {precision}")
-print(f"  Recall           : {recall}")
-print(f"  Specificity      : {specificity}")
-print(f"  F1               : {f1}")
-print(f"  TP: {tp}  FP: {fp}  TN: {tn}  FN: {fn}")
-print(f"  Threshold AUC    : {threshold_auc}")
-print(f"  Improvement      : {improvement}%")
+# Hotelling metrics for side-by-side reporting
+h_accuracy  = round(accuracy_score(y_test, hotelling_preds),                   4)
+h_precision = round(precision_score(y_test, hotelling_preds, zero_division=0), 4)
+h_recall    = round(recall_score(y_test, hotelling_preds, zero_division=0),    4)
+h_f1        = round(f1_score(y_test, hotelling_preds, zero_division=0),        4)
+h_cm        = confusion_matrix(y_test, hotelling_preds)
+h_tn, h_fp, h_fn, h_tp = h_cm.ravel()
+h_specificity = round(h_tn / (h_tn + h_fp), 4)
+
+print(f"── MLP Ensemble vs Hotelling's T² — Test Set ──")
+print(f"                  {'MLP':>10s}  {'Hotelling T²':>14s}")
+print(f"  AUC           : {auc:>10}  {hotelling_auc:>14}")
+print(f"  Accuracy      : {accuracy:>10}  {h_accuracy:>14}")
+print(f"  Precision     : {precision:>10}  {h_precision:>14}")
+print(f"  Recall        : {recall:>10}  {h_recall:>14}")
+print(f"  Specificity   : {specificity:>10}  {h_specificity:>14}")
+print(f"  F1            : {f1:>10}  {h_f1:>14}")
+print(f"\n  MLP confusion   : TP={tp}  FP={fp}  TN={tn}  FN={fn}")
+print(f"  Hotelling conf. : TP={h_tp}  FP={h_fp}  TN={h_tn}  FN={h_fn}")
+print(f"\n  MLP improvement over Hotelling T²: {improvement}%")
 print(f"  AUC > 0.93?      : {'YES' if auc > 0.93 else 'NO'}")
 print(f"  Improvement>20%? : {'YES' if improvement >= 20 else 'NO'}")
 
-with open('results/evaluation_results.json', 'w') as f:
+with open('results/evaluation_hotelling.json', 'w') as f:
     json.dump({
         'mlp_ensemble': {
-            'auc':                          auc,
-            'accuracy':                     accuracy,
-            'precision':                    precision,
-            'recall':                       recall,
-            'specificity':                  specificity,
-            'f1':                           f1,
-            'threshold_auc':                threshold_auc,
-            'improvement_over_traditional': improvement,
-            'n_test_rows':                  len(X_test),
-            'drift_rate':                   round(y_test.mean()*100, 1),
+            'auc':         auc,
+            'accuracy':    accuracy,
+            'precision':   precision,
+            'recall':      recall,
+            'specificity': specificity,
+            'f1':          f1,
+        },
+        'hotelling_t2': {
+            'auc':         hotelling_auc,
+            'accuracy':    h_accuracy,
+            'precision':   h_precision,
+            'recall':      h_recall,
+            'specificity': h_specificity,
+            'f1':          h_f1,
+            'decision_threshold': round(best_h, 4),
+            'reference':   'Hotelling (1947)',
+        },
+        'comparison': {
+            'improvement_over_hotelling': improvement,
+            'n_test_rows':                len(X_test),
+            'drift_rate':                 round(y_test.mean()*100, 1),
         }
     }, f, indent=2)
-print("\n  Saved results/evaluation_results.json")
+print("\n  Saved results/evaluation_hotelling.json")
 
 # ── 6. ROC CURVE ──────────────────────────────────────────────────────────────
 print("\nGenerating figures...")
 fpr_mlp, tpr_mlp, _ = roc_curve(y_test, ensemble_preds)
-fpr_th,  tpr_th,  _ = roc_curve(y_test, thresh_scores_for_auc)
+fpr_t2,  tpr_t2,  _ = roc_curve(y_test, test_scores)
 
 fig, ax = plt.subplots(figsize=(5.5, 5.5))
 ax.fill_between(fpr_mlp, tpr_mlp, alpha=0.15, color='crimson')
-ax.plot(fpr_mlp, tpr_mlp, color='crimson',    lw=2.5,
+ax.plot(fpr_mlp, tpr_mlp, color='crimson', lw=2.5,
         label=f'Quantum Canary MLP (AUC={auc})')
-ax.plot(fpr_th,  tpr_th,  color='darkorange', lw=2,
-        label=f'Threshold Classifier (AUC={threshold_auc})')
+ax.plot(fpr_t2,  tpr_t2,  color='#1c5d8c', lw=2,
+        label=f"Hotelling's T² (AUC={hotelling_auc})")
 ax.plot([0,1],[0,1], 'k--', lw=1, label='Random (AUC=0.5)')
 ax.set_xlabel('False Positive Rate', fontsize=10)
 ax.set_ylabel('True Positive Rate',  fontsize=10)
-ax.set_title('Model ROC Curves — Held-out Test Set',
+ax.set_title("ROC — Quantum Canary vs Hotelling's T²\nHeld-out Test Set",
              fontsize=11, fontweight='bold')
 ax.legend(fontsize=9)
 ax.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_roc_test.png', dpi=300, bbox_inches='tight')
+plt.savefig('figures/fig_roc_vs_hotelling.png', dpi=300, bbox_inches='tight')
 plt.close()
-print("  ✓ figures/fig_roc_test.png")
+print("  ✓ figures/fig_roc_vs_hotelling.png")
 
-# ── 7. CONFUSION MATRIX ───────────────────────────────────────────────────────
+# ── 7. HOTELLING CONFUSION MATRIX ─────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(4.5, 4))
-disp = ConfusionMatrixDisplay(cm, display_labels=['Stable', 'Drifted'])
-disp.plot(ax=ax, colorbar=False, cmap='Blues')
-ax.set_title('MLP Ensemble Confusion Matrix\nHeld-out Test Set',
+disp = ConfusionMatrixDisplay(h_cm, display_labels=['Stable', 'Drifted'])
+disp.plot(ax=ax, colorbar=False, cmap='Oranges')
+ax.set_title("Hotelling's T² Confusion Matrix\nHeld-out Test Set",
              fontsize=11, fontweight='bold')
 plt.tight_layout()
-plt.savefig('figures/fig_confusion_matrix.png', dpi=300, bbox_inches='tight')
+plt.savefig('figures/fig_confusion_hotelling.png', dpi=300, bbox_inches='tight')
 plt.close()
-print("  ✓ figures/fig_confusion_matrix.png")
+print("  ✓ figures/fig_confusion_hotelling.png")
 
 # ── 8. AUC COMPARISON ─────────────────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(5, 4))
-models_ = ['Threshold\nClassifier', 'Quantum Canary\nMLP Ensemble']
-aucs_   = [threshold_auc, auc]
-colors_ = ['darkorange', 'crimson']
+models_ = ["Hotelling's T²\n(Hotelling 1947)", 'Quantum Canary\nMLP Ensemble']
+aucs_   = [hotelling_auc, auc]
+colors_ = ['#1c5d8c', 'crimson']
 bars    = ax.bar(models_, aucs_, color=colors_,
                  width=0.45, edgecolor='black', linewidth=0.8)
 ax.set_ylim(0, 1.0)
@@ -162,75 +210,23 @@ ax.set_title('AUC Comparison — Held-out Test Set',
 for bar, val in zip(bars, aucs_):
     ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
             f'{val}', ha='center', va='bottom', fontsize=11, fontweight='bold')
+ax.annotate(f'+{improvement}% improvement',
+            xy=(1, auc), xytext=(0.4, auc + 0.07),
+            fontsize=10, fontweight='bold', color='crimson',
+            arrowprops=dict(arrowstyle='->', color='crimson'))
 ax.grid(axis='y', alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_auc_comparison.png', dpi=300, bbox_inches='tight')
+plt.savefig('figures/fig_auc_vs_hotelling.png', dpi=300, bbox_inches='tight')
 plt.close()
-print("  ✓ figures/fig_auc_comparison.png")
-
-# ── 9. ABLATION STUDY ─────────────────────────────────────────────────────────
-print("\nRunning ablation study...")
-ablation = {}
-for drop_feat in FEATURES:
-    preds_abl = []
-    for seed in range(10):
-        model    = keras.models.load_model(f'models/mlp_seed_{seed}.keras')
-        X_zeroed = X_test_s.copy()
-        X_zeroed[:, FEATURES.index(drop_feat)] = 0
-        preds_abl.append(model.predict(X_zeroed, verbose=0).flatten())
-    abl_auc = round(roc_auc_score(y_test, np.mean(preds_abl, axis=0)), 4)
-    ablation[drop_feat] = abl_auc
-    print(f"  Without {drop_feat:15s}: AUC={abl_auc}  (drop={round(auc - abl_auc, 4)})")
-
-fig, ax = plt.subplots(figsize=(6, 4))
-abl_aucs = [ablation[f] for f in FEATURES]
-drops    = [round(auc - a, 4) for a in abl_aucs]
-bars     = ax.bar(FEATURES, abl_aucs, color='steelblue',
-                  width=0.4, edgecolor='black', linewidth=0.8)
-ax.axhline(auc, color='crimson', lw=2, linestyle='--',
-           label=f'Full model AUC={auc}')
-ax.set_ylim(max(0, min(abl_aucs) - 0.1), 1.0)
-ax.set_ylabel('AUC', fontsize=10)
-ax.set_title('Ablation Study — Feature Importance\nHeld-out Test Set',
-             fontsize=11, fontweight='bold')
-for bar, val, drop in zip(bars, abl_aucs, drops):
-    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005,
-            f'{val}\n(-{drop})', ha='center', va='bottom', fontsize=9)
-ax.legend(fontsize=9)
-ax.grid(axis='y', alpha=0.3)
-plt.tight_layout()
-plt.savefig('figures/fig_ablation.png', dpi=300, bbox_inches='tight')
-plt.close()
-print("  ✓ figures/fig_ablation.png")
-
-# ── 10. CONFIDENCE DISTRIBUTION ──────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(6, 4))
-ax.hist(ensemble_preds[y_test==0], bins=50, alpha=0.6, color='steelblue',
-        density=True, label=f'Stable (n={int((y_test==0).sum()):,})')
-ax.hist(ensemble_preds[y_test==1], bins=50, alpha=0.6, color='crimson',
-        density=True, label=f'Drifted (n={int((y_test==1).sum()):,})')
-ax.axvline(0.5, color='black', lw=1.5, linestyle='--',
-           label='Decision threshold (0.5)')
-ax.set_xlabel('Ensemble Drift Probability', fontsize=10)
-ax.set_ylabel('Density', fontsize=10)
-ax.set_title('Model Confidence Distribution — Held-out Test Set',
-             fontsize=11, fontweight='bold')
-ax.legend(fontsize=9)
-ax.grid(alpha=0.3)
-plt.tight_layout()
-plt.savefig('figures/fig_confidence_test.png', dpi=300, bbox_inches='tight')
-plt.close()
-print("  ✓ figures/fig_confidence_test.png")
+print("  ✓ figures/fig_auc_vs_hotelling.png")
 
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
-print(f"\n{'='*55}")
-print(f"  EVALUATION COMPLETE")
-print(f"{'='*55}")
-print(f"  MLP Test AUC    : {auc}")
-print(f"  Threshold AUC   : {threshold_auc}")
-print(f"  Improvement     : {improvement}%")
-print(f"  Recall          : {recall}")
-print(f"  Specificity     : {specificity}")
-print(f"  AUC > 0.93?     : {'YES' if auc > 0.93 else 'NO'}")
-print(f"  Improve > 20%?  : {'YES' if improvement >= 20 else 'NO'}")
-print(f"{'='*55}")
+print(f"\n{'='*60}")
+print(f"  MLP vs HOTELLING'S T² EVALUATION COMPLETE")
+print(f"{'='*60}")
+print(f"  MLP Test AUC       : {auc}")
+print(f"  Hotelling T² AUC   : {hotelling_auc}")
+print(f"  Improvement        : {improvement}%")
+print(f"  AUC > 0.93?        : {'YES' if auc > 0.93 else 'NO'}")
+print(f"  Improvement > 20%? : {'YES' if improvement >= 20 else 'NO'}")
+print(f"{'='*60}")
