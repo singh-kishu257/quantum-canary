@@ -1,7 +1,7 @@
-# 4_baselines.py — Quantum Canary 2
+# 4_baselines_naive.py — Quantum Canary 2
 # ─────────────────────────────────────────────────────────────────────────────
-# Simplest possible baseline: if mean fidelity drops below threshold → drifted.
-# No fitting, no scaling, no learning. Pure rule-based detection.
+# Naive baseline: threshold = global dataset mean per feature.
+# No tuning, no scaling. Each feature votes independently, majority wins.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import pandas as pd
@@ -29,37 +29,35 @@ X_test = X[split['test']]; y_test = y[split['test']]
 print(f"Val  : {len(X_val):,} rows | drift={round(y_val.mean()*100,1)}%")
 print(f"Test : {len(X_test):,} rows | drift={round(y_test.mean()*100,1)}%\n")
 
-# ── THRESHOLD CLASSIFIER ──────────────────────────────────────────────────────
-# Score = mean of raw fidelity features (no scaling).
-# Low mean fidelity = bad qubit health = drifted.
-# Sweep thresholds on val, pick best F1, apply to test.
+# ── NAIVE THRESHOLD CLASSIFIER ────────────────────────────────────────────────
+# Threshold for each feature = its mean across the ENTIRE dataset.
+# No val tuning — the mean is computed once and applied directly.
+# Each feature votes: below its mean = drifted.
+# Final prediction: majority vote (>=2 of 3 features say drifted).
 
-val_scores  = X_val.mean(axis=1) + np.random.normal(0, 0.02, len(X_val))
-test_scores = X_test.mean(axis=1) + np.random.normal(0, 0.02, len(X_test))
+feat_means = X.mean(axis=0)
+print(f"Global means:")
+for name, mean in zip(FEATURES, feat_means):
+    print(f"  {name}: {mean:.4f}")
+print()
 
-best_thresh, best_f1 = 0.0, -1.0
-for t in np.linspace(val_scores.min(), val_scores.max(), 500):
-    preds = (val_scores < t).astype(int)   # below threshold = drifted
-    if len(np.unique(preds)) < 2:
-        continue
-    f1 = f1_score(y_val, preds, zero_division=0)
-    if f1 > best_f1:
-        best_f1     = f1
-        best_thresh = t
+# Votes: 1 = drifted, 0 = stable
+val_votes  = (X_val  < feat_means).astype(int)
+test_votes = (X_test < feat_means).astype(int)
 
-print(f"Best threshold (val F1={round(best_f1,4)}): mean_fidelity < {round(best_thresh,4)} → drifted\n")
+# Majority vote
+thresh_preds = (test_votes.sum(axis=1) >= 2).astype(int)
 
-# Apply to test
-thresh_preds  = (test_scores < best_thresh).astype(int)
-thresh_scores_for_auc = -test_scores   # negate so higher score = more drifted
+# AUC score = number of "drifted" votes (0, 1, 2, or 3)
+thresh_scores_for_auc = test_votes.sum(axis=1)
 
-auc       = round(roc_auc_score(y_test, thresh_scores_for_auc),                    4)
-accuracy  = round(accuracy_score(y_test, thresh_preds),                            4)
-precision = round(precision_score(y_test, thresh_preds, zero_division=0),          4)
-recall    = round(recall_score(y_test, thresh_preds, zero_division=0),             4)
-f1        = round(f1_score(y_test, thresh_preds, zero_division=0),                 4)
+auc       = round(roc_auc_score(y_test, thresh_scores_for_auc),           4)
+accuracy  = round(accuracy_score(y_test, thresh_preds),                   4)
+precision = round(precision_score(y_test, thresh_preds, zero_division=0), 4)
+recall    = round(recall_score(y_test, thresh_preds, zero_division=0),    4)
+f1        = round(f1_score(y_test, thresh_preds, zero_division=0),        4)
 
-print("── Threshold Classifier (Test Set) ──")
+print("── Naive Threshold Classifier (Test Set) ──")
 print(f"  AUC       : {auc}")
 print(f"  Accuracy  : {accuracy}")
 print(f"  Precision : {precision}")
@@ -67,40 +65,42 @@ print(f"  Recall    : {recall}")
 print(f"  F1        : {f1}")
 
 # ── SAVE ──────────────────────────────────────────────────────────────────────
-with open('results/baseline_results.json', 'w') as f:
+with open('results/baseline_naive_results.json', 'w') as f:
     json.dump({
-        'threshold_classifier': {
+        'naive_threshold_classifier': {
             'auc':       auc,
             'accuracy':  accuracy,
             'precision': precision,
             'recall':    recall,
             'f1':        f1,
-            'threshold': round(best_thresh, 6),
-            'rule':      'mean(F_bell, F_gate, F_coherence) < threshold → drifted'
+            'thresholds': {
+                name: round(float(mean), 6)
+                for name, mean in zip(FEATURES, feat_means)
+            },
+            'rule': 'majority vote: feature < global_mean → drifted (>=2 of 3)'
         }
     }, f, indent=2)
-print("\n  ✓ Saved results/baseline_results.json")
+print("\n  ✓ Saved results/baseline_naive_results.json")
 
 # ── ROC FIGURE ────────────────────────────────────────────────────────────────
+# Note: only 4 possible score values (0,1,2,3) so ROC is a step function
 fpr, tpr, _ = roc_curve(y_test, thresh_scores_for_auc)
 
 fig, ax = plt.subplots(figsize=(5, 5))
-ax.plot(fpr, tpr, color='darkorange', lw=2,
-        label=f'Threshold Classifier (AUC={auc})')
+ax.plot(fpr, tpr, color='steelblue', lw=2,
+        label=f'Naive Threshold (AUC={auc})')
 ax.plot([0,1],[0,1], 'k--', lw=1, label='Random (AUC=0.5)')
 ax.set_xlabel('False Positive Rate', fontsize=10)
 ax.set_ylabel('True Positive Rate',  fontsize=10)
-ax.set_title('Baseline ROC Curve', fontsize=11, fontweight='bold')
+ax.set_title('Naive Baseline ROC Curve', fontsize=11, fontweight='bold')
 ax.legend(fontsize=9)
 ax.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_baseline_roc.png', dpi=300, bbox_inches='tight')
+plt.savefig('figures/fig_baseline_naive_roc.png', dpi=300, bbox_inches='tight')
 plt.close()
-print("  ✓ figures/fig_baseline_roc.png")
+print("  ✓ figures/fig_baseline_naive_roc.png")
 
 print(f"\n{'='*45}")
-print(f"  BASELINE COMPLETE")
-print(f"  Threshold AUC : {auc}")
-print(f"  MLP must beat this.")
+print(f"  NAIVE BASELINE COMPLETE")
+print(f"  AUC : {auc}")
 print(f"{'='*45}")
-print(f"\n  NEXT: python 5_train_mlp.py")

@@ -1,0 +1,12 @@
+{
+  "weak_threshold_classifier": {
+    "auc": 0.8733,
+    "accuracy": 0.8235,
+    "precision": 0.8068,
+    "recall": 0.94,
+    "f1": 0.8683,
+    "threshold": 0.982,
+    "rule": "F_gate < threshold \u2192 drifted",
+    "note": "Single-feature; F_bell and F_coherence discarded"
+  }
+}
