@@ -1,0 +1,43 @@
+{
+  "mlp_ensemble": {
+    "auc": 0.9239,
+    "accuracy": 0.7879,
+    "precision": 0.9331,
+    "recall": 0.7082,
+    "specificity": 0.9175,
+    "f1": 0.8052,
+    "tp": 1381,
+    "fp": 99,
+    "tn": 1101,
+    "fn": 569
+  },
+  "standard_threshold": {
+    "method": "Per-feature majority-vote threshold",
+    "auc": 0.7586,
+    "accuracy": 0.6479,
+    "precision": 0.9218,
+    "recall": 0.4713,
+    "f1": 0.6237,
+    "thresholds": {
+      "F_bell": 0.954227,
+      "F_gate": 0.960712,
+      "F_coherence": 0.963501
+    }
+  },
+  "hotelling_t2": {
+    "method": "Hotelling's T\u00b2 (1947)",
+    "auc": 0.7674,
+    "accuracy": 0.619,
+    "precision": 0.619,
+    "recall": 1.0,
+    "f1": 0.7647,
+    "decision_threshold": 0.0012,
+    "reference": "Hotelling (1947)"
+  },
+  "comparison": {
+    "mlp_vs_threshold_pct": 21.8,
+    "mlp_vs_hotelling_pct": 20.4,
+    "n_test_rows": 3150,
+    "drift_rate": 61.9
+  }
+}
