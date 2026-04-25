@@ -32,7 +32,7 @@ htmlcov/
 logs/
 *.log
 
-# Credentials — NEVER commit
+# Credentials — 
 api_token.txt
 crn_instance.txt
 .env
