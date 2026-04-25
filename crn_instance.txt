@@ -1,1 +1,0 @@
-crn:v1:bluemix:public:quantum-computing:us-east:a/5525710e87904e17ac264975c792e26c:ce0e3046-7c3d-4fed-95df-7884d29c3bcf::

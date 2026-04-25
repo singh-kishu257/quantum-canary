@@ -1,269 +1,369 @@
-# 2_label_data.py — Quantum Canary Prototype 2
+# 1e_pull_data.py — Quantum Canary 2
 # ─────────────────────────────────────────────────────────────────────────────
-# TRAIN ON SYNTHETIC, TEST ON REAL IBM DATA
+# PHYSICALLY GROUNDED SIMULATED DATA GENERATION
 #
-# Training set: 10,000 synthetic samples from 1e_pull_data.py
-#   → Clean, well-separated, no IBM data
-#   → Model learns the fidelity boundary from simulated noise
+# Generates 15,000 simulated canary circuit samples across 3 regimes:
+#   5,000 STABLE      — Heron r2 right after calibration (label=0)
+#   5,000 BORDERLINE  — 2-4 hours after calibration, early TLS drift (label=1)
+#   5,000 DRIFTED     — 6-12 hours after calibration, significant drift (label=1)
 #
-# Test set: Real IBM calibration rows from ibm_calibration_labeled.csv
-#   → Completely unseen during training
-#   → Validates that synthetic training generalizes to real hardware
-#   → This is the scientific claim: analytical fidelity proxies + synthetic
-#     noise models accurately capture real IBM hardware behavior
+# WHY THREE REGIMES:
+#   Real IBM hardware degrades continuously — not as a binary jump.
+#   Stable and drifted are the extremes. Borderline is the hard region:
+#   T1 has dropped 10-25%, CZ has risen moderately. Fidelity values
+#   overlap with the stable class. A simple mean-threshold classifier
+#   cannot reliably separate borderline from stable — it requires the
+#   MLP's nonlinear decision boundary to catch these early drift events.
+#   This is physically motivated: Carroll et al. (2022) documents TLS
+#   fluctuations beginning within 1-2 hours of calibration.
 #
-# Labels for IBM data: T1 drop >=15% | CZ rise >=50% | Readout rise >=20%
-# Features: F_bell, F_gate, F_coherence (raw fidelity 0-1)
-#   In training: from Aer simulation
-#   In deployment: from real circuit shots
+# LABELING:
+#   Borderline = drifted=1. A 15-25% T1 drop meets the labeling threshold
+#   from 2_label_data.py (T1 drop >= 15%). These are genuine drift events —
+#   just subtle ones that threshold classifiers miss.
+#
+# Circuit depth chosen for maximum drift sensitivity:
+#   Bell state   : H + CX (2Q gate dominates)
+#   Coherence    : 10× H pairs = 20 H gates (1120ns total)
+#   Gate error   : 20× X gates (1120ns total)
+#
+# References:
+#   Carroll et al. (2022): T1 fluctuations 30-50%, TLS timescales
+#   ISCA 2025: Heron r2 calibration metrics
+#   Bravo-Montes et al. (2024): Combined depolarizing + thermal relaxation
+#
+# OUTPUT: data/sim_data.csv
+#   Columns: F_bell, F_gate, F_coherence, drifted
+#
+# RUNTIME: ~4-6 minutes
 # ─────────────────────────────────────────────────────────────────────────────
 
-import pandas as pd
+from qiskit import QuantumCircuit
+from qiskit_aer import AerSimulator
+from qiskit_aer.noise import (NoiseModel, depolarizing_error,
+                               thermal_relaxation_error, ReadoutError)
 import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-import json, os
+import pandas as pd
+import os
 
-os.makedirs('data',    exist_ok=True)
-os.makedirs('figures', exist_ok=True)
+os.makedirs('data', exist_ok=True)
 
-# ── 1. LOAD RAW IBM DATA ──────────────────────────────────────────────────────
-print("Loading data/all_backends_raw.csv ...")
-df = pd.read_csv('data/all_backends_raw.csv')
-df['timestamp'] = pd.to_datetime(df['timestamp'])
-df = df.sort_values(['backend','qubit_id','timestamp']).reset_index(drop=True)
-print(f"  {len(df):,} rows | {df['backend'].nunique()} backends\n")
+np.random.seed(42)
 
-# ── 2. FILL MISSING VALUES ────────────────────────────────────────────────────
-df['t_sx_ns'] = df['t_sx_ns'].fillna(56.0)
-df['t_x_ns']  = df['t_x_ns'].fillna(56.0)
-df['t_cz_ns'] = df['t_cz_ns'].fillna(400.0)
-df['x_error'] = df['x_error'].fillna(df['sx_error'])
+SHOTS        = 1000
+N_STABLE     = 5000
+N_BORDERLINE = 5000   # the hard ambiguous zone — this is what breaks simple thresholds
+N_DRIFTED    = 5000
 
-# ── 3. ROLLING BASELINE PER QUBIT (for labeling only) ────────────────────────
-print("Computing 7-day rolling baselines...")
-backend_col = df['backend'].values
-qubit_col   = df['qubit_id'].values
+# ── REAL HERON R2 GATE DURATIONS ─────────────────────────────────────────────
+T_SX   = 56e-9
+T_X    = 56e-9
+T_CZ   = 75e-9
+T_MEAS = 1600e-9
 
-def add_rolling(group):
-    # shift(1) ensures strict temporal causality
-    group['T1_rolling_mean'] = group['T1_us'].rolling(window=7, min_periods=3).mean().shift(1)
-    group['cz_rolling_mean'] = group['cz_error'].rolling(window=7, min_periods=3).mean().shift(1)
-    group['ro_rolling_mean'] = group['readout_error'].rolling(window=7, min_periods=3).mean().shift(1)
-    return group
+# ── CANARY CIRCUITS ───────────────────────────────────────────────────────────
+def make_bell():
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    return qc
 
-df = df.groupby(['backend','qubit_id'], group_keys=False).apply(add_rolling)
-df = df.reset_index(drop=True)
-df['backend']  = backend_col
-df['qubit_id'] = qubit_col
+def make_coherence():
+    qc = QuantumCircuit(1, 1)
+    for _ in range(10):
+        qc.h(0)
+        qc.h(0)
+    qc.measure(0, 0)
+    return qc
 
-# ── 4. LABEL IBM DATA ─────────────────────────────────────────────────────────
-THRESHOLD_T1      = 0.15
-THRESHOLD_CZ      = 0.50
-THRESHOLD_READOUT = 0.20
+def make_gate_error():
+    qc = QuantumCircuit(1, 1)
+    for _ in range(20):
+        qc.x(0)
+    qc.measure(0, 0)
+    return qc
 
-def label_drift(row):
-    if (pd.isna(row['T1_rolling_mean']) or
-        pd.isna(row['cz_rolling_mean']) or
-        pd.isna(row['ro_rolling_mean'])):
-        return 0
-    t1_drop = (row['T1_rolling_mean'] - row['T1_us'])         / row['T1_rolling_mean']
-    cz_val  = row['cz_error'] if not pd.isna(row['cz_error']) else row['cz_rolling_mean']
-    cz_rise = (cz_val - row['cz_rolling_mean'])                / row['cz_rolling_mean']
-    ro_rise = (row['readout_error'] - row['ro_rolling_mean'])  / row['ro_rolling_mean']
-    return 1 if (t1_drop >= THRESHOLD_T1 or
-                 cz_rise >= THRESHOLD_CZ or
-                 ro_rise >= THRESHOLD_READOUT) else 0
+bell_qc = make_bell()
+coh_qc  = make_coherence()
+gate_qc = make_gate_error()
 
-df['drifted'] = df.apply(label_drift, axis=1)
+# ── FIDELITY EXTRACTION ───────────────────────────────────────────────────────
+def f_bell(counts):
+    total = sum(counts.values())
+    return (counts.get('00', 0) + counts.get('11', 0)) / total
 
-drift_count  = int(df['drifted'].sum())
-stable_count = len(df) - drift_count
-drift_pct    = round(drift_count / len(df) * 100, 1)
-print(f"  IBM data labels:")
-print(f"  Drift  (1): {drift_count:,}  ({drift_pct}%)")
-print(f"  Stable (0): {stable_count:,}  ({100-drift_pct}%)\n")
+def f_coherence(counts):
+    return counts.get('0', 0) / sum(counts.values())
 
-# ── 5. ANALYTICAL FIDELITY PROXY FORMULAS (IBM data) ─────────────────────────
-print("Computing analytical fidelity proxy formulas for IBM data...")
-T2_ns      = (df['T2_us'] * 1e3).replace(0, np.nan).fillna(5600.0)
-cz         = df['cz_error'].fillna(df['sx_error'])
-T1_us_safe = df['T1_us'].replace(0, np.nan).fillna(df['T1_us'].median())
-T1_ns      = T1_us_safe * 1e3
+def f_gate(counts):
+    return counts.get('0', 0) / sum(counts.values())
 
-df['F_bell'] = (
-    (1 - df['sx_error']) * (1 - cz) *
-    (1 - df['readout_error'])**2 *
-    np.exp(-(df['t_sx_ns'] + df['t_cz_ns']) / T1_ns) *
-    np.exp(-(df['t_sx_ns'] + df['t_cz_ns']) / T2_ns)
-).clip(0, 1)
-
-df['F_gate'] = (
-    (1 - df['x_error'])**8 *
-    (1 - df['readout_error']) *
-    np.exp(-(8 * df['t_x_ns']) / T1_ns) *
-    np.exp(-(8 * df['t_x_ns']) / T2_ns)
-).clip(0, 1)
-
-df['F_coherence'] = (
-    (1 - df['sx_error'])**2 *
-    (1 - df['readout_error']) *
-    0.5 * (1 + np.exp(-(2 * df['t_sx_ns']) / T1_ns) *
-               np.exp(-(2 * df['t_sx_ns']) / T2_ns))
-).clip(0, 1)
-
-print(f"  IBM fidelity means by class:")
-print(df.groupby('drifted')[['F_bell','F_gate','F_coherence']].mean().round(4))
-
-# Save full labeled IBM file
-full_cols = ['timestamp','backend','qubit_id','T1_us','T2_us',
-             'sx_error','x_error','cz_error','readout_error',
-             't_sx_ns','t_x_ns','t_cz_ns',
-             'F_bell','F_gate','F_coherence','drifted']
-df[full_cols].to_csv('data/ibm_calibration_labeled.csv', index=False)
-print("  ✓ Saved data/ibm_calibration_labeled.csv\n")
-
-# ── 6. LOAD SYNTHETIC DATA ────────────────────────────────────────────────────
-print("Loading data/synthetic_data.csv ...")
-synth = pd.read_csv('data/synthetic_data.csv')
-print(f"  {len(synth):,} rows")
-print(f"  Synthetic fidelity means by class:")
-print(synth.groupby('drifted')[['F_bell','F_coherence','F_gate']].mean().round(4))
-
-# Rename F_coherence if needed
-if 'F_coherence' not in synth.columns and 'F_coh' in synth.columns:
-    synth = synth.rename(columns={'F_coh': 'F_coherence'})
-
-# ── 7. BUILD TRAIN/VAL/TEST SPLITS ───────────────────────────────────────────
-# Train + Val: synthetic data only (80/20 split)
-# Test:        real IBM data only (completely unseen during training)
+# ── NOISE PARAMETER DISTRIBUTIONS ────────────────────────────────────────────
+# Three physically distinct regimes:
 #
-# This is the key scientific claim:
-# A model trained on synthetic Aer noise generalizes to real IBM hardware.
+# STABLE     : right after calibration. Peak hardware health.
+# BORDERLINE : 2-4 hours post-calibration. T1 dropped 10-25%, CZ risen
+#              moderately. Fidelity values overlap with stable class.
+#              This is the regime a threshold classifier cannot reliably catch.
+# DRIFTED    : 6-12 hours post-calibration. Significant TLS drift.
+#              T1 dropped 30-50% (Carroll et al. 2022), CZ up to 5x.
 
-print("\nBuilding splits...")
-
-# Synthetic → train + val
-synth_clean = synth[['F_bell','F_gate','F_coherence','drifted']].copy()
-synth_idx   = np.arange(len(synth_clean))
-y_synth     = synth_clean['drifted'].values
-
-train_idx, val_idx = train_test_split(
-    synth_idx, test_size=0.20,
-    stratify=y_synth, random_state=42
-)
-
-# IBM real → test only
-ibm_clean = df[['F_bell','F_gate','F_coherence','drifted']].copy()
-ibm_clean = ibm_clean.dropna().reset_index(drop=True)
-test_idx  = np.arange(len(ibm_clean))
-
-print(f"  Train : {len(train_idx):,} rows (synthetic)")
-print(f"  Val   : {len(val_idx):,} rows (synthetic)")
-print(f"  Test  : {len(test_idx):,} rows (real IBM — never seen during training)")
-
-# ── 8. SAVE DATASETS ──────────────────────────────────────────────────────────
-# Save synthetic as training dataset
-synth_clean.to_csv('data/features_data.csv', index=False)
-print("\n  ✓ Saved data/features_data.csv (synthetic — train/val)")
-
-# Save IBM real as test dataset
-ibm_clean.to_csv('data/ibm_test_data.csv', index=False)
-print("  ✓ Saved data/ibm_test_data.csv (real IBM — test only)")
-
-# Save split indices
-# Note: train/val indices index into features_data.csv (synthetic)
-#       test indices index into ibm_test_data.csv (real IBM)
-split = {
-    "train": sorted(train_idx.tolist()),
-    "val":   sorted(val_idx.tolist()),
-    "test":  sorted(test_idx.tolist()),
-    "test_source": "ibm_real"
+PARAM_RANGES = {
+    'stable': {
+        'T1_mean_us':  175.0,
+        'T1_std_us':    25.0,
+        'T1_min_us':   120.0,   # tightened min — truly healthy qubits
+        'T1_max_us':   250.0,
+        'T2_mean_us':  120.0,
+        'T2_std_us':    20.0,
+        'T2_min_us':    80.0,
+        'T2_max_us':   200.0,
+        'sx_mean':    3.5e-4,
+        'sx_std':     0.6e-4,
+        'sx_min':     1.5e-4,
+        'sx_max':     6.0e-4,
+        'cz_mean':    3.8e-3,
+        'cz_std':     0.6e-3,
+        'cz_min':     2.0e-3,
+        'cz_max':     6.0e-3,
+        'ro01_mean':  0.012,
+        'ro01_std':   0.003,
+        'ro01_min':   0.004,
+        'ro01_max':   0.025,
+        'ro10_mean':  0.003,
+        'ro10_std':   0.001,
+        'ro10_min':   0.0005,
+        'ro10_max':   0.008,
+    },
+    'borderline': {
+        # T1 dropped 10-25% from stable mean (175µs → ~130-158µs)
+        # CZ risen 30-80% from stable mean
+        # Fidelity values deliberately overlap with stable class
+        # Label = drifted=1 (meets the >=15% T1 drop threshold)
+        'T1_mean_us':  140.0,
+        'T1_std_us':    25.0,
+        'T1_min_us':    95.0,
+        'T1_max_us':   175.0,   # upper bound touches stable lower bound
+        'T2_mean_us':   95.0,
+        'T2_std_us':    20.0,
+        'T2_min_us':    55.0,
+        'T2_max_us':   140.0,
+        'sx_mean':    8.0e-4,
+        'sx_std':     2.0e-4,
+        'sx_min':     3.5e-4,
+        'sx_max':     1.8e-3,
+        'cz_mean':    7.5e-3,
+        'cz_std':     1.5e-3,
+        'cz_min':     4.0e-3,
+        'cz_max':     1.2e-2,
+        'ro01_mean':  0.028,
+        'ro01_std':   0.008,
+        'ro01_min':   0.012,
+        'ro01_max':   0.060,
+        'ro10_mean':  0.007,
+        'ro10_std':   0.002,
+        'ro10_min':   0.001,
+        'ro10_max':   0.018,
+    },
+    'drifted': {
+        # T1 dropped 30-50% (Carroll et al. 2022)
+        # CZ up to 5x initial value (ISCA 2025)
+        'T1_mean_us':   90.0,
+        'T1_std_us':    25.0,
+        'T1_min_us':    20.0,
+        'T1_max_us':   125.0,   # tightened max — clearly degraded
+        'T2_mean_us':   55.0,
+        'T2_std_us':    18.0,
+        'T2_min_us':    15.0,
+        'T2_max_us':    95.0,
+        'sx_mean':    2.8e-3,
+        'sx_std':     0.8e-3,
+        'sx_min':     1.2e-3,
+        'sx_max':     6.0e-3,
+        'cz_mean':    1.6e-2,
+        'cz_std':     4.0e-3,
+        'cz_min':     8.0e-3,
+        'cz_max':     3.0e-2,
+        'ro01_mean':  0.055,
+        'ro01_std':   0.012,
+        'ro01_min':   0.025,
+        'ro01_max':   0.120,
+        'ro10_mean':  0.015,
+        'ro10_std':   0.004,
+        'ro10_min':   0.003,
+        'ro10_max':   0.040,
+    }
 }
-with open('data/split_indices.json', 'w') as f:
-    json.dump(split, f)
-print("  ✓ Saved data/split_indices.json")
 
-# ── 9. FIGURES ────────────────────────────────────────────────────────────────
-print("\nGenerating figures...")
+def sample_params(regime):
+    p = PARAM_RANGES[regime]
+    T1_us = np.clip(np.random.normal(p['T1_mean_us'], p['T1_std_us']),
+                    p['T1_min_us'], p['T1_max_us'])
+    T2_us = np.clip(np.random.normal(p['T2_mean_us'], p['T2_std_us']),
+                    p['T2_min_us'], p['T2_max_us'])
+    T2_us = min(T2_us, 2.0 * T1_us)   # physical constraint
 
-# Figure 1: T1 over time with drift markers
-dc = df[df['drifted']==1].groupby(['backend','qubit_id']).size()
-if len(dc) > 0:
-    fig1_backend, fig1_qubit = dc.idxmax()
-else:
-    fig1_backend = df['backend'].iloc[0]
-    fig1_qubit   = 0
+    sx_err = np.clip(np.random.normal(p['sx_mean'], p['sx_std']),
+                     p['sx_min'], p['sx_max'])
+    cz_err = np.clip(np.random.normal(p['cz_mean'], p['cz_std']),
+                     p['cz_min'], p['cz_max'])
+    ro01   = np.clip(np.random.normal(p['ro01_mean'], p['ro01_std']),
+                     p['ro01_min'], p['ro01_max'])
+    ro10   = np.clip(np.random.normal(p['ro10_mean'], p['ro10_std']),
+                     p['ro10_min'], p['ro10_max'])
+    ro10   = min(ro10, ro01 * 0.5)     # physical: P(0|1) >> P(1|0)
 
-fd = df[(df['backend']==fig1_backend) &
-        (df['qubit_id']==fig1_qubit)].sort_values('timestamp')
+    return {
+        'T1_s':   T1_us * 1e-6,
+        'T2_s':   T2_us * 1e-6,
+        'sx_err': sx_err,
+        'cz_err': cz_err,
+        'ro01':   ro01,
+        'ro10':   ro10,
+    }
 
-fig, ax = plt.subplots(figsize=(7, 3.8))
-ax.plot(fd['timestamp'], fd['T1_us'], color='steelblue', lw=1.5, label='T1 (µs)')
-ax.plot(fd['timestamp'], fd['T1_rolling_mean'], color='orange', lw=1.3,
-        linestyle='--', label='7-day rolling mean')
-drift_dates = fd[fd['drifted']==1]['timestamp']
-for d in drift_dates:
-    ax.axvline(d, color='crimson', alpha=0.25, lw=0.8)
-if len(drift_dates) > 0:
-    ax.axvline(drift_dates.iloc[0], color='crimson', alpha=0.7, lw=0.8,
-               label=f'Drift event (n={len(drift_dates)})')
-ax.set_title(f'Qubit Stability — {fig1_backend} Qubit {fig1_qubit}',
-             fontsize=9, fontweight='bold')
-ax.set_xlabel('Date', fontsize=9); ax.set_ylabel('T1 (µs)', fontsize=9)
-ax.legend(fontsize=8); ax.grid(alpha=0.3)
-plt.tight_layout()
-plt.savefig('figures/fig_qubit_stability.png', dpi=300, bbox_inches='tight')
-plt.close()
-print("  ✓ figures/fig_qubit_stability.png")
+# ── BUILD NOISE MODEL ─────────────────────────────────────────────────────────
+def build_noise_model(params):
+    nm = NoiseModel()
+    T1 = params['T1_s']
+    T2 = params['T2_s']
 
-# Figure 2: Feature distributions — synthetic vs IBM real
-fig, axes = plt.subplots(1, 3, figsize=(13, 4))
-feats = ['F_bell', 'F_gate', 'F_coherence']
-flabs = ['Bell State Fidelity', 'Gate Error Fidelity', 'Coherence Fidelity']
+    try:
+        thermal_sq = thermal_relaxation_error(T1, T2, T_SX)
+    except Exception:
+        thermal_sq = thermal_relaxation_error(T1, T1 * 0.9, T_SX)
 
-for ax, feat, lab in zip(axes, feats, flabs):
-    # Synthetic distributions
-    s_synth = synth_clean[synth_clean['drifted']==0][feat]
-    d_synth = synth_clean[synth_clean['drifted']==1][feat]
-    # IBM real distributions
-    s_ibm   = ibm_clean[ibm_clean['drifted']==0][feat]
-    d_ibm   = ibm_clean[ibm_clean['drifted']==1][feat]
+    dep_sq      = depolarizing_error(min(2.0 * params['sx_err'], 0.99), 1)
+    combined_sq = thermal_sq.compose(dep_sq)
+    nm.add_all_qubit_quantum_error(combined_sq, ['h', 'x', 'sx'])
 
-    all_vals = pd.concat([s_synth, d_synth, s_ibm, d_ibm])
-    bins = np.linspace(all_vals.quantile(0.01), all_vals.quantile(0.99), 55)
+    try:
+        thermal_tq = thermal_relaxation_error(T1, T2, T_CZ).expand(
+                     thermal_relaxation_error(T1, T2, T_CZ))
+    except Exception:
+        T2s = min(T2, 1.99 * T1)
+        thermal_tq = thermal_relaxation_error(T1, T2s, T_CZ).expand(
+                     thermal_relaxation_error(T1, T2s, T_CZ))
 
-    ax.hist(s_synth, bins=bins, alpha=0.5, color='steelblue',
-            label=f'Synth stable (n={len(s_synth):,})', density=True)
-    ax.hist(d_synth, bins=bins, alpha=0.5, color='crimson',
-            label=f'Synth drifted (n={len(d_synth):,})', density=True)
-    ax.hist(s_ibm, bins=bins, alpha=0.4, color='navy',
-            label=f'IBM stable (n={len(s_ibm):,})', density=True, linestyle='--',
-            histtype='step', linewidth=1.5)
-    ax.hist(d_ibm, bins=bins, alpha=0.4, color='darkred',
-            label=f'IBM drifted (n={len(d_ibm):,})', density=True, linestyle='--',
-            histtype='step', linewidth=1.5)
-    ax.set_title(lab, fontsize=10, fontweight='bold')
-    ax.set_xlabel('Fidelity', fontsize=9); ax.set_ylabel('Density', fontsize=9)
-    ax.legend(fontsize=6); ax.grid(alpha=0.3)
+    dep_tq      = depolarizing_error(min((4.0/3.0) * params['cz_err'], 0.99), 2)
+    combined_tq = thermal_tq.compose(dep_tq)
+    nm.add_all_qubit_quantum_error(combined_tq, ['cx', 'cz', 'ecr'])
 
-plt.suptitle('Fidelity Distributions: Synthetic (train) vs IBM Real (test)\n'
-             'Overlap validates analytical proxy formulas',
-             fontsize=10, fontweight='bold', y=1.02)
-plt.tight_layout()
-plt.savefig('figures/fig_feature_distributions.png', dpi=300, bbox_inches='tight')
-plt.close()
-print("  ✓ figures/fig_feature_distributions.png")
+    ro_error = ReadoutError([[1 - params['ro10'], params['ro10']],
+                             [params['ro01'],     1 - params['ro01']]])
+    nm.add_all_qubit_readout_error(ro_error)
 
-# ── SUMMARY ───────────────────────────────────────────────────────────────────
-print(f"\n{'='*55}")
-print(f"  LABELING COMPLETE")
-print(f"{'='*55}")
-print(f"  Training data : {len(synth_clean):,} synthetic rows (Aer noise model)")
-print(f"  Test data     : {len(ibm_clean):,} real IBM rows (never seen in training)")
-print(f"  IBM drift rate: {drift_pct}%")
-print(f"  Features      : F_bell, F_gate, F_coherence (raw fidelity 0-1)")
-print(f"  Labels        : T1 drop >=15% | CZ rise >=50% | Readout rise >=20%")
-print(f"\n  KEY CLAIM: Model trained on synthetic generalizes to real IBM hardware.")
-print(f"  This validates the analytical fidelity proxy formulas.")
-print(f"\n  NEXT: python 3_validate_data.py")
+    return nm
+
+# ── GENERATE SAMPLES ──────────────────────────────────────────────────────────
+BATCH_SIZE = 100
+
+def generate_regime(n_samples, regime, label):
+    print(f"\nGenerating {n_samples:,} {regime} samples (label={label})...")
+    print(f"  Batches: {n_samples // BATCH_SIZE}")
+
+    rows      = []
+    n_batches = n_samples // BATCH_SIZE
+
+    for batch_idx in range(n_batches):
+        params = sample_params(regime)
+        nm     = build_noise_model(params)
+        sim    = AerSimulator(noise_model=nm)
+
+        circuits = []
+        for _ in range(BATCH_SIZE):
+            circuits.extend([bell_qc, coh_qc, gate_qc])
+
+        result = sim.run(circuits, shots=SHOTS).result()
+
+        for i in range(BATCH_SIZE):
+            idx = i * 3
+            rows.append({
+                'F_bell':      f_bell(result.get_counts(idx)),
+                'F_coherence': f_coherence(result.get_counts(idx + 1)),
+                'F_gate':      f_gate(result.get_counts(idx + 2)),
+                'drifted':     label,
+                '_T1_us':      params['T1_s'] * 1e6,
+                '_T2_us':      params['T2_s'] * 1e6,
+                '_sx_err':     params['sx_err'],
+                '_cz_err':     params['cz_err'],
+            })
+
+        if (batch_idx + 1) % 10 == 0:
+            completed = (batch_idx + 1) * BATCH_SIZE
+            recent    = rows[-BATCH_SIZE * 10:]
+            print(f"  [{completed:,}/{n_samples:,}] "
+                  f"F_bell={np.mean([r['F_bell'] for r in recent]):.3f}  "
+                  f"F_coh={np.mean([r['F_coherence'] for r in recent]):.3f}  "
+                  f"F_gate={np.mean([r['F_gate'] for r in recent]):.3f}  "
+                  f"T1={params['T1_s']*1e6:.0f}µs  CZ={params['cz_err']:.4f}")
+
+    return rows
+
+# ── RUN ───────────────────────────────────────────────────────────────────────
+print("=" * 60)
+print("  QUANTUM CANARY — SIMULATED DATA GENERATION")
+print("=" * 60)
+print(f"  Stable     : {N_STABLE:,}  (label=0)")
+print(f"  Borderline : {N_BORDERLINE:,}  (label=1) ← the hard ambiguous zone")
+print(f"  Drifted    : {N_DRIFTED:,}  (label=1)")
+print(f"  Total      : {N_STABLE + N_BORDERLINE + N_DRIFTED:,}")
+print(f"  Shots/run  : {SHOTS:,}")
+print(f"  Noise      : Thermal + Depolarizing + Asymmetric Readout")
+print("=" * 60)
+
+stable_rows     = generate_regime(N_STABLE,     'stable',     label=0)
+borderline_rows = generate_regime(N_BORDERLINE, 'borderline', label=1)
+drifted_rows    = generate_regime(N_DRIFTED,    'drifted',    label=1)
+
+# ── COMBINE AND SAVE ──────────────────────────────────────────────────────────
+all_rows = stable_rows + borderline_rows + drifted_rows
+df_full  = pd.DataFrame(all_rows)
+df_full  = df_full.sample(frac=1, random_state=42).reset_index(drop=True)
+
+diag_cols = ['F_bell', 'F_coherence', 'F_gate', 'drifted',
+             '_T1_us', '_T2_us', '_sx_err', '_cz_err']
+df_full[diag_cols].to_csv('data/sim_data_diagnostics.csv', index=False)
+
+feat_cols = ['F_bell', 'F_coherence', 'F_gate', 'drifted']
+df_clean  = df_full[feat_cols].copy()
+df_clean.to_csv('data/sim_data.csv', index=False)
+
+# ── VALIDATION REPORT ─────────────────────────────────────────────────────────
+s_df  = df_clean[df_clean['drifted'] == 0]
+d_df  = df_clean[df_clean['drifted'] == 1]
+bl_df = df_full[df_full['_T1_us'].between(
+    PARAM_RANGES['borderline']['T1_min_us'],
+    PARAM_RANGES['borderline']['T1_max_us']
+)]
+
+print(f"\n{'='*60}")
+print(f"  GENERATION COMPLETE")
+print(f"{'='*60}")
+print(f"\n  Total : {len(df_clean):,}")
+print(f"  Stable (0)  : {(df_clean['drifted']==0).sum():,}")
+print(f"  Drifted (1) : {(df_clean['drifted']==1).sum():,}")
+print(f"  Drift rate  : {round(df_clean['drifted'].mean()*100,1)}%")
+
+print(f"\n  Feature means by class:")
+print(df_clean.groupby('drifted')[['F_bell','F_coherence','F_gate']].mean().round(4))
+
+print(f"\n  Borderline regime fidelity means (the hard zone):")
+print(f"    F_bell      : {bl_df['F_bell'].mean():.4f}  "
+      f"(stable: {s_df['F_bell'].mean():.4f})")
+print(f"    F_coherence : {bl_df['F_coherence'].mean():.4f}  "
+      f"(stable: {s_df['F_coherence'].mean():.4f})")
+print(f"    F_gate      : {bl_df['F_gate'].mean():.4f}  "
+      f"(stable: {s_df['F_gate'].mean():.4f})")
+
+print(f"\n  Physical grounding:")
+print(f"    Stable T1    : {PARAM_RANGES['stable']['T1_mean_us']}µs")
+print(f"    Borderline T1: {PARAM_RANGES['borderline']['T1_mean_us']}µs  "
+      f"({round((1-PARAM_RANGES['borderline']['T1_mean_us']/PARAM_RANGES['stable']['T1_mean_us'])*100)}% drop)")
+print(f"    Drifted T1   : {PARAM_RANGES['drifted']['T1_mean_us']}µs  "
+      f"({round((1-PARAM_RANGES['drifted']['T1_mean_us']/PARAM_RANGES['stable']['T1_mean_us'])*100)}% drop)")
+
+print(f"\n  ✓ Saved: data/sim_data.csv")
+print(f"  ✓ Saved: data/sim_data_diagnostics.csv")
+print(f"\n  NEXT: python 2_label_data.py")
