@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Project-specific
+logs/
+*.log
+
+# Credentials — NEVER commit
+api_token.txt
+crn_instance.txt
+.env
+
+# Jupyter
+.ipynb_checkpoints/
