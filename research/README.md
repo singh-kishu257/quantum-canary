@@ -35,7 +35,8 @@ Quantum Canary's hybrid approach pairs **15,000 physics-grounded Qiskit Aer simu
 - **Stable** (T1 ≈ 175 µs, gate errors near published Heron r2 medians) — fresh post-calibration hardware
 - **Borderline** (T1 ≈ 140 µs, 20% drop) — crosses the 15% labelling threshold (so labelled drifted=1) but overlaps the stable distribution. Forces the model to learn a non-trivial decision boundary.
 - **Drifted** (T1 ≈ 90 µs, 49% drop, gate errors elevated 4-5×) — observed TLS-driven degradation per Carroll et al. 2022
-  Each batch resamples its noise model, mimicking real qubit-to-qubit and time-to-time variation across the IBM fleet.
+
+Each batch resamples its noise model, mimicking real qubit-to-qubit and time-to-time variation across the IBM fleet.
 
 ### Three independent baselines
 
@@ -44,7 +45,8 @@ The paper compares the MLP against three increasingly sophisticated baselines:
 1. **Standard threshold** — per-feature majority vote against training-set means
 2. **Hotelling's T²** — multivariate statistical process control (Hotelling 1947)
 3. **MLP ensemble** — this work
-   Both statistical baselines plateau near AUC 0.76, while the MLP achieves 0.92. **The plateau is the central finding**: linear methods cannot resolve the borderline regime regardless of how rigorously they handle multivariate structure. The MLP wins through learned nonlinearity.
+
+Both statistical baselines plateau near AUC 0.76, while the MLP achieves 0.92. **The plateau is the central finding**: linear methods cannot resolve the borderline regime regardless of how rigorously they handle multivariate structure. The MLP wins through learned nonlinearity.
 
 ---
 
@@ -105,4 +107,5 @@ Source literature referenced by these scripts:
 - Hotelling, H. (1947). _Multivariate Quality Control_. — T² baseline.
 - Krantz, P. et al. (2019). _Applied Physics Reviews_ 6, 021318. — superconducting qubit noise model.
 - Preskill, J. (2018). _Quantum_ 2, 79. — NISQ era and the calibration gap.
-  Full bibliography in the paper's references section.
+
+Full bibliography in the paper's references section.
