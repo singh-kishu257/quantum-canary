@@ -16,15 +16,13 @@ IBM Quantum refreshes published qubit health data on a daily cycle. Between thos
 
 ## Headline results
 
-Validated on a 24-hour live deployment on `ibm_kingston`:
+Validated on held-out testing datasets & live deployment on `ibm_kingston`:
 
 | Method                                  | Test AUC   | Notes                         |
 | --------------------------------------- | ---------- | ----------------------------- |
 | Per-feature majority-vote threshold     | 0.7586     | Naive baseline                |
 | Hotelling's T² (multivariate SPC, 1947) | 0.7674     | Rigorous statistical baseline |
 | **Quantum Canary MLP ensemble**         | **0.9239** | **+20.4% over Hotelling T²**  |
-
-Quantum Canary anticipated **3 of 3 IBM recalibration events** with an average lead time of **3.34 hours**.
 
 ---
 
