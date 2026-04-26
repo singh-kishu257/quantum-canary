@@ -79,7 +79,7 @@ The interactive wizard handles credentials, backend selection, intervals, and du
 ```python
 from quantum_canary import Canary
  
-canary = Canary(token="YOUR_TOKEN", instance="YOUR_CRN", backend="ibm_kingston")
+canary = Canary(token="YOUR_TOKEN", instance="YOUR_CRN", backend="IBM_YOURBACKEND")
 canary.monitor(hours=24)
 ```
  
@@ -109,10 +109,10 @@ result = mlp.predict(np.array([0.94, 0.92, 0.95]))   # F_bell, F_gate, F_coheren
  
 ```bash
 # Single check
-quantum-canary check --backend ibm_kingston
+quantum-canary check --backend IBM_YOURBACKEND
  
 # Continuous monitoring
-quantum-canary monitor --backend ibm_kingston --hours 24 --interval 15
+quantum-canary monitor --backend IBM_YOURBACKEND --hours 24 --interval 15
 ```
  
 Provide credentials in any of these ways (in order of preference):
@@ -121,15 +121,15 @@ Provide credentials in any of these ways (in order of preference):
 # Option A — environment variables (recommended for scripts)
 export IBM_QUANTUM_TOKEN="your_token"
 export IBM_QUANTUM_CRN="your_crn"
-quantum-canary check --backend ibm_kingston
+quantum-canary check --backend IBM_YOURBACKEND
  
 # Option B — file paths
-quantum-canary check --backend ibm_kingston \
+quantum-canary check --backend IBM_YOURBACKEND \
     --token api_token.txt \
     --instance crn_instance.txt
  
 # Option C — direct flags (least secure, but works)
-quantum-canary check --backend ibm_kingston \
+quantum-canary check --backend IBM_YOURBACKEND \
     --token "..." --instance "..."
 ```
  
