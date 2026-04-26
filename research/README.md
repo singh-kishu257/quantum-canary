@@ -345,13 +345,13 @@ The two baselines agree to within $0.009$ AUC. This convergence is the central s
 
 ### 8.1 Held-out test set
 
-| Method                              | Test AUC          | F1              | Improvement vs MLP |
-| ----------------------------------- | ----------------- | --------------- | ------------------ |
-| Per-feature majority-vote threshold | $0.7586$          | $0.71$          | —                  |
-| Hotelling's $T^2$ (1947)            | $0.7674$          | $0.71$          | $+0.9\%$           |
-| **Quantum Canary MLP ensemble**     | $\mathbf{0.9239}$ | $\mathbf{0.86}$ | —                  |
+| Method | Test AUC | Improvement vs MLP |
+|---|---|---|
+| Per-feature majority-vote threshold | $0.7586$ | $-21.8\%$ |
+| Hotelling's $T^2$ (1947) | $0.7674$ | $-21.6\%$ |
+| **Quantum Canary MLP ensemble** | $\mathbf{0.9239}$ | — |
 
-The MLP delivers a $21.6\%$ AUC improvement over Hotelling's $T^2$ and a $21.8\%$ improvement over the threshold baseline.
+The MLP delivers a $+21.6\%$ AUC improvement over Hotelling's $T^2$ and a $+21.8\%$ improvement over the threshold baseline.
 
 ### 8.2 ROC curve interpretation
 
@@ -359,17 +359,17 @@ The MLP delivers a $21.6\%$ AUC improvement over Hotelling's $T^2$ and a $21.8\%
 - Hotelling's $T^2$ produces continuous scores — so its ROC is smooth but bounded by the linear decision surface.
 - The MLP ensemble produces continuous, well-calibrated probabilities — its ROC hugs the upper-left corner.
 
-Curve smoothness reflects information richness: more distinct scores produce smoother curves. Curve position reflects accuracy — the MLP is both smooth _and_ high.
+Curve smoothness reflects information richness: more distinct scores produce smoother curves. Curve position reflects accuracy — the MLP is both smooth *and* high.
 
 ### 8.3 Live deployment — `ibm_kingston`
 
 A 24-hour continuous monitoring run on `ibm_kingston`, with 99 measurement rounds at 15-minute intervals, captured **three real IBM recalibration events**:
 
-| Event | First DRIFTED verdict (Quantum Canary) | IBM recalibration timestamp | Lead time       |
-| ----- | -------------------------------------- | --------------------------- | --------------- |
-| 1     | 22:13 UTC                              | 02:18 UTC (next day)        | $4.07~\text{h}$ |
-| 2     | 09:42 UTC                              | 13:45 UTC                   | $4.05~\text{h}$ |
-| 3     | 16:30 UTC                              | 18:25 UTC                   | $1.91~\text{h}$ |
+| Event | First DRIFTED verdict (Quantum Canary) | IBM recalibration timestamp | Lead time |
+|---|---|---|---|
+| 1 | 22:13 UTC | 02:18 UTC (next day) | $4.07~\text{h}$ |
+| 2 | 09:42 UTC | 13:45 UTC | $4.05~\text{h}$ |
+| 3 | 16:30 UTC | 18:25 UTC | $1.91~\text{h}$ |
 
 **Average lead time: $\mathbf{3.34~\text{hours}}$.**
 
