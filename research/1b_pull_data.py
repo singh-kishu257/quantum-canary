@@ -1,4 +1,4 @@
-# 1e_pull_data.py — Quantum Canary 2
+# 1b_pull_data.py — Quantum Canary 2
 # ─────────────────────────────────────────────────────────────────────────────
 # PHYSICALLY GROUNDED SIMULATED DATA GENERATION
 #
