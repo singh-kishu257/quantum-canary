@@ -192,6 +192,6 @@ MIT — see [LICENSE](LICENSE).
  
 ## Author
  
-**Kanishka Singh** · 9th Grade · Urbana High School
+**Kanishka Singh** · Urbana High School
  
 Feedback and contributions welcome via [GitHub Issues](https://github.com/singh-kishu257/quantum-canary/issues).
