@@ -21,17 +21,23 @@
 
 import pandas as pd
 import numpy as np
-import json, os
+import json
 import matplotlib.pyplot as plt
+from pathlib import Path
 from sklearn.metrics import (accuracy_score, precision_score, recall_score,
                              f1_score, roc_auc_score, roc_curve)
 
-os.makedirs('results', exist_ok=True)
-os.makedirs('figures', exist_ok=True)
+SCRIPT_DIR  = Path(__file__).resolve().parent
+DATA_DIR    = SCRIPT_DIR / "data"
+FIGURES_DIR = SCRIPT_DIR / "figures"
+RESULTS_DIR = SCRIPT_DIR / "results"
+
+RESULTS_DIR.mkdir(exist_ok=True)
+FIGURES_DIR.mkdir(exist_ok=True)
 
 # ── LOAD ──────────────────────────────────────────────────────────────────────
-df = pd.read_csv('data/features_data.csv')
-with open('data/split_indices.json') as f:
+df = pd.read_csv(DATA_DIR / 'features_data.csv')
+with open(DATA_DIR / 'split_indices.json') as f:
     split = json.load(f)
 
 FEATURES = ['F_bell', 'F_gate', 'F_coherence']
@@ -86,7 +92,7 @@ for n_votes in range(4):
           f"({round(drift_rate*100, 1)}% actually drifted)")
 
 # ── SAVE ──────────────────────────────────────────────────────────────────────
-with open('results/baseline_standard_results.json', 'w') as f:
+with open(RESULTS_DIR / 'baseline_standard_results.json', 'w') as f:
     json.dump({
         'standard_threshold_classifier': {
             'method':     'Per-feature majority-vote threshold',
@@ -120,7 +126,7 @@ ax.set_title('Standard Baseline ROC Curve\nPer-Feature Majority-Vote Threshold',
 ax.legend(fontsize=9)
 ax.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_baseline_standard_roc.png',
+plt.savefig(FIGURES_DIR / 'fig_baseline_standard_roc.png',
             dpi=300, bbox_inches='tight')
 plt.close()
 print("  ✓ figures/fig_baseline_standard_roc.png")

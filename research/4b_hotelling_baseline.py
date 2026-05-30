@@ -36,15 +36,20 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 import json
-import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from pathlib import Path
 from sklearn.metrics import (roc_auc_score, f1_score,
                               accuracy_score, roc_curve)
 
-os.makedirs('models',  exist_ok=True)
-os.makedirs('figures', exist_ok=True)
+SCRIPT_DIR  = Path(__file__).resolve().parent
+DATA_DIR    = SCRIPT_DIR / "data"
+FIGURES_DIR = SCRIPT_DIR / "figures"
+MODELS_DIR  = SCRIPT_DIR / "models"
+
+MODELS_DIR.mkdir(exist_ok=True)
+FIGURES_DIR.mkdir(exist_ok=True)
 
 FEATURES = ['F_bell', 'F_gate', 'F_coherence']
 
@@ -53,8 +58,8 @@ print("=" * 60)
 print("  HOTELLING'S T² BASELINE — QUANTUM CANARY 2")
 print("=" * 60)
 
-df = pd.read_csv('data/features_data.csv')
-with open('data/split_indices.json') as f:
+df = pd.read_csv(DATA_DIR / 'features_data.csv')
+with open(DATA_DIR / 'split_indices.json') as f:
     split = json.load(f)
 
 X = df[FEATURES].values
@@ -147,7 +152,7 @@ hotelling_params = {
     'epsilon':      epsilon,
     'reference':    'Hotelling, H. (1947). Multivariate Quality Control.',
 }
-with open('models/hotelling_params.json', 'w') as f:
+with open(MODELS_DIR / 'hotelling_params.json', 'w') as f:
     json.dump(hotelling_params, f, indent=2)
 
 print(f"\n  ✓ Saved: models/hotelling_params.json")
@@ -186,7 +191,7 @@ ax2.legend(fontsize=9, loc='lower right')
 ax2.grid(alpha=0.2)
 
 plt.tight_layout()
-plt.savefig('figures/fig_hotelling.png', dpi=200,
+plt.savefig(FIGURES_DIR / 'fig_hotelling.png', dpi=200,
             bbox_inches='tight', facecolor='white')
 plt.close()
 print(f"  ✓ Saved: figures/fig_hotelling.png")

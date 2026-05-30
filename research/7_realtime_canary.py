@@ -16,6 +16,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -29,11 +30,17 @@ from qiskit import QuantumCircuit
 from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
-os.makedirs('logs',    exist_ok=True)
-os.makedirs('figures', exist_ok=True)
+SCRIPT_DIR  = Path(__file__).resolve().parent
+DATA_DIR    = SCRIPT_DIR / "data"
+FIGURES_DIR = SCRIPT_DIR / "figures"
+MODELS_DIR  = SCRIPT_DIR / "models"
+LOGS_DIR    = SCRIPT_DIR / "logs"
+
+LOGS_DIR.mkdir(exist_ok=True)
+FIGURES_DIR.mkdir(exist_ok=True)
 
 INTERVAL_SECONDS = 15 * 60   # 15 minutes
-LOG_PATH         = 'logs/realtime_log.csv'
+LOG_PATH         = LOGS_DIR / 'realtime_log.csv'
 SHOTS            = 1000
 
 # ── BANNER ────────────────────────────────────────────────────────────────────
@@ -169,8 +176,8 @@ print("  ✓ Circuits transpiled\n")
 print("  Loading MLP ensemble...")
 models = []
 for seed in range(10):
-    path = f'models/mlp_seed_{seed}.keras'
-    if os.path.exists(path):
+    path = MODELS_DIR / f'mlp_seed_{seed}.keras'
+    if path.exists():
         models.append(keras.models.load_model(path))
 if not models:
     print("  ✗ No trained models found in models/. Run 5_train_mlp.py first.")
@@ -179,8 +186,8 @@ print(f"  ✓ Loaded {len(models)} MLP models\n")
 
 # ── SCALER AND THRESHOLD ──────────────────────────────────────────────────────
 print("  Setting up scaler and threshold classifier...")
-df_train = pd.read_csv('data/features_data.csv')
-with open('data/split_indices.json') as f:
+df_train = pd.read_csv(DATA_DIR / 'features_data.csv')
+with open(DATA_DIR / 'split_indices.json') as f:
     split = json.load(f)
 
 FEATURES = ['F_bell', 'F_gate', 'F_coherence']
@@ -346,7 +353,7 @@ def generate_figure(rows, threshold, backend_name):
         ha='center', color=GREY, fontsize=8
     )
 
-    plt.savefig('figures/fig_realtime_canary.png',
+    plt.savefig(FIGURES_DIR / 'fig_realtime_canary.png',
                 dpi=300, bbox_inches='tight',
                 facecolor=DARK_BG)
     plt.close()

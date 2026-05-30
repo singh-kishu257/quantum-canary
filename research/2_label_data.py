@@ -14,16 +14,21 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-import json, os
+import json
+from pathlib import Path
 
-os.makedirs('data',    exist_ok=True)
-os.makedirs('figures', exist_ok=True)
+SCRIPT_DIR  = Path(__file__).resolve().parent
+DATA_DIR    = SCRIPT_DIR / "data"
+FIGURES_DIR = SCRIPT_DIR / "figures"
+
+DATA_DIR.mkdir(exist_ok=True)
+FIGURES_DIR.mkdir(exist_ok=True)
 
 np.random.seed(42)
 
 # ── 1. LOAD AND SORT ──────────────────────────────────────────────────────────
 print("Loading data/all_backends_raw.csv ...")
-df = pd.read_csv('data/all_backends_raw.csv')
+df = pd.read_csv(DATA_DIR / 'all_backends_raw.csv')
 df['timestamp'] = pd.to_datetime(df['timestamp'])
 df = df.sort_values(['backend', 'qubit_id', 'timestamp']).reset_index(drop=True)
 
@@ -97,7 +102,7 @@ ibm_drifted_sel  = ibm_drifted_pool.sort_values('pct_T1_drop', ascending=False).
 ibm_drifted_sel['drifted'] = 1
 
 # ── 8. LOAD SIMULATION DATA ───────────────────────────────────────────────────
-sim   = pd.read_csv('data/sim_data.csv')
+sim   = pd.read_csv(DATA_DIR / 'sim_data.csv')
 s_sim = sim[sim['drifted']==0].copy()
 d_sim = sim[sim['drifted']==1].copy()
 
@@ -113,8 +118,8 @@ combined = pd.concat([
 combined = combined.sample(frac=1, random_state=42).reset_index(drop=True)
 
 # ── 10. SAVE ──────────────────────────────────────────────────────────────────
-combined.to_csv('data/features_data.csv', index=False)
-df.to_csv('data/ibm_calibration_labeled.csv', index=False)
+combined.to_csv(DATA_DIR / 'features_data.csv', index=False)
+df.to_csv(DATA_DIR / 'ibm_calibration_labeled.csv', index=False)
 
 train_idx, temp_idx = train_test_split(
     np.arange(len(combined)), test_size=0.3,
@@ -124,7 +129,7 @@ val_idx, test_idx = train_test_split(
     temp_idx, test_size=0.5,
     stratify=combined.iloc[temp_idx]['drifted'], random_state=42
 )
-with open('data/split_indices.json', 'w') as f:
+with open(DATA_DIR / 'split_indices.json', 'w') as f:
     json.dump({"train": train_idx.tolist(),
                "val":   val_idx.tolist(),
                "test":  test_idx.tolist()}, f)
@@ -173,7 +178,7 @@ plt.suptitle(
     fontsize=10, fontweight='bold', y=1.02
 )
 plt.tight_layout()
-plt.savefig('figures/fig_feature_distributions.png', dpi=300, bbox_inches='tight')
+plt.savefig(FIGURES_DIR / 'fig_feature_distributions.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("  ✓ figures/fig_feature_distributions.png")
 

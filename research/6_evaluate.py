@@ -19,22 +19,28 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 import json
-import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from pathlib import Path
 from sklearn.metrics import (roc_auc_score, roc_curve, confusion_matrix,
                              ConfusionMatrixDisplay, accuracy_score,
                              precision_score, recall_score, f1_score)
 from sklearn.preprocessing import StandardScaler
 from tensorflow import keras
 
-os.makedirs('results', exist_ok=True)
-os.makedirs('figures', exist_ok=True)
+SCRIPT_DIR  = Path(__file__).resolve().parent
+DATA_DIR    = SCRIPT_DIR / "data"
+FIGURES_DIR = SCRIPT_DIR / "figures"
+MODELS_DIR  = SCRIPT_DIR / "models"
+RESULTS_DIR = SCRIPT_DIR / "results"
+
+RESULTS_DIR.mkdir(exist_ok=True)
+FIGURES_DIR.mkdir(exist_ok=True)
 
 # ── 1. LOAD DATA ──────────────────────────────────────────────────────────────
-df = pd.read_csv('data/features_data.csv')
-with open('data/split_indices.json', encoding='utf-8') as f:
+df = pd.read_csv(DATA_DIR / 'features_data.csv')
+with open(DATA_DIR / 'split_indices.json', encoding='utf-8') as f:
     split = json.load(f)
 
 FEATURES = ['F_bell', 'F_gate', 'F_coherence']
@@ -134,7 +140,7 @@ X_test_s = scaler.transform(X_test)
 print("  Loading 10 MLP models...")
 all_test_preds = []
 for seed in range(10):
-    model = keras.models.load_model(f'models/mlp_seed_{seed}.keras')
+    model = keras.models.load_model(MODELS_DIR / f'mlp_seed_{seed}.keras')
     preds = model.predict(X_test_s, verbose=0).flatten()
     all_test_preds.append(preds)
 
@@ -178,7 +184,7 @@ print(f"  MLP improvement over Hotelling's T²     : +{improvement_t2}%")
 # ═════════════════════════════════════════════════════════════════════════════
 # SAVE RESULTS
 # ═════════════════════════════════════════════════════════════════════════════
-with open('results/evaluation_results.json', 'w') as f:
+with open(RESULTS_DIR / 'evaluation_results.json', 'w') as f:
     json.dump({
         'mlp_ensemble': {
             'auc':         mlp_auc,
@@ -244,7 +250,7 @@ ax.set_title('Three-Way ROC Comparison — Held-out Test Set',
 ax.legend(fontsize=9, loc='lower right')
 ax.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_roc_test.png', dpi=300, bbox_inches='tight')
+plt.savefig(FIGURES_DIR / 'fig_roc_test.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("  ✓ figures/fig_roc_test.png")
 
@@ -274,7 +280,7 @@ ax.annotate(f'+{improvement_threshold}% over threshold\n+{improvement_t2}% over 
             arrowprops=dict(arrowstyle='->', color='crimson'))
 ax.grid(axis='y', alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_auc_comparison.png', dpi=300, bbox_inches='tight')
+plt.savefig(FIGURES_DIR / 'fig_auc_comparison.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("  ✓ figures/fig_auc_comparison.png")
 
@@ -287,7 +293,7 @@ disp.plot(ax=ax, colorbar=False, cmap='Reds')
 ax.set_title('Quantum Canary MLP — Confusion Matrix\nHeld-out Test Set',
              fontsize=11, fontweight='bold')
 plt.tight_layout()
-plt.savefig('figures/fig_confusion_matrix.png', dpi=300, bbox_inches='tight')
+plt.savefig(FIGURES_DIR / 'fig_confusion_matrix.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("  ✓ figures/fig_confusion_matrix.png")
 
@@ -299,7 +305,7 @@ ablation = {}
 for drop_feat in FEATURES:
     preds_abl = []
     for seed in range(10):
-        model    = keras.models.load_model(f'models/mlp_seed_{seed}.keras')
+        model    = keras.models.load_model(MODELS_DIR / f'mlp_seed_{seed}.keras')
         X_zeroed = X_test_s.copy()
         X_zeroed[:, FEATURES.index(drop_feat)] = 0
         preds_abl.append(model.predict(X_zeroed, verbose=0).flatten())
@@ -325,7 +331,7 @@ for bar, val, drop in zip(bars, abl_aucs, drops):
 ax.legend(fontsize=9)
 ax.grid(axis='y', alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_ablation.png', dpi=300, bbox_inches='tight')
+plt.savefig(FIGURES_DIR / 'fig_ablation.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("  ✓ figures/fig_ablation.png")
 
@@ -346,7 +352,7 @@ ax.set_title('Quantum Canary MLP — Confidence Distribution\nHeld-out Test Set'
 ax.legend(fontsize=9)
 ax.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_confidence_test.png', dpi=300, bbox_inches='tight')
+plt.savefig(FIGURES_DIR / 'fig_confidence_test.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("  ✓ figures/fig_confidence_test.png")
 

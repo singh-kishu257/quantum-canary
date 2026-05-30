@@ -13,15 +13,18 @@ Run from the research/ folder:
 Requires: qiskit, matplotlib, numpy
 """
 
-import os
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.patches import FancyArrowPatch
+from pathlib import Path
 from qiskit import QuantumCircuit
 from qiskit.visualization import circuit_drawer
 
-os.makedirs("figures", exist_ok=True)
+SCRIPT_DIR  = Path(__file__).resolve().parent
+FIGURES_DIR = SCRIPT_DIR / "figures"
+
+FIGURES_DIR.mkdir(exist_ok=True)
 
 # ── 1. BELL STATE CIRCUIT ─────────────────────────────────────────────────────
 qc_bell = QuantumCircuit(2, 2, name="Bell canary")
@@ -30,7 +33,7 @@ qc_bell.cx(0, 1)
 qc_bell.measure([0, 1], [0, 1])
 
 fig = circuit_drawer(qc_bell, output="mpl", style={"backgroundcolor": "#FFFFFF"})
-fig.savefig("figures/circuit_bell.png", dpi=200, bbox_inches="tight")
+fig.savefig(FIGURES_DIR / "circuit_bell.png", dpi=200, bbox_inches="tight")
 plt.close(fig)
 print("Saved figures/circuit_bell.png")
 
@@ -43,7 +46,7 @@ qc_coh.measure(0, 0)
 
 fig = circuit_drawer(qc_coh, output="mpl", fold=20,
                      style={"backgroundcolor": "#FFFFFF"})
-fig.savefig("figures/circuit_coherence.png", dpi=200, bbox_inches="tight")
+fig.savefig(FIGURES_DIR / "circuit_coherence.png", dpi=200, bbox_inches="tight")
 plt.close(fig)
 print("Saved figures/circuit_coherence.png")
 
@@ -55,7 +58,7 @@ qc_gate.measure(0, 0)
 
 fig = circuit_drawer(qc_gate, output="mpl", fold=20,
                      style={"backgroundcolor": "#FFFFFF"})
-fig.savefig("figures/circuit_gate_error.png", dpi=200, bbox_inches="tight")
+fig.savefig(FIGURES_DIR / "circuit_gate_error.png", dpi=200, bbox_inches="tight")
 plt.close(fig)
 print("Saved figures/circuit_gate_error.png")
 
@@ -144,7 +147,7 @@ ax.text(7.0, 0.05,
         "Single MLP shown. Ensemble = 10 independently seeded copies of this network.",
         ha="center", va="center", fontsize=9, fontstyle="italic", color="#444")
 
-plt.savefig("figures/mlp_architecture.png", dpi=200,
+plt.savefig(FIGURES_DIR / "mlp_architecture.png", dpi=200,
             bbox_inches="tight", facecolor="white")
 plt.close()
 print("Saved figures/mlp_architecture.png")
