@@ -3,12 +3,16 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import json
-import os
+from pathlib import Path
 
-os.makedirs('figures', exist_ok=True)
+SCRIPT_DIR  = Path(__file__).resolve().parent
+DATA_DIR    = SCRIPT_DIR / "data"
+FIGURES_DIR = SCRIPT_DIR / "figures"
+
+FIGURES_DIR.mkdir(exist_ok=True)
 
 print("Loading data/features_data.csv ...")
-df = pd.read_csv('data/features_data.csv')
+df = pd.read_csv(DATA_DIR / 'features_data.csv')
 print(f"  {len(df):,} rows\n")
 
 FEATURES = ['F_bell', 'F_gate', 'F_coherence']
@@ -54,7 +58,7 @@ for f in FEATURES:
 
 # ── SPLIT VERIFICATION ────────────────────────────────────────────────────────
 print("\n── Split Verification ──")
-with open('data/split_indices.json') as f:
+with open(DATA_DIR / 'split_indices.json') as f:
     split = json.load(f)
 
 for name, idx in split.items():
@@ -79,7 +83,7 @@ for i in range(len(corr_cols)):
                 color='white' if abs(corr.iloc[i,j]) > 0.5 else 'black')
 ax.set_title('Feature Correlation Matrix', fontsize=11, fontweight='bold')
 plt.tight_layout()
-plt.savefig('figures/fig_correlation_matrix.png', dpi=300, bbox_inches='tight')
+plt.savefig(FIGURES_DIR / 'fig_correlation_matrix.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("  ✓ figures/fig_correlation_matrix.png")
 

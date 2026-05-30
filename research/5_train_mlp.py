@@ -6,19 +6,26 @@
 
 import pandas as pd
 import numpy as np
-import json, os
+import json
 import matplotlib.pyplot as plt
+from pathlib import Path
 from sklearn.metrics import roc_auc_score, roc_curve
 import tensorflow as tf
 from tensorflow import keras
 
-os.makedirs('models',  exist_ok=True)
-os.makedirs('figures', exist_ok=True)
-os.makedirs('results', exist_ok=True)
+SCRIPT_DIR  = Path(__file__).resolve().parent
+DATA_DIR    = SCRIPT_DIR / "data"
+FIGURES_DIR = SCRIPT_DIR / "figures"
+MODELS_DIR  = SCRIPT_DIR / "models"
+RESULTS_DIR = SCRIPT_DIR / "results"
+
+MODELS_DIR.mkdir(exist_ok=True)
+FIGURES_DIR.mkdir(exist_ok=True)
+RESULTS_DIR.mkdir(exist_ok=True)
 
 # ── LOAD ──────────────────────────────────────────────────────────────────────
-df = pd.read_csv('data/features_data.csv')
-with open('data/split_indices.json') as f:
+df = pd.read_csv(DATA_DIR / 'features_data.csv')
+with open(DATA_DIR / 'split_indices.json') as f:
     split = json.load(f)
 
 FEATURES = ['F_bell', 'F_gate', 'F_coherence']
@@ -35,8 +42,8 @@ print(f"Drift rate — Train: {round(y_train.mean()*100,1)}% | "
       f"Test: {round(y_test.mean()*100,1)}%\n")
 
 # ── SCALE ─────────────────────────────────────────────────────────────────────
-scaler_mean  = np.load('models/scaler_mean.npy')
-scaler_scale = np.load('models/scaler_scale.npy')
+scaler_mean  = np.load(MODELS_DIR / 'scaler_mean.npy')
+scaler_scale = np.load(MODELS_DIR / 'scaler_scale.npy')
 X_train_s = (X_train - scaler_mean) / scaler_scale
 X_val_s   = (X_val   - scaler_mean) / scaler_scale
 X_test_s  = (X_test  - scaler_mean) / scaler_scale
@@ -108,7 +115,7 @@ for seed in range(10):
     all_val_preds.append(val_preds)
     all_val_loss.append(history.history['val_loss'])
 
-    model.save(f'models/mlp_seed_{seed}.keras')
+    model.save(MODELS_DIR / f'mlp_seed_{seed}.keras')
     print(f"  Seed {seed}: Val AUC={round(val_auc,4)} | "
           f"Epochs={len(history.history['loss'])}")
 
@@ -120,7 +127,7 @@ print(f"\nEnsemble Val AUC : {ensemble_val_auc}")
 print(f"Mean seed AUC    : {round(np.mean(val_aucs), 4)}")
 print(f"Std seed AUC     : {round(np.std(val_aucs),  4)}")
 
-with open('results/baseline_results.json') as f:
+with open(RESULTS_DIR / 'baseline_results.json') as f:
     baseline = json.load(f)
 threshold_auc        = baseline['threshold_classifier']['auc']
 logreg_auc           = baseline['logistic_regression']['auc']
@@ -149,7 +156,7 @@ ax.set_title('MLP Validation Loss Over Epochs — All 10 Seeds',
 ax.legend(fontsize=7, loc='upper right', ncol=2)
 ax.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_train_val_loss.png', dpi=300, bbox_inches='tight')
+plt.savefig(FIGURES_DIR / 'fig_train_val_loss.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("  ✓ figures/fig_train_val_loss.png")
 
@@ -171,12 +178,12 @@ ax.set_title('ROC Curves — All 10 Seeds + Ensemble\nValidation Set',
 ax.legend(fontsize=7, loc='lower right')
 ax.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig('figures/fig_roc_val.png', dpi=300, bbox_inches='tight')
+plt.savefig(FIGURES_DIR / 'fig_roc_val.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("  ✓ figures/fig_roc_val.png")
 
-np.save('results/ensemble_val_preds.npy', ensemble_val_preds)
-np.save('results/val_aucs.npy', np.array(val_aucs))
+np.save(RESULTS_DIR / 'ensemble_val_preds.npy', ensemble_val_preds)
+np.save(RESULTS_DIR / 'val_aucs.npy', np.array(val_aucs))
 
 print(f"\n{'='*45}")
 print(f"  TRAINING COMPLETE")

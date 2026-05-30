@@ -44,9 +44,12 @@ from qiskit_aer.noise import (NoiseModel, depolarizing_error,
                                thermal_relaxation_error, ReadoutError)
 import numpy as np
 import pandas as pd
-import os
+from pathlib import Path
 
-os.makedirs('data', exist_ok=True)
+SCRIPT_DIR = Path(__file__).resolve().parent
+DATA_DIR   = SCRIPT_DIR / "data"
+
+DATA_DIR.mkdir(exist_ok=True)
 
 np.random.seed(42)
 
@@ -324,11 +327,11 @@ df_full  = df_full.sample(frac=1, random_state=42).reset_index(drop=True)
 
 diag_cols = ['F_bell', 'F_coherence', 'F_gate', 'drifted',
              '_T1_us', '_T2_us', '_sx_err', '_cz_err']
-df_full[diag_cols].to_csv('data/sim_data_diagnostics.csv', index=False)
+df_full[diag_cols].to_csv(DATA_DIR / 'sim_data_diagnostics.csv', index=False)
 
 feat_cols = ['F_bell', 'F_coherence', 'F_gate', 'drifted']
 df_clean  = df_full[feat_cols].copy()
-df_clean.to_csv('data/sim_data.csv', index=False)
+df_clean.to_csv(DATA_DIR / 'sim_data.csv', index=False)
 
 # ── VALIDATION REPORT ─────────────────────────────────────────────────────────
 s_df  = df_clean[df_clean['drifted'] == 0]

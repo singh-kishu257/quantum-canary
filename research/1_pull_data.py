@@ -45,13 +45,16 @@
 from qiskit_ibm_runtime import QiskitRuntimeService
 from datetime import datetime, timedelta
 import pandas as pd
-import os
+from pathlib import Path
 
-os.makedirs('data', exist_ok=True)
+SCRIPT_DIR = Path(__file__).resolve().parent
+DATA_DIR   = SCRIPT_DIR / "data"
+
+DATA_DIR.mkdir(exist_ok=True)
 
 # ── CREDENTIALS ───────────────────────────────────────────────────────────────
-with open("api_token.txt",   "r") as f: token    = f.read().strip()
-with open("crn_instance.txt","r") as f: instance = f.read().strip()
+with open(SCRIPT_DIR / "api_token.txt",    "r") as f: token    = f.read().strip()
+with open(SCRIPT_DIR / "crn_instance.txt", "r") as f: instance = f.read().strip()
 
 service = QiskitRuntimeService(channel="ibm_cloud", token=token, instance=instance)
 print("✓ Connected to IBM Quantum\n")
@@ -157,7 +160,7 @@ for backend_name in BACKENDS:
 
     # Save this backend
     df = pd.DataFrame(rows)
-    path = f"data/{backend_name}_calibration.csv"
+    path = DATA_DIR / f"{backend_name}_calibration.csv"
     df.to_csv(path, index=False)
     print(f"\n  ✓ {len(df)} rows → {path}  (skipped {skipped} days)\n")
     all_dfs.append(df)
@@ -167,7 +170,7 @@ if not all_dfs:
     print("ERROR: No data collected. Check credentials and backend names.")
 else:
     master = pd.concat(all_dfs, ignore_index=True)
-    master.to_csv("data/all_backends_raw.csv", index=False)
+    master.to_csv(DATA_DIR / "all_backends_raw.csv", index=False)
 
     print(f"{'='*55}")
     print(f"  DONE")
