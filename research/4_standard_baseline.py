@@ -27,6 +27,9 @@ from pathlib import Path
 from sklearn.metrics import (accuracy_score, precision_score, recall_score,
                              f1_score, roc_auc_score, roc_curve)
 
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 SCRIPT_DIR  = Path(__file__).resolve().parent
 DATA_DIR    = SCRIPT_DIR / "data"
 FIGURES_DIR = SCRIPT_DIR / "figures"

@@ -28,6 +28,9 @@ from sklearn.metrics import (roc_auc_score, roc_curve, confusion_matrix,
                              precision_score, recall_score, f1_score)
 from sklearn.preprocessing import StandardScaler
 from tensorflow import keras
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
 DATA_DIR    = SCRIPT_DIR / "data"

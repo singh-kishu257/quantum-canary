@@ -46,6 +46,9 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR   = SCRIPT_DIR / "data"
 
@@ -55,7 +58,7 @@ np.random.seed(42)
 
 SHOTS        = 1000
 N_STABLE     = 5000
-N_BORDERLINE = 5000   # the hard ambiguous zone — this is what breaks simple thresholds
+N_BORDERLINE = 5000   # the hard ambiguous zone
 N_DRIFTED    = 5000
 
 # ── REAL HERON R2 GATE DURATIONS ─────────────────────────────────────────────
@@ -369,4 +372,3 @@ print(f"    Drifted T1   : {PARAM_RANGES['drifted']['T1_mean_us']}µs  "
 
 print(f"\n  ✓ Saved: data/sim_data.csv")
 print(f"  ✓ Saved: data/sim_data_diagnostics.csv")
-print(f"\n  NEXT: python 2_label_data.py")

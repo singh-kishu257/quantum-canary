@@ -46,15 +46,20 @@ from qiskit_ibm_runtime import QiskitRuntimeService
 from datetime import datetime, timedelta
 import pandas as pd
 from pathlib import Path
+import getpass
+
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR   = SCRIPT_DIR / "data"
 
 DATA_DIR.mkdir(exist_ok=True)
 
+
 # ── CREDENTIALS ───────────────────────────────────────────────────────────────
-with open(SCRIPT_DIR / "api_token.txt",    "r") as f: token    = f.read().strip()
-with open(SCRIPT_DIR / "crn_instance.txt", "r") as f: instance = f.read().strip()
+token    = getpass.getpass("IBM Quantum API token: ")
+instance = getpass.getpass("IBM Cloud CRN:         ")
 
 service = QiskitRuntimeService(channel="ibm_cloud", token=token, instance=instance)
 print("✓ Connected to IBM Quantum\n")

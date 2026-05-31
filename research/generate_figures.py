@@ -21,6 +21,9 @@ from pathlib import Path
 from qiskit import QuantumCircuit
 from qiskit.visualization import circuit_drawer
 
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 SCRIPT_DIR  = Path(__file__).resolve().parent
 FIGURES_DIR = SCRIPT_DIR / "figures"
 

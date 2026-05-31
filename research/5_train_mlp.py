@@ -13,6 +13,9 @@ from sklearn.metrics import roc_auc_score, roc_curve
 import tensorflow as tf
 from tensorflow import keras
 
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 SCRIPT_DIR  = Path(__file__).resolve().parent
 DATA_DIR    = SCRIPT_DIR / "data"
 FIGURES_DIR = SCRIPT_DIR / "figures"
@@ -190,7 +193,4 @@ print(f"  TRAINING COMPLETE")
 print(f"  Ensemble Val AUC : {ensemble_val_auc}")
 print(f"  Traditional AUC  : {best_traditional_auc}")
 print(f"  Improvement      : {improvement}%")
-print(f"  AUC > 0.93?      : {'YES' if ensemble_val_auc > 0.93 else 'NO'}")
-print(f"  Improvement>20%? : {'YES' if improvement >= 20 else 'NO'}")
 print(f"{'='*45}")
-print(f"\n  NEXT: python 6_evaluate.py")

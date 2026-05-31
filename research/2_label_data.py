@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import json
 from pathlib import Path
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
 DATA_DIR    = SCRIPT_DIR / "data"
@@ -186,4 +188,3 @@ print(f"\nLabeling Complete.")
 print(f"  Stable  : {len(s_sim):,} Sim + {len(ibm_stable_sel):,} IBM = {n_stable:,}")
 print(f"  Drifted : {len(d_sim):,} Sim + {len(ibm_drifted_sel):,} IBM = {n_drifted:,}")
 print(f"  Total   : {n_total:,}")
-print(f"\n  NEXT: python 3_validate_data.py")

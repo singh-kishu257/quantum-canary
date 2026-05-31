@@ -43,6 +43,10 @@ from pathlib import Path
 from sklearn.metrics import (roc_auc_score, f1_score,
                               accuracy_score, roc_curve)
 
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+
 SCRIPT_DIR  = Path(__file__).resolve().parent
 DATA_DIR    = SCRIPT_DIR / "data"
 FIGURES_DIR = SCRIPT_DIR / "figures"
@@ -199,5 +203,3 @@ print(f"  ✓ Saved: figures/fig_hotelling.png")
 print("\n" + "=" * 60)
 print("  HOTELLING'S T² BASELINE COMPLETE")
 print("=" * 60)
-print(f"\n  NEXT: update 6_evaluate.py for four-way comparison")
-print(f"        (MLP vs CUSUM vs Hotelling T² vs Threshold)")

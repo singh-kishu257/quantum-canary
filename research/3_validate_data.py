@@ -4,7 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import json
 from pathlib import Path
-
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_DIR  = Path(__file__).resolve().parent
 DATA_DIR    = SCRIPT_DIR / "data"
 FIGURES_DIR = SCRIPT_DIR / "figures"
@@ -90,4 +91,3 @@ print("  ✓ figures/fig_correlation_matrix.png")
 print(f"\n{'='*45}")
 print(f"  VALIDATION COMPLETE")
 print(f"{'='*45}")
-print(f"  NEXT: python 4_baselines.py")

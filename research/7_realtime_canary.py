@@ -29,6 +29,9 @@ from tensorflow import keras
 from qiskit import QuantumCircuit
 from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
 DATA_DIR    = SCRIPT_DIR / "data"
