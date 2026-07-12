@@ -1,16 +1,14 @@
 # 1_inversion.py — Quantum Canary v2 Research Pipeline
 # =============================================================================
 # Physics-based qubit parameter estimation via Lindblad master equation inversion.
+# Simulation-only research script. All simulation runs locally via Qiskit Aer.
+# No cloud credentials required unless using IBM hardware noise model (option 3).
 #
 # WHAT THIS SCRIPT DOES:
-#   1. Connects to a quantum backend (IBM, IonQ, simulator, or any Qiskit provider)
-#   2. Builds and submits 9 probe circuits:
-#        3 x Inversion Recovery  → measures T1
-#        3 x Ramsey              → measures T2 and Δω
-#        3 x Gate Repetition     → measures ε_sx
-#   3. Receives 9 measurement probabilities from hardware
-#   4. Inverts the Lindblad forward models via nonlinear least squares
-#   5. Returns T1, T2, Δω, ε_sx — the four qubit health parameters
+#   1. Builds 9 probe circuits per qubit (3 T1 + 3 Ramsey + 3 Gate Repetition)
+#   2. Simulates each circuit with a realistic per-qubit randomised noise model
+#   3. Inverts the Lindblad forward models via nonlinear least squares
+#   4. Returns T1, T2, Δω, ε_sx — the four qubit health parameters
 #
 # NO TRAINING DATA. NO MACHINE LEARNING. PURE PHYSICS.
 #
@@ -19,25 +17,30 @@
 #   Ramsey interferometry:  P(1; τ) = (1/2)(1 − exp(−τ/T2) · cos(Δω · τ))
 #   Gate repetition:        P(0; N) = (1/2)(1 + (1 − 2ε)^(2N))
 #
-# SUPPORTED PLATFORMS:
-#   ibm          — IBM Quantum via qiskit-ibm-runtime (SamplerV2)
-#   ionq         — IonQ hardware via qiskit-ionq provider
-#   aer          — Qiskit Aer simulator (ideal or with noise model)
-#   ionq_sim     — IonQ cloud simulators (Forte noisy, Aria 1 noisy, ideal)
-#   demo         — local numpy simulation, zero credentials required
+# SIMULATORS:
+#   [1] Demo          — local numpy, known true values, zero setup
+#   [2] Aer realistic — Qiskit Aer, per-qubit randomised thermal relaxation
+#                       + depolarising + readout noise. Frequency detuning Δω
+#                       injected as Rz rotation during delay. Fully local.
+#   [3] Aer + IBM     — Qiskit Aer with real IBM backend noise model.
+#                       Requires IBM credentials but uses zero shot budget.
 #
-# SUPPORTED ARCHITECTURES:
-#   superconducting  — IBM Heron, Eagle, Falcon, etc. (T1 ~ 100-200 µs)
-#   trapped_ion      — IonQ Forte, Aria, etc. (T1 ~ seconds)
-#   neutral_atom     — generic interface, specify priors manually
-#   unknown          — fallback to superconducting defaults
+# ARCHITECTURES (any qubit technology):
+#   superconducting, trapped_ion, neutral_atom, spin_qubit, nv_center, custom
+#
+# WHY UNIVERSAL: the Lindblad forward models hold for any two-level quantum
+# system with exponential energy relaxation and phase decoherence. Architecture
+# only changes the time scales and noise magnitudes — never the physics.
 #
 # USAGE:
 #   python 1_inversion.py
-#   Interactive prompts walk you through platform, architecture,
-#   credentials, qubit selection, and shots. No flags needed.
+#   Interactive prompts. Results saved to data/inversion_results.csv.
 #
-# OUTPUT:
+# DEPENDENCIES:
+#   numpy, scipy        — always required
+#   qiskit>=1.0         — always required
+#   qiskit-aer>=0.13    — always required
+#   qiskit-ibm-runtime  — only for simulator option [3]
 #   Prints T1, T2, Δω, ε_sx per qubit with uncertainties.
 #   Saves to data/inversion_results.csv for use by 2_monitor.py.
 #
@@ -70,50 +73,138 @@ DATA_DIR.mkdir(exist_ok=True)
 # =============================================================================
 # PHYSICAL CONSTANTS PER ARCHITECTURE
 # These are literature values, not calibration data. They never go stale.
-# Sources: Carroll et al. 2022 (superconducting), Bruzewicz et al. 2019 (trapped ion)
+# Sources:
+#   superconducting — Carroll et al. 2022, IBM Heron specs
+#   trapped_ion     — Bruzewicz et al. 2019, IonQ Forte specs
+#   neutral_atom    — Bluvstein et al. 2023 (QuEra), Pasqal specs
+#   spin_qubit      — Burkard et al. 2023 review (Si/SiGe quantum dots)
+#   nv_center       — Doherty et al. 2013 review (diamond NV)
+#   custom          — user supplies T1/T2 priors at runtime
 # =============================================================================
 
 ARCH_DEFAULTS = {
     "superconducting": {
-        "T1_s":          150e-6,      # 150 µs typical
-        "T2_s":          90e-6,       # 90 µs typical
-        "T1_min_s":      1e-6,        # 1 µs minimum physically meaningful
-        "T1_max_s":      1000e-6,     # 1000 µs upper bound
-        "T2_min_s":      0.5e-6,
-        "dw_max_rad_s":  2*np.pi * 500e3,   # ±500 kHz max detuning
-        "eps_max":       0.1,
-        "dt_ns":         0.2222,      # IBM clock cycle in nanoseconds
-        "display_unit":  "µs",
-        "time_scale":    1e6,         # multiply seconds → display unit
+        "T1_s":           150e-6,
+        "T2_s":           90e-6,
+        "T1_min_s":       1e-6,
+        "T1_max_s":       1000e-6,
+        "T2_min_s":       0.5e-6,
+        "dw_max_rad_s":   2*np.pi * 500e3,
+        "dw_typical_khz": 5.0,
+        "eps_typical":    3.5e-4,
+        "eps_max":        0.1,
+        "dt_ns":          0.2222,
+        "gate_time_ns":   50.0,
+        "display_unit":   "µs",
+        "time_scale":     1e6,
     },
     "trapped_ion": {
-        "T1_s":          10.0,        # ~10 seconds typical for IonQ Forte
-        "T2_s":          1.0,         # ~1 second typical
-        "T1_min_s":      0.01,
-        "T1_max_s":      1000.0,
-        "T2_min_s":      0.005,
-        "dw_max_rad_s":  2*np.pi * 10e3,    # ±10 kHz (tighter — magnetically sensitive)
-        "eps_max":       0.05,
-        "dt_ns":         None,        # no clock cycle constraint at circuit level
-        "display_unit":  "ms",
-        "time_scale":    1e3,
+        "T1_s":           10.0,
+        "T2_s":           1.0,
+        "T1_min_s":       0.01,
+        "T1_max_s":       1000.0,
+        "T2_min_s":       0.005,
+        "dw_max_rad_s":   2*np.pi * 10e3,
+        "dw_typical_khz": 0.5,
+        "eps_typical":    5e-4,
+        "eps_max":        0.05,
+        "dt_ns":          None,
+        "gate_time_ns":   135_000.0,
+        "display_unit":   "ms",
+        "time_scale":     1e3,
     },
     "neutral_atom": {
-        "T1_s":          1.0,
-        "T2_s":          0.5,
-        "T1_min_s":      0.001,
-        "T1_max_s":      100.0,
-        "T2_min_s":      0.001,
-        "dw_max_rad_s":  2*np.pi * 100e3,
-        "eps_max":       0.1,
-        "dt_ns":         None,
-        "display_unit":  "ms",
-        "time_scale":    1e3,
+        "T1_s":           4.0,
+        "T2_s":           1.0,
+        "T1_min_s":       0.001,
+        "T1_max_s":       100.0,
+        "T2_min_s":       0.001,
+        "dw_max_rad_s":   2*np.pi * 100e3,
+        "dw_typical_khz": 2.0,
+        "eps_typical":    1e-3,
+        "eps_max":        0.1,
+        "dt_ns":          None,
+        "gate_time_ns":   500.0,
+        "display_unit":   "ms",
+        "time_scale":     1e3,
+    },
+    "spin_qubit": {
+        "T1_s":           1.0,
+        "T2_s":           100e-6,
+        "T1_min_s":       1e-6,
+        "T1_max_s":       100.0,
+        "T2_min_s":       0.1e-6,
+        "dw_max_rad_s":   2*np.pi * 1e6,
+        "dw_typical_khz": 50.0,
+        "eps_typical":    5e-3,
+        "eps_max":        0.1,
+        "dt_ns":          None,
+        "gate_time_ns":   100.0,
+        "display_unit":   "µs",
+        "time_scale":     1e6,
+    },
+    "nv_center": {
+        "T1_s":           6e-3,
+        "T2_s":           1e-3,
+        "T1_min_s":       1e-6,
+        "T1_max_s":       10.0,
+        "T2_min_s":       0.1e-6,
+        "dw_max_rad_s":   2*np.pi * 1e6,
+        "dw_typical_khz": 20.0,
+        "eps_typical":    5e-3,
+        "eps_max":        0.1,
+        "dt_ns":          None,
+        "gate_time_ns":   20.0,
+        "display_unit":   "µs",
+        "time_scale":     1e6,
     },
 }
 
 # Fallback for unknown architecture
 ARCH_DEFAULTS["unknown"] = ARCH_DEFAULTS["superconducting"]
+
+
+def build_custom_arch(T1_prior_s: float, T2_prior_s: float) -> dict:
+    """
+    Construct architecture constants for ANY qubit technology from two numbers.
+
+    The physics is universal: every qubit with exponential energy relaxation
+    and phase decoherence obeys the same three forward models. The only
+    architecture-specific quantities are the time scales. Given a rough T1
+    estimate, all bounds and display units are derived automatically.
+
+    Parameters
+    ----------
+    T1_prior_s : float — rough T1 estimate in seconds (order of magnitude is enough)
+    T2_prior_s : float — rough T2 estimate in seconds
+
+    Returns
+    -------
+    dict — same schema as ARCH_DEFAULTS entries
+    """
+    # Choose display unit from T1 magnitude
+    if T1_prior_s < 1e-3:
+        unit, scale = "µs", 1e6
+    elif T1_prior_s < 1.0:
+        unit, scale = "ms", 1e3
+    else:
+        unit, scale = "s", 1.0
+
+    return {
+        "T1_s":           T1_prior_s,
+        "T2_s":           min(T2_prior_s, 2.0 * T1_prior_s),
+        "T1_min_s":       T1_prior_s / 1000,
+        "T1_max_s":       T1_prior_s * 100,
+        "T2_min_s":       T2_prior_s / 1000,
+        "dw_max_rad_s":   2*np.pi * 500e3,
+        "dw_typical_khz": 5.0,
+        "eps_typical":    1e-3,
+        "eps_max":        0.1,
+        "dt_ns":          None,
+        "gate_time_ns":   50.0,
+        "display_unit":   unit,
+        "time_scale":     scale,
+    }
 
 # Gate repetition N values — universal across all architectures
 GATE_REP_N_VALUES = [5, 10, 20]
@@ -160,9 +251,12 @@ class BackendProfile:
     T2_prior_s:    float
     dt_ns:         Optional[float]
     backend_name:  str = "unknown"
+    custom_arch:   Optional[dict] = None   # populated for architecture="custom"
 
     @property
     def constants(self) -> dict:
+        if self.custom_arch is not None:
+            return self.custom_arch
         return ARCH_DEFAULTS.get(self.architecture, ARCH_DEFAULTS["unknown"])
 
     @property
@@ -239,9 +333,29 @@ class BackendProfile:
                           T2_prior_s: Optional[float] = None) -> "BackendProfile":
         """
         Build a BackendProfile from architecture type alone.
-        Uses published literature defaults if priors not specified.
-        Appropriate for IonQ, neutral atom, and first-run scenarios.
+
+        Works for ANY qubit technology:
+          - Named architectures (superconducting, trapped_ion, neutral_atom,
+            spin_qubit, nv_center) use published literature defaults.
+          - architecture="custom" with T1_prior_s/T2_prior_s supplied supports
+            any technology not in the list — photonic dual-rail, topological,
+            molecular spin, anything with exponential relaxation physics.
         """
+        if architecture == "custom":
+            if T1_prior_s is None or T2_prior_s is None:
+                raise ValueError(
+                    "architecture='custom' requires T1_prior_s and T2_prior_s"
+                )
+            custom = build_custom_arch(T1_prior_s, T2_prior_s)
+            return cls(
+                architecture = "custom",
+                T1_prior_s   = custom["T1_s"],
+                T2_prior_s   = custom["T2_s"],
+                dt_ns        = None,
+                backend_name = backend_name,
+                custom_arch  = custom,
+            )
+
         defaults = ARCH_DEFAULTS.get(architecture, ARCH_DEFAULTS["unknown"])
         T1 = T1_prior_s or defaults["T1_s"]
         T2 = T2_prior_s or defaults["T2_s"]
@@ -266,6 +380,7 @@ class BackendProfile:
             T2_prior_s   = T2_est_s,
             dt_ns        = self.dt_ns,
             backend_name = self.backend_name,
+            custom_arch  = self.custom_arch,
         )
 
 
@@ -518,83 +633,217 @@ class AerRunner(QuantumRunner):
 
 class DemoRunner(QuantumRunner):
     """
-    Local numpy simulation runner. Zero credentials required.
-    Simulates realistic noisy hardware using the forward model equations
-    with added shot noise. Used for development, testing, and demonstration.
-
-    Parameters
-    ----------
-    T1_s        : float  — true T1 (set by user to test recovery)
-    T2_s        : float  — true T2
-    delta_omega : float  — true Δω in rad/s
-    epsilon_sx  : float  — true gate error
-    architecture: str
+    Local numpy simulation runner. Zero credentials, zero Qiskit required.
+    Uses the Lindblad forward models + binomial shot noise directly.
+    Fixed true parameters — useful for sanity-checking inversion accuracy.
     """
 
-    def __init__(self,
-                 T1_s:        float = 150e-6,
-                 T2_s:        float = 90e-6,
-                 delta_omega: float = 2*np.pi*5e3,
-                 epsilon_sx:  float = 3.5e-4,
-                 architecture: str  = "superconducting"):
-        self.T1          = T1_s
-        self.T2          = T2_s
-        self.dw          = delta_omega
-        self.eps         = epsilon_sx
-        self.architecture = architecture
-        print(f"\n  [DemoRunner] True parameters:")
-        print(f"    T1          = {T1_s*1e6:.1f} µs")
-        print(f"    T2          = {T2_s*1e6:.1f} µs")
-        print(f"    Δω          = {delta_omega/(2*np.pi*1e3):.2f} kHz")
-        print(f"    ε_sx        = {epsilon_sx:.2e}")
+    def __init__(self, arch_constants: dict):
+        self.T1  = arch_constants["T1_s"]
+        self.T2  = arch_constants["T2_s"]
+        self.dw  = 2 * np.pi * arch_constants["dw_typical_khz"] * 1e3
+        self.eps = arch_constants["eps_typical"]
+        scale    = arch_constants["time_scale"]
+        unit     = arch_constants["display_unit"]
+        print(f"\n  [Demo] True parameters:")
+        print(f"    T1 = {self.T1*scale:.2f} {unit}  "
+              f"T2 = {self.T2*scale:.2f} {unit}  "
+              f"Δω = {self.dw/(2*np.pi*1e3):.2f} kHz  "
+              f"ε = {self.eps:.2e}")
         print(f"  Inversion should recover these values.\n")
 
     def run(self, circuits: list, shots: int) -> list[dict]:
-        """
-        Simulate 9 circuits using forward models + binomial shot noise.
-        Circuit identity is inferred from the circuit name.
-        """
-        counts_list = []
+        counts = []
         for qc in circuits:
-            name = qc.name
-            p1 = self._simulate_circuit(qc, name)
-            # Binomial shot noise: sqrt(p(1-p)/N) ~ 0.016 for p=0.5, N=1000
-            n1 = np.random.binomial(shots, p1)
-            n0 = shots - n1
-            counts_list.append({"0": int(n0), "1": int(n1)})
-        return counts_list
-
-    def _simulate_circuit(self, qc, name: str) -> float:
-        """Return P(|1⟩) for this circuit using the true forward model."""
-        # Parse delay from circuit
-        delay_s = self._extract_delay_s(qc)
-        if name.startswith("t1_"):
-            return forward_t1(delay_s, self.T1)
-        elif name.startswith("ramsey_"):
-            return forward_ramsey(delay_s, self.T2, self.dw)
-        elif name.startswith("gate_rep_"):
-            N  = int(name.split("N")[1])
-            p0 = forward_gate(N, self.eps)
-            return 1.0 - p0  # circuit returns P(|0⟩), we want P(|1⟩) for uniformity
-        return 0.5
+            delay_s = self._extract_delay_s(qc)
+            name    = qc.name
+            if name.startswith("t1_"):
+                p1 = forward_t1(delay_s, self.T1)
+            elif name.startswith("ramsey_"):
+                p1 = forward_ramsey(delay_s, self.T2, self.dw)
+            elif name.startswith("gate_rep_"):
+                N  = int(name.split("N")[1])
+                p1 = 1.0 - forward_gate(N, self.eps)
+            else:
+                p1 = 0.5
+            n1 = int(np.random.binomial(shots, float(np.clip(p1, 0, 1))))
+            counts.append({"0": shots - n1, "1": n1})
+        return counts
 
     @staticmethod
     def _extract_delay_s(qc) -> float:
-        """Extract delay duration in seconds from a Qiskit circuit."""
-        for instruction in qc.data:
-            op = instruction.operation
+        for instr in qc.data:
+            op = instr.operation
             if op.name == "delay":
                 unit  = getattr(op, "unit", "dt")
                 value = op.duration
-                if unit == "dt":
-                    return value * 0.2222e-9
-                elif unit == "s":
-                    return float(value)
-                elif unit == "ns":
-                    return float(value) * 1e-9
-                elif unit == "us":
-                    return float(value) * 1e-6
+                if unit == "dt":    return value * 0.2222e-9
+                elif unit == "s":   return float(value)
+                elif unit == "ns":  return float(value) * 1e-9
+                elif unit == "us":  return float(value) * 1e-6
         return 0.0
+
+
+class AerRealisticRunner(QuantumRunner):
+    """
+    Qiskit Aer local simulator with per-qubit randomised realistic noise.
+
+    Each qubit gets independently randomised T1, T2, ε_sx, and Δω drawn
+    from the architecture's physically realistic range. The noise model
+    for each circuit uses:
+        - Thermal relaxation during delay  (models T1 and T2 decay)
+        - Depolarising error on X and H    (models gate imperfection)
+        - Readout error                    (models measurement imperfection)
+        - Rz rotation after delay in Ramsey circuits (models Δω detuning)
+
+    This is the recommended simulator for research validation. It uses
+    real Qiskit circuits and Aer execution — no numpy shortcuts.
+
+    Parameters
+    ----------
+    arch_constants : dict  — from ARCH_DEFAULTS or build_custom_arch()
+    n_qubits       : int   — number of qubits to randomise
+    seed           : int   — random seed for reproducibility
+    """
+
+    def __init__(self, arch_constants: dict, n_qubits: int, seed: int = 42):
+        self.arch     = arch_constants
+        rng           = np.random.default_rng(seed)
+        T1_typ        = arch_constants["T1_s"]
+        T2_typ        = arch_constants["T2_s"]
+        dw_typ_rad    = 2 * np.pi * arch_constants["dw_typical_khz"] * 1e3
+        eps_typ       = arch_constants["eps_typical"]
+
+        # Randomise each qubit independently over a physically realistic spread
+        self.true_params: list[dict] = []
+        for _ in range(n_qubits):
+            T1  = T1_typ  * rng.uniform(0.55, 1.40)
+            T2  = min(T2_typ * rng.uniform(0.35, 1.15), 1.95 * T1)
+            eps = eps_typ * rng.uniform(0.5, 4.0)
+            dw  = dw_typ_rad * rng.uniform(-2.0, 2.0)   # can be +/-
+            self.true_params.append(
+                {"T1_s": T1, "T2_s": T2, "epsilon_sx": eps, "delta_omega": dw}
+            )
+
+        scale = arch_constants["time_scale"]
+        unit  = arch_constants["display_unit"]
+        print(f"\n  [AerRealistic] Per-qubit randomised true parameters:")
+        print(f"  {'Qubit':<8} {'T1':>12} {'T2':>12} {'Δω (kHz)':>12} {'ε_sx':>12}")
+        print(f"  {'-'*60}")
+        for i, p in enumerate(self.true_params):
+            print(f"  {i:<8} "
+                  f"{p['T1_s']*scale:>10.2f}{unit}  "
+                  f"{p['T2_s']*scale:>10.2f}{unit}  "
+                  f"{p['delta_omega']/(2*np.pi*1e3):>10.3f}     "
+                  f"{p['epsilon_sx']:>12.2e}")
+        print(f"\n  Inversion should recover these values per qubit.\n")
+
+        self._call_index = 0   # increments each run() call, one per qubit
+
+    def run(self, circuits: list, shots: int) -> list[dict]:
+        """
+        Run 9 circuits for the current qubit using a per-circuit realistic
+        noise model built from that qubit's randomised parameters.
+        """
+        from qiskit_aer import AerSimulator
+        from qiskit import transpile
+        from qiskit_aer.noise import (
+            NoiseModel, thermal_relaxation_error,
+            depolarizing_error, ReadoutError
+        )
+
+        idx    = self._call_index % len(self.true_params)
+        params = self.true_params[idx]
+        self._call_index += 1
+
+        T1_ns   = params["T1_s"]    * 1e9
+        T2_ns   = params["T2_s"]    * 1e9
+        eps     = params["epsilon_sx"]
+        dw      = params["delta_omega"]
+        gate_ns = self.arch["gate_time_ns"]
+        T2_ns   = min(T2_ns, 2.0 * T1_ns * 0.999)
+
+        all_counts = []
+        for qc in circuits:
+            # Inject Rz for frequency detuning in Ramsey circuits
+            circuit_to_run = self._inject_detuning(qc, dw) \
+                             if qc.name.startswith("ramsey_") else qc
+
+            delay_ns = self._get_delay_ns(circuit_to_run)
+            nm       = NoiseModel(basis_gates=["x", "h", "rz", "delay", "measure"])
+
+            # Compose thermal relaxation + depolarising into one channel per gate
+            # Using compose() avoids the "error already exists" warning
+            try:
+                t_err   = thermal_relaxation_error(T1_ns, T2_ns, gate_ns)
+                d_err   = depolarizing_error(eps, 1)
+                gate_err = d_err.compose(t_err)
+                nm.add_quantum_error(gate_err, ["x", "h"], [0])
+            except Exception:
+                # Fallback: depolarising only
+                nm.add_quantum_error(depolarizing_error(eps, 1), ["x", "h"], [0])
+
+            # Thermal relaxation on delay (actual delay duration)
+            if delay_ns > 0:
+                try:
+                    d_err = thermal_relaxation_error(T1_ns, T2_ns, delay_ns)
+                    nm.add_quantum_error(d_err, ["delay"], [0])
+                except Exception:
+                    pass
+
+            # Readout error
+            p_ro    = float(np.clip(eps * 2, 0.001, 0.05))
+            readout = ReadoutError([[1-p_ro/2, p_ro/2], [p_ro, 1-p_ro]])
+            nm.add_readout_error(readout, [0])
+
+            # optimization_level=0 preserves X and H gates so noise applies
+            sim        = AerSimulator(noise_model=nm)
+            transpiled = transpile(circuit_to_run, sim, optimization_level=0)
+            result     = sim.run(transpiled, shots=shots).result()
+            all_counts.append(result.get_counts(0))
+
+        return all_counts
+
+    @staticmethod
+    def _get_delay_ns(qc) -> float:
+        """Extract delay duration in nanoseconds from a Qiskit circuit."""
+        for instr in qc.data:
+            op = instr.operation
+            if op.name == "delay":
+                unit  = getattr(op, "unit", "dt")
+                value = float(op.duration)
+                if unit == "dt":  return value * 0.2222
+                elif unit == "s": return value * 1e9
+                elif unit == "ns":return value
+                elif unit == "us":return value * 1e3
+        return 0.0
+
+    @staticmethod
+    def _inject_detuning(qc, delta_omega_rad_s: float):
+        """
+        Return a new circuit with Rz(Δω·τ) inserted after the delay gate.
+        This correctly models qubit frequency detuning at circuit level.
+        """
+        from qiskit import QuantumCircuit
+        delay_s  = 0.0
+        for instr in qc.data:
+            op = instr.operation
+            if op.name == "delay":
+                unit  = getattr(op, "unit", "dt")
+                value = float(op.duration)
+                if unit == "dt":  delay_s = value * 0.2222e-9
+                elif unit == "s": delay_s = value
+                elif unit == "ns":delay_s = value * 1e-9
+                elif unit == "us":delay_s = value * 1e-6
+                break
+
+        theta  = delta_omega_rad_s * delay_s   # rotation angle in radians
+        new_qc = QuantumCircuit(1, 1, name=qc.name)
+        for instr in qc.data:
+            new_qc.append(instr.operation, instr.qubits, instr.clbits)
+            if instr.operation.name == "delay":
+                new_qc.rz(theta, 0)            # inject Rz after delay
+        return new_qc
 
 
 # =============================================================================
@@ -862,7 +1111,7 @@ def invert_all(counts_list: list[dict],
 
     Optimises T1, (T2, Δω), and ε_sx independently.
     """
-    arch = ARCH_DEFAULTS.get(profile.architecture, ARCH_DEFAULTS["unknown"])
+    arch = profile.constants
 
     # Extract P(|1⟩) for T1 and Ramsey, P(|0⟩) for gate rep
     p1_t1     = np.array([counts_list[i].get("1", 0) / shots for i in range(3)])
@@ -956,7 +1205,7 @@ def run_inversion(runner: QuantumRunner,
     -------
     list[InversionResult] — one result per qubit
     """
-    arch     = ARCH_DEFAULTS.get(profile.architecture, ARCH_DEFAULTS["unknown"])
+    arch     = profile.constants
     results  = []
 
     for qubit in qubit_ids:
@@ -988,8 +1237,11 @@ def run_inversion(runner: QuantumRunner,
 
         print("\n" + result.display(arch))
 
-        # Bootstrap: update profile priors for next qubit (warm start)
-        profile = profile.update_priors(result.T1_s, result.T2_s)
+        # NOTE: do NOT update profile priors here.
+        # Bootstrapping (using one run's estimates to warm-start the next)
+        # belongs in 2_monitor.py when monitoring the SAME qubit over time.
+        # Propagating priors across DIFFERENT qubits causes the escalating
+        # time-point bug seen in the CSV data.
 
         if save_path:
             save_result(result, save_path)
@@ -999,73 +1251,47 @@ def run_inversion(runner: QuantumRunner,
     return results
 
 
-def build_runner(platform: str,
+def build_runner(simulator: str,
                  architecture: str,
-                 backend_name: Optional[str] = None,
+                 n_qubits: int,
                  noise_model_backend=None,
-                 **credentials) -> tuple[QuantumRunner, BackendProfile]:
+                 T1_prior_s=None,
+                 T2_prior_s=None,
+                 seed: int = 42,
+                 **credentials):
     """
-    Factory function — builds the appropriate runner and profile for a platform.
-
-    Parameters
-    ----------
-    platform         : str — 'ibm', 'ionq', 'aer', 'ionq_sim', 'demo'
-    architecture     : str — 'superconducting', 'trapped_ion', 'neutral_atom'
-    backend_name     : str — backend identifier string
-    noise_model_backend : backend object for Aer noise model (optional)
-    **credentials    : token, instance, api_key etc. as needed by platform
+    Factory: build the right runner and BackendProfile for the chosen simulator.
+    simulator: 'demo' | 'aer_realistic' | 'aer_ibm_noise'
     """
-
-    if platform == "demo":
-        runner  = DemoRunner(architecture=architecture)
-        profile = BackendProfile.from_architecture(architecture, backend_name="demo")
+    profile = BackendProfile.from_architecture(
+        architecture,
+        backend_name = simulator,
+        T1_prior_s   = T1_prior_s,
+        T2_prior_s   = T2_prior_s,
+    )
+    if simulator == "demo":
+        runner = DemoRunner(arch_constants=profile.constants)
         return runner, profile
-
-    if platform == "ibm":
-        from qiskit_ibm_runtime import QiskitRuntimeService
-        service = QiskitRuntimeService(
-            channel  = "ibm_cloud",
-            token    = credentials["token"],
-            instance = credentials["instance"],
-        )
-        backend = service.backend(backend_name)
-        runner  = IBMRunner(backend)
-        profile = BackendProfile.from_ibm_backend(backend)
-        return runner, profile
-
-    if platform in ("ionq", "ionq_sim"):
-        from qiskit_ionq import IonQProvider
-        provider = IonQProvider(token=credentials["api_key"])
-        backend  = provider.get_backend(backend_name)
-        runner   = IonQRunner(backend)
-        profile  = BackendProfile.from_architecture(
-            "trapped_ion", backend_name=backend_name
+    if simulator == "aer_realistic":
+        runner = AerRealisticRunner(
+            arch_constants = profile.constants,
+            n_qubits       = n_qubits,
+            seed           = seed,
         )
         return runner, profile
-
-    if platform == "aer":
-        noise_model = None
-        if noise_model_backend is not None:
-            from qiskit_aer.noise import NoiseModel
-            noise_model = NoiseModel.from_backend(noise_model_backend)
-        runner  = AerRunner(noise_model=noise_model)
-        profile = BackendProfile.from_architecture(
-            architecture, backend_name=backend_name or "aer_simulator"
-        )
+    if simulator == "aer_ibm_noise":
+        from qiskit_aer.noise import NoiseModel
+        noise_model = NoiseModel.from_backend(noise_model_backend)
+        runner = AerRunner(noise_model=noise_model)
         return runner, profile
-
-    raise ValueError(f"Unknown platform: {platform}. "
-                     f"Choose from: ibm, ionq, ionq_sim, aer, demo")
+    raise ValueError(f"Unknown simulator: {simulator}")
 
 
 # =============================================================================
 # INTERACTIVE WIZARD
-# Walks the user through platform, architecture, credentials, and qubit
-# selection with simple numbered prompts. No command-line flags needed.
 # =============================================================================
 
-def _ask_choice(question: str, options: list[str], default: int = 1) -> int:
-    """Prompt for a numbered choice. Returns the 1-based index chosen."""
+def _ask_choice(question: str, options, default: int = 1) -> int:
     print(f"\n{question}")
     for i, opt in enumerate(options, start=1):
         print(f"  [{i}] {opt}")
@@ -1083,14 +1309,12 @@ def _ask_choice(question: str, options: list[str], default: int = 1) -> int:
 
 
 def _ask_text(question: str, default: str = "") -> str:
-    """Prompt for free text with an optional default."""
     suffix = f" [{default}]" if default else ""
     raw = input(f"{question}{suffix}: ").strip()
     return raw if raw else default
 
 
 def _ask_int(question: str, default: int) -> int:
-    """Prompt for an integer with a default."""
     while True:
         raw = input(f"{question} [{default}]: ").strip()
         if raw == "":
@@ -1102,132 +1326,99 @@ def _ask_int(question: str, default: int) -> int:
 
 
 def _ask_secret(question: str) -> str:
-    """Prompt for a credential, hidden as the user types."""
     import getpass
     return getpass.getpass(f"{question}: ").strip()
 
 
 def main():
     print("=" * 60)
-    print("  QUANTUM CANARY v2 — LINDBLAD INVERSION")
-    print("  Physics-based qubit drift detection. No ML. No training.")
+    print("  QUANTUM CANARY v2 — LINDBLAD INVERSION (research)")
+    print("  Local Qiskit simulation. No ML. No training data.")
     print("=" * 60)
 
-    # ── STEP 1: Simulation or real hardware? ─────────────────────────────────
-    mode = _ask_choice(
-        "Run on simulation or real hardware?",
-        ["Simulation", "Real hardware"],
-        default=1,
+    # ── STEP 1: Simulator ─────────────────────────────────────────────────
+    sim_choice = _ask_choice(
+        "Which simulator?",
+        [
+            "Demo          (numpy forward model + shot noise, instant, known true values)",
+            "Aer realistic (Qiskit Aer, per-qubit randomised thermal + depolarising noise)",
+            "Aer + IBM     (Qiskit Aer with real IBM backend noise model, needs credentials)",
+        ],
+        default=2,
     )
+    simulator = {1: "demo", 2: "aer_realistic", 3: "aer_ibm_noise"}[sim_choice]
 
-    # ── STEP 2: Pick the platform ─────────────────────────────────────────────
-    if mode == 1:  # simulation
-        sim_choice = _ask_choice(
-            "Which simulator?",
-            [
-                "Demo (local numpy, zero setup, known true values)",
-                "Qiskit Aer (local, ideal noiseless)",
-                "Qiskit Aer with IBM hardware noise model (needs IBM credentials)",
-                "IonQ cloud simulator (Forte/Aria noisy, needs IonQ API key)",
-            ],
-            default=1,
-        )
-        platform = {1: "demo", 2: "aer", 3: "aer_noisy", 4: "ionq_sim"}[sim_choice]
-    else:  # real hardware
-        hw_choice = _ask_choice(
-            "Which hardware provider?",
-            ["IBM Quantum", "IonQ"],
-            default=1,
-        )
-        platform = {1: "ibm", 2: "ionq"}[hw_choice]
+    # ── STEP 2: Architecture ─────────────────────────────────────────────
+    T1_custom = None
+    T2_custom = None
 
-    # ── STEP 3: Architecture ─────────────────────────────────────────────────
-    # Auto-set for known platforms; ask only when ambiguous.
-    if platform in ("ibm", "aer_noisy"):
+    if simulator == "aer_ibm_noise":
         architecture = "superconducting"
-        print("\nArchitecture: superconducting (auto-set for IBM)")
-    elif platform in ("ionq", "ionq_sim"):
-        architecture = "trapped_ion"
-        print("\nArchitecture: trapped_ion (auto-set for IonQ)")
+        print("\nArchitecture: superconducting (fixed for IBM noise model)")
     else:
         arch_choice = _ask_choice(
-            "Which qubit architecture to simulate?",
-            ["Superconducting (IBM-like, T1 ~ 150µs)",
-             "Trapped ion (IonQ-like, T1 ~ 10s)",
-             "Neutral atom (T1 ~ 1s)"],
+            "Which qubit architecture?",
+            ["Superconducting  (IBM/Google/Rigetti,   T1 ~ 150 us)",
+             "Trapped ion      (IonQ/Quantinuum,      T1 ~ 10 s)",
+             "Neutral atom     (QuEra/Pasqal,         T1 ~ 4 s)",
+             "Spin qubit       (Si/SiGe quantum dot,  T1 ~ 1 s, T2* ~ 100 us)",
+             "NV center        (diamond, room temp,   T1 ~ 6 ms)",
+             "Custom           (you supply T1 and T2)"],
             default=1,
         )
-        architecture = {1: "superconducting", 2: "trapped_ion", 3: "neutral_atom"}[arch_choice]
+        architecture = {1: "superconducting", 2: "trapped_ion", 3: "neutral_atom",
+                        4: "spin_qubit",      5: "nv_center",   6: "custom"}[arch_choice]
 
-    # ── STEP 4: Credentials + backend name ───────────────────────────────────
-    credentials  = {}
-    backend_name = None
+        if architecture == "custom":
+            print("\n  Any qubit technology with exponential T1 relaxation is supported.")
+            T1_custom = float(_ask_text("  Approximate T1 in seconds (e.g. 1e-4)", "1e-4"))
+            T2_custom = float(_ask_text("  Approximate T2 in seconds (e.g. 5e-5)", "5e-5"))
+
+    # ── STEP 3: IBM credentials (only for aer_ibm_noise) ─────────────────
     noise_model_backend = None
-
-    if platform == "ibm":
-        print("\n--- IBM Quantum credentials (hidden as you type) ---")
-        credentials["token"]    = _ask_secret("  IBM Quantum API token")
-        credentials["instance"] = _ask_secret("  IBM Cloud CRN")
-        backend_name = _ask_text("\nBackend name", default="ibm_kingston")
-
-    elif platform == "aer_noisy":
-        print("\n--- IBM credentials to fetch the hardware noise model ---")
-        print("    (No shots are used — noise model download only.)")
+    if simulator == "aer_ibm_noise":
+        print("\n--- IBM credentials (no shots used, noise model download only) ---")
         token    = _ask_secret("  IBM Quantum API token")
         instance = _ask_secret("  IBM Cloud CRN")
-        noise_backend_name = _ask_text("\nWhich backend's noise model", default="ibm_kingston")
+        bk_name  = _ask_text("  Backend name", "ibm_kingston")
         from qiskit_ibm_runtime import QiskitRuntimeService
-        print("  Connecting to IBM to fetch noise model...")
-        service = QiskitRuntimeService(channel="ibm_cloud", token=token, instance=instance)
-        noise_model_backend = service.backend(noise_backend_name)
-        backend_name = f"aer_noisy({noise_backend_name})"
-        platform = "aer"  # runs on Aer with the fetched noise model
-        print("  Noise model fetched.")
+        print("  Fetching noise model...")
+        svc = QiskitRuntimeService(channel="ibm_cloud", token=token, instance=instance)
+        noise_model_backend = svc.backend(bk_name)
+        print("  Done.")
 
-    elif platform in ("ionq", "ionq_sim"):
-        print("\n--- IonQ credentials (hidden as you type) ---")
-        credentials["api_key"] = _ask_secret("  IonQ API key")
-        if platform == "ionq":
-            backend_name = _ask_text("\nBackend name", default="qpu.forte")
-        else:
-            backend_name = _ask_text("\nSimulator backend name", default="simulator")
+    # ── STEP 4: Qubits, shots, seed ──────────────────────────────────────
+    n_qubits  = _ask_int("\nHow many qubits to simulate", default=5)
+    qubit_ids = list(range(n_qubits))
+    shots     = _ask_int("Shots per circuit", default=1000)
+    seed      = _ask_int("Random seed", default=42)
 
-    elif platform == "aer":
-        backend_name = "aer_ideal"
-
-    elif platform == "demo":
-        backend_name = "demo"
-
-    # ── STEP 5: Qubits and shots ─────────────────────────────────────────────
-    qubits_raw = _ask_text("\nWhich qubits? (comma-separated)", default="0")
-    qubit_ids  = [int(q.strip()) for q in qubits_raw.split(",")]
-    shots      = _ask_int("Shots per circuit", default=1000)
-
-    # ── STEP 6: Confirm ──────────────────────────────────────────────────────
+    # ── STEP 5: Confirm ──────────────────────────────────────────────────
     save_path = DATA_DIR / "inversion_results.csv"
     print("\n" + "-" * 60)
     print("  CONFIGURATION")
     print("-" * 60)
-    print(f"  Platform     : {platform}")
+    print(f"  Simulator    : {simulator}")
     print(f"  Architecture : {architecture}")
-    print(f"  Backend      : {backend_name}")
-    print(f"  Qubits       : {qubit_ids}")
-    print(f"  Shots        : {shots}  ({shots * 9} total per qubit)")
+    print(f"  Qubits       : {n_qubits}  (IDs {qubit_ids[0]}\u2013{qubit_ids[-1]})")
+    print(f"  Shots        : {shots} per circuit  ({shots * 9} total per qubit)")
+    print(f"  Seed         : {seed}")
     print(f"  Results file : {save_path}")
-    confirm = input("\n  Start inversion? [Y/n]: ").strip().lower()
+    confirm = input("\n  Start? [Y/n]: ").strip().lower()
     if confirm in ("n", "no"):
         print("  Cancelled.")
         return []
 
-    # ── STEP 7: Build runner and run ─────────────────────────────────────────
+    # ── STEP 6: Build and run ─────────────────────────────────────────────
     runner, profile = build_runner(
-        platform            = platform,
+        simulator           = simulator,
         architecture        = architecture,
-        backend_name        = backend_name,
+        n_qubits            = n_qubits,
         noise_model_backend = noise_model_backend,
-        **credentials,
+        T1_prior_s          = T1_custom,
+        T2_prior_s          = T2_custom,
+        seed                = seed,
     )
-
     results = run_inversion(
         runner    = runner,
         profile   = profile,
@@ -1235,12 +1426,10 @@ def main():
         shots     = shots,
         save_path = save_path,
     )
-
     print(f"\n{'='*60}")
     print(f"  COMPLETE  |  {len(results)} qubit(s) inverted")
     print(f"  Saved to  : {save_path}")
     print(f"{'='*60}\n")
-
     return results
 
 
