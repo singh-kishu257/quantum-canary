@@ -33,11 +33,9 @@
 #   unknown          — fallback to superconducting defaults
 #
 # USAGE:
-#   python 1_inversion.py --demo                        # no credentials, local sim
-#   python 1_inversion.py --platform aer               # Aer simulator
-#   python 1_inversion.py --platform ibm               # IBM hardware
-#   python 1_inversion.py --platform ionq              # IonQ hardware
-#   python 1_inversion.py --platform ionq_sim          # IonQ noisy simulator
+#   python 1_inversion.py
+#   Interactive prompts walk you through platform, architecture,
+#   credentials, qubit selection, and shots. No flags needed.
 #
 # OUTPUT:
 #   Prints T1, T2, Δω, ε_sx per qubit with uncertainties.
@@ -52,7 +50,6 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import warnings
 from abc import ABC, abstractmethod
@@ -1061,64 +1058,173 @@ def build_runner(platform: str,
                      f"Choose from: ibm, ionq, ionq_sim, aer, demo")
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Quantum Canary v2 — Lindblad parameter inversion",
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-    parser.add_argument(
-        "--platform", default="demo",
-        choices=["ibm", "ionq", "ionq_sim", "aer", "demo"],
-        help=(
-            "ibm       — IBM Quantum hardware\n"
-            "ionq      — IonQ hardware\n"
-            "ionq_sim  — IonQ cloud simulator\n"
-            "aer       — Qiskit Aer local simulator\n"
-            "demo      — local numpy demo (no credentials)"
-        )
-    )
-    parser.add_argument(
-        "--architecture", default="superconducting",
-        choices=["superconducting", "trapped_ion", "neutral_atom", "unknown"],
-        help="Qubit technology. Controls time point scaling and physical bounds."
-    )
-    parser.add_argument("--backend",  default=None, help="Backend name string.")
-    parser.add_argument("--qubits",   default="0", help="Comma-separated qubit IDs, e.g. 0,1,2")
-    parser.add_argument("--shots",    default=1000, type=int, help="Shots per circuit.")
-    parser.add_argument("--no-save",  action="store_true", help="Do not save results to CSV.")
-    return parser.parse_args()
+# =============================================================================
+# INTERACTIVE WIZARD
+# Walks the user through platform, architecture, credentials, and qubit
+# selection with simple numbered prompts. No command-line flags needed.
+# =============================================================================
+
+def _ask_choice(question: str, options: list[str], default: int = 1) -> int:
+    """Prompt for a numbered choice. Returns the 1-based index chosen."""
+    print(f"\n{question}")
+    for i, opt in enumerate(options, start=1):
+        print(f"  [{i}] {opt}")
+    while True:
+        raw = input(f"  > [{default}]: ").strip()
+        if raw == "":
+            return default
+        try:
+            choice = int(raw)
+            if 1 <= choice <= len(options):
+                return choice
+        except ValueError:
+            pass
+        print(f"  Enter a number between 1 and {len(options)}.")
+
+
+def _ask_text(question: str, default: str = "") -> str:
+    """Prompt for free text with an optional default."""
+    suffix = f" [{default}]" if default else ""
+    raw = input(f"{question}{suffix}: ").strip()
+    return raw if raw else default
+
+
+def _ask_int(question: str, default: int) -> int:
+    """Prompt for an integer with a default."""
+    while True:
+        raw = input(f"{question} [{default}]: ").strip()
+        if raw == "":
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            print("  Enter a valid integer.")
+
+
+def _ask_secret(question: str) -> str:
+    """Prompt for a credential, hidden as the user types."""
+    import getpass
+    return getpass.getpass(f"{question}: ").strip()
 
 
 def main():
-    args     = parse_args()
-    qubit_ids = [int(q.strip()) for q in args.qubits.split(",")]
-    save_path = None if args.no_save else DATA_DIR / "inversion_results.csv"
-
     print("=" * 60)
     print("  QUANTUM CANARY v2 — LINDBLAD INVERSION")
+    print("  Physics-based qubit drift detection. No ML. No training.")
     print("=" * 60)
-    print(f"  Platform     : {args.platform}")
-    print(f"  Architecture : {args.architecture}")
-    print(f"  Backend      : {args.backend or 'auto'}")
+
+    # ── STEP 1: Simulation or real hardware? ─────────────────────────────────
+    mode = _ask_choice(
+        "Run on simulation or real hardware?",
+        ["Simulation", "Real hardware"],
+        default=1,
+    )
+
+    # ── STEP 2: Pick the platform ─────────────────────────────────────────────
+    if mode == 1:  # simulation
+        sim_choice = _ask_choice(
+            "Which simulator?",
+            [
+                "Demo (local numpy, zero setup, known true values)",
+                "Qiskit Aer (local, ideal noiseless)",
+                "Qiskit Aer with IBM hardware noise model (needs IBM credentials)",
+                "IonQ cloud simulator (Forte/Aria noisy, needs IonQ API key)",
+            ],
+            default=1,
+        )
+        platform = {1: "demo", 2: "aer", 3: "aer_noisy", 4: "ionq_sim"}[sim_choice]
+    else:  # real hardware
+        hw_choice = _ask_choice(
+            "Which hardware provider?",
+            ["IBM Quantum", "IonQ"],
+            default=1,
+        )
+        platform = {1: "ibm", 2: "ionq"}[hw_choice]
+
+    # ── STEP 3: Architecture ─────────────────────────────────────────────────
+    # Auto-set for known platforms; ask only when ambiguous.
+    if platform in ("ibm", "aer_noisy"):
+        architecture = "superconducting"
+        print("\nArchitecture: superconducting (auto-set for IBM)")
+    elif platform in ("ionq", "ionq_sim"):
+        architecture = "trapped_ion"
+        print("\nArchitecture: trapped_ion (auto-set for IonQ)")
+    else:
+        arch_choice = _ask_choice(
+            "Which qubit architecture to simulate?",
+            ["Superconducting (IBM-like, T1 ~ 150µs)",
+             "Trapped ion (IonQ-like, T1 ~ 10s)",
+             "Neutral atom (T1 ~ 1s)"],
+            default=1,
+        )
+        architecture = {1: "superconducting", 2: "trapped_ion", 3: "neutral_atom"}[arch_choice]
+
+    # ── STEP 4: Credentials + backend name ───────────────────────────────────
+    credentials  = {}
+    backend_name = None
+    noise_model_backend = None
+
+    if platform == "ibm":
+        print("\n--- IBM Quantum credentials (hidden as you type) ---")
+        credentials["token"]    = _ask_secret("  IBM Quantum API token")
+        credentials["instance"] = _ask_secret("  IBM Cloud CRN")
+        backend_name = _ask_text("\nBackend name", default="ibm_kingston")
+
+    elif platform == "aer_noisy":
+        print("\n--- IBM credentials to fetch the hardware noise model ---")
+        print("    (No shots are used — noise model download only.)")
+        token    = _ask_secret("  IBM Quantum API token")
+        instance = _ask_secret("  IBM Cloud CRN")
+        noise_backend_name = _ask_text("\nWhich backend's noise model", default="ibm_kingston")
+        from qiskit_ibm_runtime import QiskitRuntimeService
+        print("  Connecting to IBM to fetch noise model...")
+        service = QiskitRuntimeService(channel="ibm_cloud", token=token, instance=instance)
+        noise_model_backend = service.backend(noise_backend_name)
+        backend_name = f"aer_noisy({noise_backend_name})"
+        platform = "aer"  # runs on Aer with the fetched noise model
+        print("  Noise model fetched.")
+
+    elif platform in ("ionq", "ionq_sim"):
+        print("\n--- IonQ credentials (hidden as you type) ---")
+        credentials["api_key"] = _ask_secret("  IonQ API key")
+        if platform == "ionq":
+            backend_name = _ask_text("\nBackend name", default="qpu.forte")
+        else:
+            backend_name = _ask_text("\nSimulator backend name", default="simulator")
+
+    elif platform == "aer":
+        backend_name = "aer_ideal"
+
+    elif platform == "demo":
+        backend_name = "demo"
+
+    # ── STEP 5: Qubits and shots ─────────────────────────────────────────────
+    qubits_raw = _ask_text("\nWhich qubits? (comma-separated)", default="0")
+    qubit_ids  = [int(q.strip()) for q in qubits_raw.split(",")]
+    shots      = _ask_int("Shots per circuit", default=1000)
+
+    # ── STEP 6: Confirm ──────────────────────────────────────────────────────
+    save_path = DATA_DIR / "inversion_results.csv"
+    print("\n" + "-" * 60)
+    print("  CONFIGURATION")
+    print("-" * 60)
+    print(f"  Platform     : {platform}")
+    print(f"  Architecture : {architecture}")
+    print(f"  Backend      : {backend_name}")
     print(f"  Qubits       : {qubit_ids}")
-    print(f"  Shots        : {args.shots}")
-    print(f"  Save results : {save_path or 'disabled'}")
+    print(f"  Shots        : {shots}  ({shots * 9} total per qubit)")
+    print(f"  Results file : {save_path}")
+    confirm = input("\n  Start inversion? [Y/n]: ").strip().lower()
+    if confirm in ("n", "no"):
+        print("  Cancelled.")
+        return []
 
-    credentials = {}
-
-    if args.platform == "ibm":
-        import getpass
-        credentials["token"]    = getpass.getpass("\n  IBM Quantum API token: ")
-        credentials["instance"] = getpass.getpass("  IBM Cloud CRN:         ")
-
-    if args.platform in ("ionq", "ionq_sim"):
-        import getpass
-        credentials["api_key"] = getpass.getpass("\n  IonQ API key: ")
-
+    # ── STEP 7: Build runner and run ─────────────────────────────────────────
     runner, profile = build_runner(
-        platform     = args.platform,
-        architecture = args.architecture,
-        backend_name = args.backend,
+        platform            = platform,
+        architecture        = architecture,
+        backend_name        = backend_name,
+        noise_model_backend = noise_model_backend,
         **credentials,
     )
 
@@ -1126,14 +1232,13 @@ def main():
         runner    = runner,
         profile   = profile,
         qubit_ids = qubit_ids,
-        shots     = args.shots,
+        shots     = shots,
         save_path = save_path,
     )
 
     print(f"\n{'='*60}")
     print(f"  COMPLETE  |  {len(results)} qubit(s) inverted")
-    if save_path:
-        print(f"  Saved to  : {save_path}")
+    print(f"  Saved to  : {save_path}")
     print(f"{'='*60}\n")
 
     return results
@@ -1141,6 +1246,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
