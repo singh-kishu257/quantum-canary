@@ -1,0 +1,22 @@
+# Quantum Canary v2 — Research Pipeline Dependencies
+# =====================================================
+# Install: pip install -r requirements.txt
+#
+# Required for all platforms:
+numpy>=1.24
+scipy>=1.11
+pandas>=2.0
+matplotlib>=3.7
+tqdm>=4.65
+#
+# Required for IBM platform (--platform ibm or --platform aer):
+qiskit>=1.0
+qiskit-ibm-runtime>=0.20
+qiskit-aer>=0.13
+#
+# Required for IonQ platform (--platform ionq or --platform ionq_sim):
+qiskit-ionq>=0.5
+#
+# Development and notebooks:
+jupyter>=1.0
+ipykernel>=6.0
