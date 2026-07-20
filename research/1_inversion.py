@@ -108,8 +108,8 @@ class BackendProfile:
 
     @property
     def ramsey_delays_s(self) -> list[float]:
-        ratios = [0.04, 0.20, 1.00]
-        delays = [r * self.T2_prior_s for r in ratios]
+        T2     = self.T2_prior_s
+        delays = [0.15 * T2, 0.50 * T2, 1.00 * T2]
         if self.dt_ns is not None:
             dt_s = self.dt_ns * 1e-9
             delays = [max(dt_s, round(d / dt_s) * dt_s) for d in delays]
@@ -301,36 +301,79 @@ def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
 def _invert_ramsey(p1_measured: np.ndarray, tau_s: np.ndarray,
                    T2_prior_s: float, arch: dict
                    ) -> tuple[float, float, float, float, float]:
-    dw_max   = arch["dw_max_rad_s"]
-    T2_min   = arch["T2_min_s"]
-    T2_max   = min(2.0 * T2_prior_s * 3, 2.0 * arch["T1_s"])
-    T2_alg, dw_alg = _algebraic_ramsey_guess(
+    dw_max = arch["dw_max_rad_s"]
+    T2_min = arch["T2_min_s"]
+    T2_max = min(2.0 * T2_prior_s * 3, 2.0 * arch["T1_s"])
+
+    short_idx = np.argsort(tau_s)[:2]
+    long_idx  = np.argsort(tau_s)[-3:]
+    tau_short = tau_s[short_idx]
+    p_short   = p1_measured[short_idx]
+    tau_long  = tau_s[long_idx]
+    p_long    = p1_measured[long_idx]
+
+    dw_candidates = []
+
+    try:
+        def ramsey_conditioned_dw(tau, dw):
+            return forward_ramsey(tau, T2_prior_s, dw)
+        popt_dw, _ = curve_fit(ramsey_conditioned_dw, tau_short, p_short,
+                               p0=[0.0], bounds=([-dw_max], [dw_max]),
+                               maxfev=10_000)
+        dw_candidates.extend([popt_dw[0], -popt_dw[0]])
+    except Exception:
+        pass
+
+    alg_T2, alg_dw = _algebraic_ramsey_guess(
         float(p1_measured[0]), tau_s[0],
-        float(p1_measured[2]), tau_s[2], dw_max)
-    T2_guess = float(np.clip(T2_alg or T2_prior_s, T2_min, T2_max))
-    dw_guess = float(dw_alg or 2 * np.pi * arch["dw_typical_khz"] * 1e3)
-    starts   = [dw_guess, -dw_guess] + [
-        2 * np.pi * k * 1e3 for k in _RAMSEY_DW_STARTS_KHZ]
-    bounds   = ([T2_min, -dw_max], [T2_max, dw_max])
-    best     = {"T2": T2_guess, "dw": dw_guess,
-                "sT2": np.inf, "sdw": np.inf, "resid": np.inf}
-    for dw_start in starts:
-        dw_start = float(np.clip(dw_start, -dw_max, dw_max))
+        float(p1_measured[-1]), tau_s[-1], dw_max)
+    if alg_dw is not None:
+        dw_candidates.extend([alg_dw, -alg_dw])
+
+    grid = [2 * np.pi * k * 1e3 for k in _RAMSEY_DW_STARTS_KHZ]
+    dw_candidates.extend(grid)
+
+    best_dw  = 0.0
+    best_T2  = T2_prior_s
+    best_res = np.inf
+
+    for dw_init in dw_candidates:
+        dw_init = float(np.clip(dw_init, -dw_max, dw_max))
+        try:
+            def ramsey_fixed_dw(tau, T2):
+                return forward_ramsey(tau, T2, dw_init)
+            popt_t2, _ = curve_fit(ramsey_fixed_dw, tau_long, p_long,
+                                   p0=[T2_prior_s],
+                                   bounds=([T2_min], [T2_max]),
+                                   maxfev=10_000)
+            T2_init = float(popt_t2[0])
+        except Exception:
+            T2_init = T2_prior_s
+
         try:
             popt, pcov = curve_fit(
                 forward_ramsey, tau_s, p1_measured,
-                p0=[T2_guess, dw_start], bounds=bounds, maxfev=20_000)
+                p0=[T2_init, dw_init],
+                bounds=([T2_min, -dw_max], [T2_max, dw_max]),
+                maxfev=30_000)
             T2, dw = float(popt[0]), float(popt[1])
             sigs   = np.sqrt(np.diag(pcov))
             resid  = float(np.sum(
                 (p1_measured - forward_ramsey(tau_s, T2, dw)) ** 2))
-            if resid < best["resid"]:
-                best = {"T2": T2, "dw": dw,
-                        "sT2": float(sigs[0]), "sdw": float(sigs[1]),
-                        "resid": resid}
+            if resid < best_res:
+                best_T2  = T2
+                best_dw  = dw
+                best_res = resid
+                best_sT2 = float(sigs[0])
+                best_sdw = float(sigs[1])
         except Exception:
             continue
-    return best["T2"], best["sT2"], best["dw"], best["sdw"], best["resid"]
+
+    if best_res == np.inf:
+        best_sT2 = np.inf
+        best_sdw = np.inf
+
+    return best_T2, best_sT2, best_dw, best_sdw, best_res
 
 
 def _invert_gate(p0_measured: np.ndarray, N_values: np.ndarray,
