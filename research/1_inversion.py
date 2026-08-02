@@ -3,14 +3,14 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
-from scipy.optimize import curve_fit, minimize_scalar
+from scipy.optimize import curve_fit
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 __all__ = [
     "ARCH_DEFAULTS", "build_custom_arch", "BackendProfile",
     "InversionResult", "forward_t1", "forward_ramsey_xy",
-    "forward_rpe", "forward_gate",
+    "forward_gate",
     "build_probe_circuits", "lindblad_inversion",
 ]
 
@@ -58,13 +58,13 @@ ARCH_DEFAULTS: dict[str, dict] = {
 }
 ARCH_DEFAULTS["unknown"] = ARCH_DEFAULTS["superconducting"]
 
-RPE_DEPTHS  = [0, 1, 2, 3, 4, 5, 6]
-RPE_N_GATES = [2**j for j in RPE_DEPTHS]
-
 GATE_REP_N_DT = [20, 40, 80]
 
 
-def build_custom_arch(T1_prior_s: float, T2_prior_s: float) -> dict:
+def build_custom_arch(T1_prior_s: float, T2_prior_s: float,
+                      dw_max_rad_s: Optional[float] = None,
+                      eps_typical:  Optional[float] = None,
+                      gate_time_ns: Optional[float] = None) -> dict:
     if T1_prior_s < 1e-3:
         unit, scale = "µs", 1e6
     elif T1_prior_s < 1.0:
@@ -75,9 +75,12 @@ def build_custom_arch(T1_prior_s: float, T2_prior_s: float) -> dict:
         "T1_s": T1_prior_s, "T2_s": min(T2_prior_s, 2.0*T1_prior_s),
         "T1_min_s": T1_prior_s/1000, "T1_max_s": T1_prior_s*100,
         "T2_min_s": T2_prior_s/1000,
-        "dw_max_rad_s": 2*np.pi*500e3, "dw_typical_khz": 5.0,
-        "eps_typical": 1e-3, "eps_max": 0.5,
-        "dt_ns": None, "gate_time_ns": 50.0,
+        "dw_max_rad_s": dw_max_rad_s if dw_max_rad_s is not None else 2*np.pi*500e3,
+        "dw_typical_khz": 5.0,
+        "eps_typical": eps_typical if eps_typical is not None else 1e-3,
+        "eps_max": 0.5,
+        "dt_ns": None,
+        "gate_time_ns": gate_time_ns if gate_time_ns is not None else 50.0,
         "display_unit": unit, "time_scale": scale,
     }
 
@@ -211,18 +214,6 @@ def _build_gate_rep_circuit(N: int):
     return qc
 
 
-def _build_rpe_circuit(n_gates: int, basis: str):
-    from qiskit import QuantumCircuit
-    qc = QuantumCircuit(1, 1, name=f"rpe_{basis}_n{n_gates}")
-    for _ in range(n_gates):
-        qc.sx(0)
-    if basis == "Y":
-        qc.sdg(0)
-        qc.h(0)
-    qc.measure(0, 0)
-    return qc
-
-
 def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
     t1_delays     = profile.t1_delays_s
     ramsey_delays = profile.ramsey_delays_s
@@ -238,24 +229,17 @@ def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
     for N in GATE_REP_N_DT:
         circuits.append(_build_gate_rep_circuit(N))
 
-    for n in RPE_N_GATES:
-        circuits.append(_build_rpe_circuit(n, "Y"))
-        circuits.append(_build_rpe_circuit(n, "Z"))
-
     n_t1     = len(t1_delays)
     n_ramsey = 2 * len(ramsey_delays)
     n_gate   = len(GATE_REP_N_DT)
-    n_rpe    = 2 * len(RPE_N_GATES)
 
     metadata = {
         "t1_delays_s":    t1_delays,
         "ramsey_delays_s": ramsey_delays,
         "gate_rep_N":     GATE_REP_N_DT,
-        "rpe_n_gates":    RPE_N_GATES,
         "n_t1":           n_t1,
         "n_ramsey":       n_ramsey,
         "n_gate":         n_gate,
-        "n_rpe":          n_rpe,
         "dw_max_rad_s":   profile.dw_max_rad_s,
         "architecture":   profile.architecture,
         "backend_name":   profile.backend_name,
@@ -275,11 +259,6 @@ def forward_ramsey_xy(t: float, T2_s: float, delta_omega: float):
     p1_x  = 0.5 * (1.0 - decay * np.cos(delta_omega * t))
     p1_y  = 0.5 * (1.0 - decay * np.sin(delta_omega * t))
     return p1_x, p1_y
-
-
-def forward_rpe(n_gates: int, epsilon: float) -> tuple[float, float]:
-    theta = n_gates * (np.pi/2.0 + epsilon)
-    return 0.5*(1.0 + np.sin(theta)), 0.5*(1.0 - np.cos(theta))
 
 
 def forward_gate(N, epsilon_sx: float):
@@ -311,19 +290,26 @@ def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
 
 def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
                        ramsey_delays: np.ndarray,
-                       T2_prior_s: float, arch: dict
+                       T2_prior_s: float, arch: dict,
+                       T1_estimate_s: float, shots_ramsey: int
                        ) -> tuple[float, float, float, float, float]:
     x_means = np.clip(1.0 - 2.0*p1_x_arr, -1.0, 1.0)
     y_means = np.clip(1.0 - 2.0*p1_y_arr, -1.0, 1.0)
     amps    = np.clip(np.sqrt(x_means**2 + y_means**2), 1e-6, 1.0)
 
     T2_min = arch["T2_min_s"]
-    T2_max = min(T2_prior_s * 20, 2.0 * arch["T1_s"])
+    T2_max = min(T2_prior_s * 20, 2.0 * T1_estimate_s)
 
     T2_guess = T2_prior_s
+    denom    = float(amps[0]) - float(amps[1])
+    if abs(denom) > 1e-6:
+        x = (float(amps[1]) - float(amps[2])) / denom
+        if 0 < x < 1:
+            T2_guess = float(np.clip(-ramsey_delays[0]/np.log(x),
+                                     T2_min, T2_max))
     try:
         popt, pcov = curve_fit(forward_t1, ramsey_delays, amps,
-                               p0=[T2_prior_s],
+                               p0=[T2_guess],
                                bounds=([T2_min], [T2_max]),
                                maxfev=10_000)
         T2    = float(popt[0])
@@ -336,7 +322,8 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
     angle  = float(np.arctan2(y_means[0], x_means[0]))
     dw     = angle / t1
     amp_t1 = float(amps[0])
-    sdw    = float(np.clip(1.0 / (t1 * max(amp_t1, 0.05) * np.sqrt(100)), 0, np.inf))
+    sigma_angle = 1.0 / (max(amp_t1, 0.05) * np.sqrt(max(shots_ramsey, 1)))
+    sdw    = float(np.clip(sigma_angle / t1, 0, np.inf))
 
     return T2, sT2, dw, sdw, resid
 
@@ -363,34 +350,12 @@ def _invert_gate(p0_measured: np.ndarray, N_values: np.ndarray,
     return eps, sigma, resid
 
 
-def _invert_rpe(p1_y_arr: np.ndarray, p1_z_arr: np.ndarray,
-                n_gates_arr: list, arch: dict) -> tuple[float, float, float]:
-    epsilon_est = 0.0
-    for j, n in enumerate(n_gates_arr):
-        sin_est = float(np.clip(2.0*float(p1_y_arr[j]) - 1.0, -1.0, 1.0))
-        cos_est = float(np.clip(1.0 - 2.0*float(p1_z_arr[j]), -1.0, 1.0))
-        epsilon_est += np.arctan2(sin_est, cos_est) / n
-    epsilon_est /= len(n_gates_arr)
-    epsilon_est  = float(np.clip(epsilon_est, -arch["eps_max"], arch["eps_max"]))
-
-    best_eps = epsilon_est
-    best_res = np.inf
-    for eps_init in [epsilon_est, 0.0, arch["eps_typical"], -arch["eps_typical"]]:
-        try:
-            def loss(e):
-                total = 0.0
-                for j, n in enumerate(n_gates_arr):
-                    py_pred, pz_pred = forward_rpe(n, e)
-                    total += (p1_y_arr[j]-py_pred)**2 + (p1_z_arr[j]-pz_pred)**2
-                return total
-            res = minimize_scalar(loss, bounds=(-arch["eps_max"], arch["eps_max"]),
-                                  method="bounded")
-            if res.fun < best_res:
-                best_eps = float(res.x); best_res = float(res.fun)
-        except Exception:
-            continue
-
-    return best_eps, arch["eps_typical"]*0.01, best_res
+def _chi2_per_dof(measured: np.ndarray, predicted: np.ndarray,
+                  shots: int, n_params: int) -> float:
+    var  = np.clip(predicted * (1.0 - predicted), 1e-8, None) / shots
+    chi2 = float(np.sum((measured - predicted)**2 / var))
+    dof  = max(len(measured) - n_params, 1)
+    return chi2 / dof
 
 
 @dataclass
@@ -410,6 +375,9 @@ class InversionResult:
     t1_residual:        float = 0.0
     ramsey_residual:    float = 0.0
     gate_residual:      float = 0.0
+    t1_chi2_dof:        float = 0.0
+    ramsey_chi2_dof:    float = 0.0
+    gate_chi2_dof:      float = 0.0
 
     def summary(self, arch: Optional[dict] = None) -> str:
         if arch is None:
@@ -428,38 +396,43 @@ def lindblad_inversion(counts_list: list[dict],
                         shots_t1:    int = 300,
                         shots_ramsey:int = 1000,
                         shots_gate:  int = 500,
-                        shots_rpe:   int = 200,
                         qubit_id:    int = 0,
                         timestamp:   str = "") -> InversionResult:
     arch     = profile.constants
     n_t1     = metadata["n_t1"]
     n_ramsey = metadata["n_ramsey"]
     n_gate   = metadata["n_gate"]
-    n_rpe    = metadata["n_rpe"]
-    expected = n_t1 + n_ramsey + n_gate + n_rpe
+    expected = n_t1 + n_ramsey + n_gate
     if len(counts_list) != expected:
         raise ValueError(f"Expected {expected} count dicts, got {len(counts_list)}")
 
     t1_counts     = counts_list[:n_t1]
     ramsey_counts = counts_list[n_t1:n_t1+n_ramsey]
-    gate_counts   = counts_list[n_t1+n_ramsey:n_t1+n_ramsey+n_gate]
-    rpe_counts    = counts_list[n_t1+n_ramsey+n_gate:]
+    gate_counts   = counts_list[n_t1+n_ramsey:]
 
     p1_t1 = np.array([c.get("1",0)/shots_t1 for c in t1_counts])
     t1d   = np.array(metadata["t1_delays_s"])
     T1, sT1, r_t1 = _invert_t1(p1_t1, t1d, profile.T1_prior_s, arch)
+
+    t1_chi2 = _chi2_per_dof(p1_t1, forward_t1(t1d, T1), shots_t1, n_params=1)
 
     n_times = n_ramsey // 2
     ramsey_delays = np.array(metadata["ramsey_delays_s"])
     p1_x_arr = np.array([ramsey_counts[2*i].get("1",0)/shots_ramsey   for i in range(n_times)])
     p1_y_arr = np.array([ramsey_counts[2*i+1].get("1",0)/shots_ramsey for i in range(n_times)])
     T2, sT2, dw, sdw, r_ram = _invert_ramsey_3t(
-        p1_x_arr, p1_y_arr, ramsey_delays, profile.T2_prior_s, arch)
-    T2 = min(T2, 2.0*T1)
+        p1_x_arr, p1_y_arr, ramsey_delays, profile.T2_prior_s, arch,
+        T1_estimate_s=T1, shots_ramsey=shots_ramsey)
+
+    px_pred, py_pred = forward_ramsey_xy(ramsey_delays, T2, dw)
+    ramsey_meas = np.concatenate([p1_x_arr, p1_y_arr])
+    ramsey_pred = np.concatenate([px_pred, py_pred])
+    ramsey_chi2 = _chi2_per_dof(ramsey_meas, ramsey_pred, shots_ramsey, n_params=2)
 
     p0_gate = np.array([c.get("0",0)/shots_gate for c in gate_counts])
     N_vals  = np.array(metadata["gate_rep_N"], dtype=float)
     eps, seps, r_gate = _invert_gate(p0_gate, N_vals, arch)
+    gate_chi2 = _chi2_per_dof(p0_gate, forward_gate(N_vals, eps), shots_gate, n_params=1)
 
     return InversionResult(
         backend_name=metadata.get("backend_name", profile.backend_name),
@@ -468,4 +441,5 @@ def lindblad_inversion(counts_list: list[dict],
         T2_s=T2, T2_sigma_s=sT2,
         delta_omega=dw, delta_omega_sigma=sdw,
         epsilon_sx=eps, epsilon_sx_sigma=seps,
-        t1_residual=r_t1, ramsey_residual=r_ram, gate_residual=r_gate)
+        t1_residual=r_t1, ramsey_residual=r_ram, gate_residual=r_gate,
+        t1_chi2_dof=t1_chi2, ramsey_chi2_dof=ramsey_chi2, gate_chi2_dof=gate_chi2)

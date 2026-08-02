@@ -18,9 +18,9 @@ FIGURES_DIR.mkdir(exist_ok=True)
 
 N_INSTANCES   = 300
 SHOTS_T1      = 300
-SHOTS_RAMSEY  = 1200
+SHOTS_RAMSEY  = 1000 
 SHOTS_GATE    = 500
-SEED          = 42
+SEED          = 43
 ARCHITECTURES = ["superconducting", "trapped_ion", "neutral_atom"]
 rng = np.random.default_rng(SEED)
 
@@ -69,15 +69,12 @@ def simulate_inversion(arch_name, T1_true, T2_true, dw_true, eps_true):
     p0_gate = inv.forward_gate(Nv, eps_true)
     gate_counts = [c0(p, SHOTS_GATE) for p in p0_gate]
 
-    n_rpe      = meta["n_rpe"]
-    rpe_counts = [{"0": SHOTS_RAMSEY//2, "1": SHOTS_RAMSEY//2}] * n_rpe
-
-    counts_list = t1_counts + ramsey_counts + gate_counts + rpe_counts
+    counts_list = t1_counts + ramsey_counts + gate_counts
 
     return inv.lindblad_inversion(
         counts_list, meta, profile,
         shots_t1=SHOTS_T1, shots_ramsey=SHOTS_RAMSEY,
-        shots_gate=SHOTS_GATE, shots_rpe=200,
+        shots_gate=SHOTS_GATE,
         qubit_id=0, timestamp=datetime.now(timezone.utc).isoformat())
 
 
@@ -97,17 +94,23 @@ def run_experiment():
         "eps_true","eps_rec","eps_sig",
         "t1_resid","ram_resid","gate_resid"]}
 
+    fit_failures  = {arch: 0 for arch in ARCHITECTURES}
+    fit_attempts  = {arch: 0 for arch in ARCHITECTURES}
+
     for arch in ARCHITECTURES:
         profile = inv.BackendProfile.from_architecture(arch)
         dw_max  = profile.dw_max_rad_s
         success = 0
         while success < N_INSTANCES:
             T1_t, T2_t, dw_t, eps_t = sample_true_params(arch, dw_max)
+            fit_attempts[arch] += 1
             try:
                 r = simulate_inversion(arch, T1_t, T2_t, dw_t, eps_t)
-            except Exception:
+            except (RuntimeError, ValueError):
+                fit_failures[arch] += 1
                 continue
             if not (np.isfinite(r.T1_s) and np.isfinite(r.T2_s)):
+                fit_failures[arch] += 1
                 continue
             rec["arch"].append(arch)
             rec["T1_true"].append(T1_t);   rec["T1_rec"].append(r.T1_s);        rec["T1_sig"].append(r.T1_sigma_s)
@@ -118,7 +121,12 @@ def run_experiment():
             rec["ram_resid"].append(r.ramsey_residual)
             rec["gate_resid"].append(r.gate_residual)
             success += 1
-    return rec
+
+    fit_failure_rate = {
+        arch: fit_failures[arch] / fit_attempts[arch] if fit_attempts[arch] else 0.0
+        for arch in ARCHITECTURES
+    }
+    return rec, fit_failure_rate
 
 
 def save_csv(rec):
@@ -219,7 +227,7 @@ if __name__ == "__main__":
         print(f"  {arch:16s}: T1 delays={t_dels}  Ramsey delays={r_dels}")
     print()
 
-    rec      = run_experiment()
+    rec, fit_failure_rate = run_experiment()
     csv_path = save_csv(rec)
     fig_path = make_figure(rec)
 
@@ -237,7 +245,7 @@ if __name__ == "__main__":
         vals = [T1_r2, T2_r2, dw_r2, ep_r2]
         ok   = "✓" if all(v >= 0.94 for v in vals) else "✗"
         all_pass &= all(v >= 0.94 for v in vals)
-        print(f"\n    {ok} {arch} (shots={shot_budget(arch)})")
+        print(f"\n    {ok} {arch} (shots={shot_budget(arch)}, fit-failure rate={fit_failure_rate[arch]:.2%})")
         print(f"      T1 : R²={T1_r2:.4f}  RMSE={T1_rmse:.3e} {u}")
         print(f"      T2 : R²={T2_r2:.4f}  RMSE={T2_rmse:.3e} {u}")
         print(f"      Δω : R²={dw_r2:.4f}  RMSE={dw_rmse:.3e} rad/s")
