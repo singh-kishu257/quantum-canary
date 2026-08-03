@@ -10,10 +10,13 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 __all__ = [
     "ARCH_DEFAULTS", "build_custom_arch", "BackendProfile",
     "InversionResult", "forward_t1", "forward_ramsey_xy",
-    "forward_gate",
+    "forward_gate", "forward_echo",
     "build_probe_circuits", "lindblad_inversion",
 ]
 
+# p0_given_1 / p1_given_0 are readout (SPAM) error rates: P(read 0 | true 1) and
+# P(read 1 | true 0). They are treated as known, architecture-typical constants that
+# are fixed during inversion (not fit) to avoid inflating the free-parameter count.
 ARCH_DEFAULTS: dict[str, dict] = {
     "superconducting": {
         "T1_s": 150e-6, "T2_s": 90e-6,
@@ -21,6 +24,7 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "dw_max_rad_s": 2*np.pi*500e3, "dw_typical_khz": 5.0,
         "eps_typical": 3.5e-4, "eps_max": 0.5,
         "dt_ns": 0.2222, "gate_time_ns": 50.0,
+        "p0_given_1": 0.02, "p1_given_0": 0.01,
         "display_unit": "µs", "time_scale": 1e6,
     },
     "trapped_ion": {
@@ -29,6 +33,7 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "dw_max_rad_s": 2*np.pi*10e3, "dw_typical_khz": 0.5,
         "eps_typical": 5e-4, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 135_000.0,
+        "p0_given_1": 0.005, "p1_given_0": 0.005,
         "display_unit": "ms", "time_scale": 1e3,
     },
     "neutral_atom": {
@@ -37,6 +42,7 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "dw_max_rad_s": 2*np.pi*100e3, "dw_typical_khz": 2.0,
         "eps_typical": 1e-3, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 500.0,
+        "p0_given_1": 0.02, "p1_given_0": 0.02,
         "display_unit": "ms", "time_scale": 1e3,
     },
     "spin_qubit": {
@@ -45,6 +51,7 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "dw_max_rad_s": 2*np.pi*1e6, "dw_typical_khz": 50.0,
         "eps_typical": 5e-3, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 100.0,
+        "p0_given_1": 0.02, "p1_given_0": 0.01,
         "display_unit": "µs", "time_scale": 1e6,
     },
     "nv_center": {
@@ -53,6 +60,7 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "dw_max_rad_s": 2*np.pi*1e6, "dw_typical_khz": 20.0,
         "eps_typical": 5e-3, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 20.0,
+        "p0_given_1": 0.02, "p1_given_0": 0.01,
         "display_unit": "µs", "time_scale": 1e6,
     },
 }
@@ -119,6 +127,15 @@ class BackendProfile:
         return delays
 
     @property
+    def echo_delays_s(self) -> list[float]:
+        T2     = self.T2_prior_s
+        delays = [0.5*T2, 1.0*T2, 1.5*T2]
+        if self.dt_ns is not None:
+            dt_s   = self.dt_ns * 1e-9
+            delays = [max(dt_s, round(d/dt_s)*dt_s) for d in delays]
+        return delays
+
+    @property
     def dw_max_rad_s(self) -> float:
         t1 = self.ramsey_delays_s[0]
         return 0.90 * np.pi / t1
@@ -143,11 +160,17 @@ class BackendProfile:
     @classmethod
     def from_architecture(cls, architecture: str, backend_name: str = "unknown",
                           T1_prior_s: Optional[float] = None,
-                          T2_prior_s: Optional[float] = None) -> "BackendProfile":
+                          T2_prior_s: Optional[float] = None,
+                          dw_max_rad_s: Optional[float] = None,
+                          eps_typical: Optional[float] = None,
+                          gate_time_ns: Optional[float] = None) -> "BackendProfile":
         if architecture == "custom":
             if T1_prior_s is None or T2_prior_s is None:
                 raise ValueError("architecture='custom' requires T1_prior_s and T2_prior_s")
-            custom = build_custom_arch(T1_prior_s, T2_prior_s)
+            custom = build_custom_arch(T1_prior_s, T2_prior_s,
+                                       dw_max_rad_s=dw_max_rad_s,
+                                       eps_typical=eps_typical,
+                                       gate_time_ns=gate_time_ns)
             return cls(architecture="custom", T1_prior_s=custom["T1_s"],
                        T2_prior_s=custom["T2_s"], dt_ns=None,
                        backend_name=backend_name, custom_arch=custom)
@@ -205,6 +228,23 @@ def _build_ramsey_y_circuit(delay_s: float, dt_ns: Optional[float], idx: int):
     return qc
 
 
+def _build_echo_circuit(delay_s: float, dt_ns: Optional[float], idx: int):
+    from qiskit import QuantumCircuit
+    half = delay_s / 2.0
+    dur1, unit1 = _snap(half, dt_ns)
+    dur2, unit2 = _snap(half, dt_ns)
+    qc = QuantumCircuit(1, 1, name=f"echo_{idx}")
+    qc.h(0)
+    if half > 0:
+        qc.delay(dur1, 0, unit=unit1)
+    qc.x(0)
+    if half > 0:
+        qc.delay(dur2, 0, unit=unit2)
+    qc.h(0)
+    qc.measure(0, 0)
+    return qc
+
+
 def _build_gate_rep_circuit(N: int):
     from qiskit import QuantumCircuit
     qc = QuantumCircuit(1, 1, name=f"gate_rep_N{N}")
@@ -217,6 +257,7 @@ def _build_gate_rep_circuit(N: int):
 def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
     t1_delays     = profile.t1_delays_s
     ramsey_delays = profile.ramsey_delays_s
+    echo_delays   = profile.echo_delays_s
     circuits      = []
 
     for i, t in enumerate(t1_delays):
@@ -229,17 +270,23 @@ def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
     for N in GATE_REP_N_DT:
         circuits.append(_build_gate_rep_circuit(N))
 
+    for i, t in enumerate(echo_delays):
+        circuits.append(_build_echo_circuit(t, profile.dt_ns, i))
+
     n_t1     = len(t1_delays)
     n_ramsey = 2 * len(ramsey_delays)
     n_gate   = len(GATE_REP_N_DT)
+    n_echo   = len(echo_delays)
 
     metadata = {
         "t1_delays_s":    t1_delays,
         "ramsey_delays_s": ramsey_delays,
         "gate_rep_N":     GATE_REP_N_DT,
+        "echo_delays_s":  echo_delays,
         "n_t1":           n_t1,
         "n_ramsey":       n_ramsey,
         "n_gate":         n_gate,
+        "n_echo":         n_echo,
         "dw_max_rad_s":   profile.dw_max_rad_s,
         "architecture":   profile.architecture,
         "backend_name":   profile.backend_name,
@@ -250,8 +297,9 @@ def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
     return circuits, metadata
 
 
-def forward_t1(tau_s, T1_s: float):
-    return np.exp(-np.asarray(tau_s, dtype=float) / T1_s)
+def forward_t1(tau_s, T1_s: float, p0_given_1: float = 0.0, p1_given_0: float = 0.0):
+    p_ideal = np.exp(-np.asarray(tau_s, dtype=float) / T1_s)
+    return p_ideal * (1.0 - p0_given_1) + (1.0 - p_ideal) * p1_given_0
 
 
 def forward_ramsey_xy(t: float, T2_s: float, delta_omega: float):
@@ -261,13 +309,22 @@ def forward_ramsey_xy(t: float, T2_s: float, delta_omega: float):
     return p1_x, p1_y
 
 
-def forward_gate(N, epsilon_sx: float):
+def forward_echo(tau_s, T2_echo_s: float):
+    return 0.5 * (1.0 - np.exp(-np.asarray(tau_s, dtype=float) / T2_echo_s))
+
+
+def forward_gate(N, epsilon_sx: float, p0_given_1: float = 0.0, p1_given_0: float = 0.0):
     N = np.asarray(N, dtype=float)
-    return 0.5 * (1.0 + (1.0 - 2.0*epsilon_sx)**(2.0*N))
+    p_ideal = 0.5 * (1.0 + (1.0 - 2.0*epsilon_sx)**(2.0*N))
+    return p_ideal * (1.0 - p0_given_1) + (1.0 - p_ideal) * p1_given_0
 
 
 def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
-               T1_prior_s: float, arch: dict) -> tuple[float, float, float]:
+               T1_prior_s: float, arch: dict, shots_t1: int) -> tuple[float, float, float]:
+    p0_given_1 = arch.get("p0_given_1", 0.0)
+    p1_given_0 = arch.get("p1_given_0", 0.0)
+    spam_model = lambda tau_s, T1_s: forward_t1(tau_s, T1_s, p0_given_1, p1_given_0)
+
     denom    = float(p1_measured[0]) - float(p1_measured[1])
     T1_guess = T1_prior_s
     if abs(denom) > 1e-6:
@@ -275,14 +332,17 @@ def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
         if 0 < x < 1:
             T1_guess = float(np.clip(-tau_s[0]/np.log(x),
                                      arch["T1_min_s"], arch["T1_max_s"]))
+    p_guess = spam_model(tau_s, T1_guess)
+    fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_t1), 1e-3)
     try:
-        popt, pcov = curve_fit(forward_t1, tau_s, p1_measured,
+        popt, pcov = curve_fit(spam_model, tau_s, p1_measured,
                                p0=[T1_guess],
+                               sigma=fit_sigma, absolute_sigma=True,
                                bounds=([arch["T1_min_s"]], [arch["T1_max_s"]]),
                                maxfev=10_000)
         T1    = float(popt[0])
         sigma = float(np.sqrt(np.diag(pcov))[0])
-        resid = float(np.sum((p1_measured - forward_t1(tau_s, T1))**2))
+        resid = float(np.sum((p1_measured - spam_model(tau_s, T1))**2))
     except Exception:
         T1, sigma, resid = T1_guess, np.inf, np.inf
     return T1, sigma, resid
@@ -307,16 +367,6 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
         if 0 < x < 1:
             T2_guess = float(np.clip(-ramsey_delays[0]/np.log(x),
                                      T2_min, T2_max))
-    try:
-        popt, pcov = curve_fit(forward_t1, ramsey_delays, amps,
-                               p0=[T2_guess],
-                               bounds=([T2_min], [T2_max]),
-                               maxfev=10_000)
-        T2    = float(popt[0])
-        sT2   = float(np.sqrt(np.diag(pcov))[0])
-        resid = float(np.sum((amps - forward_t1(ramsey_delays, T2))**2))
-    except Exception:
-        T2, sT2, resid = T2_guess, np.inf, np.inf
 
     t1     = float(ramsey_delays[0])
     angle  = float(np.arctan2(y_means[0], x_means[0]))
@@ -325,11 +375,34 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
     sigma_angle = 1.0 / (max(amp_t1, 0.05) * np.sqrt(max(shots_ramsey, 1)))
     sdw    = float(np.clip(sigma_angle / t1, 0, np.inf))
 
+    xy_meas = np.concatenate([p1_x_arr, p1_y_arr])
+    def xy_model(_, T2_s):
+        px_pred, py_pred = forward_ramsey_xy(ramsey_delays, T2_s, dw)
+        return np.concatenate([px_pred, py_pred])
+
+    p_guess   = xy_model(None, T2_guess)
+    fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_ramsey), 1e-3)
+    try:
+        popt, pcov = curve_fit(xy_model, ramsey_delays, xy_meas,
+                               p0=[T2_guess],
+                               sigma=fit_sigma, absolute_sigma=True,
+                               bounds=([T2_min], [T2_max]),
+                               maxfev=10_000)
+        T2    = float(popt[0])
+        sT2   = float(np.sqrt(np.diag(pcov))[0])
+        resid = float(np.sum((xy_meas - xy_model(None, T2))**2))
+    except Exception:
+        T2, sT2, resid = T2_guess, np.inf, np.inf
+
     return T2, sT2, dw, sdw, resid
 
 
 def _invert_gate(p0_measured: np.ndarray, N_values: np.ndarray,
-                  arch: dict) -> tuple[float, float, float]:
+                  arch: dict, shots_gate: int) -> tuple[float, float, float]:
+    p0_given_1 = arch.get("p0_given_1", 0.0)
+    p1_given_0 = arch.get("p1_given_0", 0.0)
+    spam_model = lambda N_values, epsilon_sx: forward_gate(N_values, epsilon_sx, p0_given_1, p1_given_0)
+
     denom    = float(p0_measured[0]) - float(p0_measured[1])
     eps_guess = arch["eps_typical"]
     if abs(denom) > 1e-6:
@@ -337,17 +410,47 @@ def _invert_gate(p0_measured: np.ndarray, N_values: np.ndarray,
         if 0 < x < 1:
             eps_guess = float(np.clip((1 - x**(1.0/(2.0*N_values[0])))/2.0,
                                       0.0, arch["eps_max"]))
+    p_guess = spam_model(N_values, eps_guess)
+    fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_gate), 1e-3)
     try:
-        popt, pcov = curve_fit(forward_gate, N_values, p0_measured,
+        popt, pcov = curve_fit(spam_model, N_values, p0_measured,
                                p0=[eps_guess],
+                               sigma=fit_sigma, absolute_sigma=True,
                                bounds=([0.0], [arch["eps_max"]]),
                                maxfev=10_000)
         eps   = float(popt[0])
         sigma = float(np.sqrt(np.diag(pcov))[0])
-        resid = float(np.sum((p0_measured - forward_gate(N_values, eps))**2))
+        resid = float(np.sum((p0_measured - spam_model(N_values, eps))**2))
     except Exception:
         eps, sigma, resid = eps_guess, np.inf, np.inf
     return eps, sigma, resid
+
+
+def _invert_echo(p1_measured: np.ndarray, tau_s: np.ndarray,
+                 T1_prior_s: float, arch: dict,
+                 T1_estimate_s: float, shots_echo: int) -> tuple[float, float, float]:
+    denom     = float(p1_measured[0]) - float(p1_measured[1])
+    T2_min    = arch["T2_min_s"]
+    T2_max    = 2.0 * T1_estimate_s
+    T2_guess  = T1_prior_s
+    if abs(denom) > 1e-6:
+        x = (float(p1_measured[1]) - float(p1_measured[2])) / denom
+        if 0 < x < 1:
+            T2_guess = float(np.clip(-tau_s[0]/np.log(x), T2_min, T2_max))
+    p_guess = forward_echo(tau_s, T2_guess)
+    fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_echo), 1e-3)
+    try:
+        popt, pcov = curve_fit(forward_echo, tau_s, p1_measured,
+                               p0=[T2_guess],
+                               sigma=fit_sigma, absolute_sigma=True,
+                               bounds=([T2_min], [T2_max]),
+                               maxfev=10_000)
+        T2_echo    = float(popt[0])
+        sigma      = float(np.sqrt(np.diag(pcov))[0])
+        resid      = float(np.sum((p1_measured - forward_echo(tau_s, T2_echo))**2))
+    except Exception:
+        T2_echo, sigma, resid = T2_guess, np.inf, np.inf
+    return T2_echo, sigma, resid
 
 
 def _chi2_per_dof(measured: np.ndarray, predicted: np.ndarray,
@@ -378,6 +481,12 @@ class InversionResult:
     t1_chi2_dof:        float = 0.0
     ramsey_chi2_dof:    float = 0.0
     gate_chi2_dof:      float = 0.0
+    T2_ramsey_s:        float = 0.0
+    T2_ramsey_sigma_s:  float = 0.0
+    T2_echo_s:          float = 0.0
+    T2_echo_sigma_s:    float = 0.0
+    echo_residual:      float = 0.0
+    echo_chi2_dof:      float = 0.0
 
     def summary(self, arch: Optional[dict] = None) -> str:
         if arch is None:
@@ -396,25 +505,30 @@ def lindblad_inversion(counts_list: list[dict],
                         shots_t1:    int = 300,
                         shots_ramsey:int = 1000,
                         shots_gate:  int = 500,
+                        shots_echo:  int = 500,
                         qubit_id:    int = 0,
                         timestamp:   str = "") -> InversionResult:
     arch     = profile.constants
     n_t1     = metadata["n_t1"]
     n_ramsey = metadata["n_ramsey"]
     n_gate   = metadata["n_gate"]
-    expected = n_t1 + n_ramsey + n_gate
+    n_echo   = metadata["n_echo"]
+    expected = n_t1 + n_ramsey + n_gate + n_echo
     if len(counts_list) != expected:
         raise ValueError(f"Expected {expected} count dicts, got {len(counts_list)}")
 
     t1_counts     = counts_list[:n_t1]
     ramsey_counts = counts_list[n_t1:n_t1+n_ramsey]
-    gate_counts   = counts_list[n_t1+n_ramsey:]
+    gate_counts   = counts_list[n_t1+n_ramsey:n_t1+n_ramsey+n_gate]
+    echo_counts   = counts_list[n_t1+n_ramsey+n_gate:]
 
     p1_t1 = np.array([c.get("1",0)/shots_t1 for c in t1_counts])
     t1d   = np.array(metadata["t1_delays_s"])
-    T1, sT1, r_t1 = _invert_t1(p1_t1, t1d, profile.T1_prior_s, arch)
+    T1, sT1, r_t1 = _invert_t1(p1_t1, t1d, profile.T1_prior_s, arch, shots_t1)
 
-    t1_chi2 = _chi2_per_dof(p1_t1, forward_t1(t1d, T1), shots_t1, n_params=1)
+    t1_chi2 = _chi2_per_dof(p1_t1,
+        forward_t1(t1d, T1, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
+        shots_t1, n_params=1)
 
     n_times = n_ramsey // 2
     ramsey_delays = np.array(metadata["ramsey_delays_s"])
@@ -431,15 +545,41 @@ def lindblad_inversion(counts_list: list[dict],
 
     p0_gate = np.array([c.get("0",0)/shots_gate for c in gate_counts])
     N_vals  = np.array(metadata["gate_rep_N"], dtype=float)
-    eps, seps, r_gate = _invert_gate(p0_gate, N_vals, arch)
-    gate_chi2 = _chi2_per_dof(p0_gate, forward_gate(N_vals, eps), shots_gate, n_params=1)
+    eps, seps, r_gate = _invert_gate(p0_gate, N_vals, arch, shots_gate)
+    gate_chi2 = _chi2_per_dof(p0_gate,
+        forward_gate(N_vals, eps, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
+        shots_gate, n_params=1)
+
+    p1_echo   = np.array([c.get("1",0)/shots_echo for c in echo_counts])
+    echo_delays = np.array(metadata["echo_delays_s"])
+    T2_echo, sT2_echo, r_echo = _invert_echo(
+        p1_echo, echo_delays, profile.T2_prior_s, arch,
+        T1_estimate_s=T1, shots_echo=shots_echo)
+    echo_chi2 = _chi2_per_dof(p1_echo, forward_echo(echo_delays, T2_echo), shots_echo, n_params=1)
+
+    ramsey_chi2_factor = max(ramsey_chi2, 1.0) if np.isfinite(ramsey_chi2) and ramsey_chi2 > 0 else 1.0
+    echo_chi2_factor   = max(echo_chi2, 1.0) if np.isfinite(echo_chi2) and echo_chi2 > 0 else 1.0
+    w_ramsey = 1.0/(sT2**2 * ramsey_chi2_factor) if np.isfinite(sT2) and sT2 > 0 else 0.0
+    w_echo   = 1.0/(sT2_echo**2 * echo_chi2_factor) if np.isfinite(sT2_echo) and sT2_echo > 0 else 0.0
+    if w_ramsey == 0.0 and w_echo == 0.0:
+        T2_combined, sT2_combined = T2, sT2
+    elif w_ramsey == 0.0:
+        T2_combined, sT2_combined = T2_echo, sT2_echo
+    elif w_echo == 0.0:
+        T2_combined, sT2_combined = T2, sT2
+    else:
+        T2_combined = (w_ramsey*T2 + w_echo*T2_echo) / (w_ramsey + w_echo)
+        sT2_combined = float(np.sqrt(1.0/(w_ramsey + w_echo)))
 
     return InversionResult(
         backend_name=metadata.get("backend_name", profile.backend_name),
         qubit_id=qubit_id, timestamp=timestamp, architecture=profile.architecture,
         T1_s=T1, T1_sigma_s=sT1,
-        T2_s=T2, T2_sigma_s=sT2,
+        T2_s=T2_combined, T2_sigma_s=sT2_combined,
         delta_omega=dw, delta_omega_sigma=sdw,
         epsilon_sx=eps, epsilon_sx_sigma=seps,
         t1_residual=r_t1, ramsey_residual=r_ram, gate_residual=r_gate,
-        t1_chi2_dof=t1_chi2, ramsey_chi2_dof=ramsey_chi2, gate_chi2_dof=gate_chi2)
+        t1_chi2_dof=t1_chi2, ramsey_chi2_dof=ramsey_chi2, gate_chi2_dof=gate_chi2,
+        T2_ramsey_s=T2, T2_ramsey_sigma_s=sT2,
+        T2_echo_s=T2_echo, T2_echo_sigma_s=sT2_echo,
+        echo_residual=r_echo, echo_chi2_dof=echo_chi2)
