@@ -5,8 +5,6 @@ from typing import Optional
 import numpy as np
 from scipy.optimize import curve_fit
 
-warnings.filterwarnings("ignore", category=RuntimeWarning)
-
 __all__ = [
     "ARCH_DEFAULTS", "build_custom_arch", "BackendProfile",
     "InversionResult", "forward_t1", "forward_ramsey_xy",
@@ -72,7 +70,9 @@ GATE_REP_N_DT = [20, 40, 80]
 def build_custom_arch(T1_prior_s: float, T2_prior_s: float,
                       dw_max_rad_s: Optional[float] = None,
                       eps_typical:  Optional[float] = None,
-                      gate_time_ns: Optional[float] = None) -> dict:
+                      gate_time_ns: Optional[float] = None,
+                      p0_given_1:   float = 0.0,
+                      p1_given_0:   float = 0.0) -> dict:
     if T1_prior_s < 1e-3:
         unit, scale = "µs", 1e6
     elif T1_prior_s < 1.0:
@@ -89,6 +89,8 @@ def build_custom_arch(T1_prior_s: float, T2_prior_s: float,
         "eps_max": 0.5,
         "dt_ns": None,
         "gate_time_ns": gate_time_ns if gate_time_ns is not None else 50.0,
+        "p0_given_1": p0_given_1,
+        "p1_given_0": p1_given_0,
         "display_unit": unit, "time_scale": scale,
     }
 
@@ -163,14 +165,18 @@ class BackendProfile:
                           T2_prior_s: Optional[float] = None,
                           dw_max_rad_s: Optional[float] = None,
                           eps_typical: Optional[float] = None,
-                          gate_time_ns: Optional[float] = None) -> "BackendProfile":
+                          gate_time_ns: Optional[float] = None,
+                          p0_given_1: float = 0.0,
+                          p1_given_0: float = 0.0) -> "BackendProfile":
         if architecture == "custom":
             if T1_prior_s is None or T2_prior_s is None:
                 raise ValueError("architecture='custom' requires T1_prior_s and T2_prior_s")
             custom = build_custom_arch(T1_prior_s, T2_prior_s,
                                        dw_max_rad_s=dw_max_rad_s,
                                        eps_typical=eps_typical,
-                                       gate_time_ns=gate_time_ns)
+                                       gate_time_ns=gate_time_ns,
+                                       p0_given_1=p0_given_1,
+                                       p1_given_0=p1_given_0)
             return cls(architecture="custom", T1_prior_s=custom["T1_s"],
                        T2_prior_s=custom["T2_s"], dt_ns=None,
                        backend_name=backend_name, custom_arch=custom)
@@ -309,8 +315,9 @@ def forward_ramsey_xy(t: float, T2_s: float, delta_omega: float):
     return p1_x, p1_y
 
 
-def forward_echo(tau_s, T2_echo_s: float):
-    return 0.5 * (1.0 - np.exp(-np.asarray(tau_s, dtype=float) / T2_echo_s))
+def forward_echo(tau_s, T2_echo_s: float, p0_given_1: float = 0.0, p1_given_0: float = 0.0):
+    p_ideal = 0.5 * (1.0 - np.exp(-np.asarray(tau_s, dtype=float) / T2_echo_s))
+    return p_ideal * (1.0 - p0_given_1) + (1.0 - p_ideal) * p1_given_0
 
 
 def forward_gate(N, epsilon_sx: float, p0_given_1: float = 0.0, p1_given_0: float = 0.0):
@@ -335,11 +342,13 @@ def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
     p_guess = spam_model(tau_s, T1_guess)
     fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_t1), 1e-3)
     try:
-        popt, pcov = curve_fit(spam_model, tau_s, p1_measured,
-                               p0=[T1_guess],
-                               sigma=fit_sigma, absolute_sigma=True,
-                               bounds=([arch["T1_min_s"]], [arch["T1_max_s"]]),
-                               maxfev=10_000)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            popt, pcov = curve_fit(spam_model, tau_s, p1_measured,
+                                   p0=[T1_guess],
+                                   sigma=fit_sigma, absolute_sigma=True,
+                                   bounds=([arch["T1_min_s"]], [arch["T1_max_s"]]),
+                                   maxfev=10_000)
         T1    = float(popt[0])
         sigma = float(np.sqrt(np.diag(pcov))[0])
         resid = float(np.sum((p1_measured - spam_model(tau_s, T1))**2))
@@ -383,11 +392,13 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
     p_guess   = xy_model(None, T2_guess)
     fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_ramsey), 1e-3)
     try:
-        popt, pcov = curve_fit(xy_model, ramsey_delays, xy_meas,
-                               p0=[T2_guess],
-                               sigma=fit_sigma, absolute_sigma=True,
-                               bounds=([T2_min], [T2_max]),
-                               maxfev=10_000)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            popt, pcov = curve_fit(xy_model, ramsey_delays, xy_meas,
+                                   p0=[T2_guess],
+                                   sigma=fit_sigma, absolute_sigma=True,
+                                   bounds=([T2_min], [T2_max]),
+                                   maxfev=10_000)
         T2    = float(popt[0])
         sT2   = float(np.sqrt(np.diag(pcov))[0])
         resid = float(np.sum((xy_meas - xy_model(None, T2))**2))
@@ -413,11 +424,13 @@ def _invert_gate(p0_measured: np.ndarray, N_values: np.ndarray,
     p_guess = spam_model(N_values, eps_guess)
     fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_gate), 1e-3)
     try:
-        popt, pcov = curve_fit(spam_model, N_values, p0_measured,
-                               p0=[eps_guess],
-                               sigma=fit_sigma, absolute_sigma=True,
-                               bounds=([0.0], [arch["eps_max"]]),
-                               maxfev=10_000)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            popt, pcov = curve_fit(spam_model, N_values, p0_measured,
+                                   p0=[eps_guess],
+                                   sigma=fit_sigma, absolute_sigma=True,
+                                   bounds=([0.0], [arch["eps_max"]]),
+                                   maxfev=10_000)
         eps   = float(popt[0])
         sigma = float(np.sqrt(np.diag(pcov))[0])
         resid = float(np.sum((p0_measured - spam_model(N_values, eps))**2))
@@ -429,25 +442,31 @@ def _invert_gate(p0_measured: np.ndarray, N_values: np.ndarray,
 def _invert_echo(p1_measured: np.ndarray, tau_s: np.ndarray,
                  T1_prior_s: float, arch: dict,
                  T1_estimate_s: float, shots_echo: int) -> tuple[float, float, float]:
+    p0_given_1 = arch.get("p0_given_1", 0.0)
+    p1_given_0 = arch.get("p1_given_0", 0.0)
+    spam_model = lambda tau_s, T2_echo_s: forward_echo(tau_s, T2_echo_s, p0_given_1, p1_given_0)
+
     denom     = float(p1_measured[0]) - float(p1_measured[1])
     T2_min    = arch["T2_min_s"]
     T2_max    = 2.0 * T1_estimate_s
-    T2_guess  = T1_prior_s
+    T2_guess  = float(np.clip(T2_max * 0.5, T2_min, T2_max))
     if abs(denom) > 1e-6:
         x = (float(p1_measured[1]) - float(p1_measured[2])) / denom
         if 0 < x < 1:
             T2_guess = float(np.clip(-tau_s[0]/np.log(x), T2_min, T2_max))
-    p_guess = forward_echo(tau_s, T2_guess)
+    p_guess = spam_model(tau_s, T2_guess)
     fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_echo), 1e-3)
     try:
-        popt, pcov = curve_fit(forward_echo, tau_s, p1_measured,
-                               p0=[T2_guess],
-                               sigma=fit_sigma, absolute_sigma=True,
-                               bounds=([T2_min], [T2_max]),
-                               maxfev=10_000)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            popt, pcov = curve_fit(spam_model, tau_s, p1_measured,
+                                   p0=[T2_guess],
+                                   sigma=fit_sigma, absolute_sigma=True,
+                                   bounds=([T2_min], [T2_max]),
+                                   maxfev=10_000)
         T2_echo    = float(popt[0])
         sigma      = float(np.sqrt(np.diag(pcov))[0])
-        resid      = float(np.sum((p1_measured - forward_echo(tau_s, T2_echo))**2))
+        resid      = float(np.sum((p1_measured - spam_model(tau_s, T2_echo))**2))
     except Exception:
         T2_echo, sigma, resid = T2_guess, np.inf, np.inf
     return T2_echo, sigma, resid
@@ -541,7 +560,7 @@ def lindblad_inversion(counts_list: list[dict],
     px_pred, py_pred = forward_ramsey_xy(ramsey_delays, T2, dw)
     ramsey_meas = np.concatenate([p1_x_arr, p1_y_arr])
     ramsey_pred = np.concatenate([px_pred, py_pred])
-    ramsey_chi2 = _chi2_per_dof(ramsey_meas, ramsey_pred, shots_ramsey, n_params=2)
+    ramsey_chi2 = _chi2_per_dof(ramsey_meas, ramsey_pred, shots_ramsey, n_params=1)
 
     p0_gate = np.array([c.get("0",0)/shots_gate for c in gate_counts])
     N_vals  = np.array(metadata["gate_rep_N"], dtype=float)
@@ -555,7 +574,9 @@ def lindblad_inversion(counts_list: list[dict],
     T2_echo, sT2_echo, r_echo = _invert_echo(
         p1_echo, echo_delays, profile.T2_prior_s, arch,
         T1_estimate_s=T1, shots_echo=shots_echo)
-    echo_chi2 = _chi2_per_dof(p1_echo, forward_echo(echo_delays, T2_echo), shots_echo, n_params=1)
+    echo_chi2 = _chi2_per_dof(p1_echo,
+        forward_echo(echo_delays, T2_echo, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
+        shots_echo, n_params=1)
 
     ramsey_chi2_factor = max(ramsey_chi2, 1.0) if np.isfinite(ramsey_chi2) and ramsey_chi2 > 0 else 1.0
     echo_chi2_factor   = max(echo_chi2, 1.0) if np.isfinite(echo_chi2) and echo_chi2 > 0 else 1.0
