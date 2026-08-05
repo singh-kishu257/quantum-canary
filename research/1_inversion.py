@@ -43,24 +43,6 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "p0_given_1": 0.02, "p1_given_0": 0.02,
         "display_unit": "ms", "time_scale": 1e3,
     },
-    "spin_qubit": {
-        "T1_s": 1.0, "T2_s": 100e-6,
-        "T1_min_s": 1e-6, "T1_max_s": 100.0, "T2_min_s": 0.1e-6,
-        "dw_max_rad_s": 2*np.pi*1e6, "dw_typical_khz": 50.0,
-        "eps_typical": 5e-3, "eps_max": 0.5,
-        "dt_ns": None, "gate_time_ns": 100.0,
-        "p0_given_1": 0.02, "p1_given_0": 0.01,
-        "display_unit": "µs", "time_scale": 1e6,
-    },
-    "nv_center": {
-        "T1_s": 6e-3, "T2_s": 1e-3,
-        "T1_min_s": 1e-6, "T1_max_s": 10.0, "T2_min_s": 0.1e-6,
-        "dw_max_rad_s": 2*np.pi*1e6, "dw_typical_khz": 20.0,
-        "eps_typical": 5e-3, "eps_max": 0.5,
-        "dt_ns": None, "gate_time_ns": 20.0,
-        "p0_given_1": 0.02, "p1_given_0": 0.01,
-        "display_unit": "µs", "time_scale": 1e6,
-    },
 }
 ARCH_DEFAULTS["unknown"] = ARCH_DEFAULTS["superconducting"]
 
