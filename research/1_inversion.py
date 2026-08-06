@@ -22,7 +22,9 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "dw_max_rad_s": 2*np.pi*500e3, "dw_typical_khz": 5.0,
         "eps_typical": 3.5e-4, "eps_max": 0.5,
         "dt_ns": 0.2222, "gate_time_ns": 50.0,
-        "p0_given_1": 0.02, "p1_given_0": 0.01,
+        # Chen et al. (2023), "Transmon qubit readout fidelity at the threshold
+        # for fault-tolerant quantum computing"
+        "p0_given_1": 0.0092, "p1_given_0": 0.0009,
         "display_unit": "µs", "time_scale": 1e6,
     },
     "trapped_ion": {
@@ -31,7 +33,9 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "dw_max_rad_s": 2*np.pi*10e3, "dw_typical_khz": 0.5,
         "eps_typical": 5e-4, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 135_000.0,
-        "p0_given_1": 0.005, "p1_given_0": 0.005,
+        # Mai et al. (2024), "High-Fidelity Detection on 171Yb+ Qubit via
+        # 2D3/2 Shelving"
+        "p0_given_1": 0.0005, "p1_given_0": 0.0018,
         "display_unit": "ms", "time_scale": 1e3,
     },
     "neutral_atom": {
@@ -40,7 +44,9 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "dw_max_rad_s": 2*np.pi*100e3, "dw_typical_khz": 2.0,
         "eps_typical": 1e-3, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 500.0,
-        "p0_given_1": 0.02, "p1_given_0": 0.02,
+        # Evered et al. (2023), "High-fidelity parallel entangling gates on a
+        # neutral-atom quantum computer"
+        "p0_given_1": 0.0060, "p1_given_0": 0.0040,
         "display_unit": "ms", "time_scale": 1e3,
     },
 }
