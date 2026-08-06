@@ -11,7 +11,13 @@ __all__ = [
     "CalibrationSource", "InversionResult", "forward_t1", "forward_ramsey_xy",
     "forward_gate", "forward_echo",
     "build_probe_circuits", "lindblad_inversion", "get_live_profile",
+    "fetch_live_spam",
 ]
+
+# Mai et al. (2024) trapped-ion asymmetry, used to rescale IonQ's single
+# combined spam_error figure into an approximate (p0_given_1, p1_given_0) pair.
+_MAI_2024_P0_GIVEN_1 = 0.0005
+_MAI_2024_P1_GIVEN_0 = 0.0018
 
 # p0_given_1 / p1_given_0 are readout (SPAM) error rates: P(read 0 | true 1) and
 # P(read 1 | true 0). They are treated as known, architecture-typical constants that
@@ -84,6 +90,91 @@ def build_custom_arch(T1_prior_s: float, T2_prior_s: float,
     }
 
 
+def fetch_live_spam(
+    architecture: str,
+    backend=None,
+    qubit_id: int = 0,
+    ionq_api_token: Optional[str] = None,
+    ionq_backend_name: str = "forte-1",
+) -> tuple[float, float, str, str]:
+    """
+    Fetch live SPAM (readout) error rates from a provider where possible,
+    falling back to architecture-typical literature defaults otherwise.
+
+    Returns (p0_given_1, p1_given_0, spam_source, spam_note). Never raises.
+    """
+    if architecture == "superconducting":
+        try:
+            if backend is None:
+                raise ValueError("no backend provided")
+            props = backend.properties()
+            p0 = props.qubit_property(qubit_id, "prob_meas0_prep1")[0]
+            p1 = props.qubit_property(qubit_id, "prob_meas1_prep0")[0]
+            if p0 and p1 and p0 > 0 and p1 > 0:
+                return (float(p0), float(p1), "live_asymmetric",
+                        f"IBM: p0|1={p0:.4f}, p1|0={p1:.4f} from "
+                        f"backend.properties() qubit {qubit_id}")
+        except Exception:
+            pass
+        arch = ARCH_DEFAULTS["superconducting"]
+        return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
+                "IBM properties() unavailable — using Chen et al. (2023) defaults")
+
+    if architecture == "trapped_ion":
+        try:
+            if ionq_api_token is None:
+                raise ValueError("no ionq_api_token provided")
+            import requests
+            url = (f"https://api.ionq.co/v0.3/characterizations/backends/"
+                   f"{ionq_backend_name}/current")
+            resp = requests.get(
+                url, headers={"Authorization": f"apiKey {ionq_api_token}"}, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+
+            spam_error = None
+            for path in (
+                lambda d: d.get("spam_error"),
+                lambda d: d.get("fidelity", {}).get("spam"),
+                lambda d: d.get("characteristic", {}).get("spam_error"),
+                lambda d: d.get("characteristic", {}).get("fidelity", {}).get("spam"),
+            ):
+                try:
+                    v = path(data)
+                    if v is not None:
+                        spam_error = float(v)
+                        break
+                except Exception:
+                    continue
+
+            if spam_error is not None and spam_error > 0:
+                ratio = _MAI_2024_P0_GIVEN_1 / _MAI_2024_P1_GIVEN_0
+                p0 = spam_error * 2.0 * ratio / (1.0 + ratio)
+                p1 = spam_error * 2.0 / (1.0 + ratio)
+                return (p0, p1, "live_scaled_from_combined",
+                        f"IonQ: spam_error={spam_error:.6f} rescaled using "
+                        f"Mai et al. (2024) ratio "
+                        f"{_MAI_2024_P0_GIVEN_1}/{_MAI_2024_P1_GIVEN_0}")
+        except Exception:
+            pass
+        arch = ARCH_DEFAULTS["trapped_ion"]
+        return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
+                "IonQ API unavailable or field not found — using Mai et al. "
+                "(2024) defaults")
+
+    if architecture == "neutral_atom":
+        arch = ARCH_DEFAULTS["neutral_atom"]
+        return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
+                "No provider SPAM data available — using Evered et al. (2023) "
+                f"defaults (p0|1={arch['p0_given_1']:.4f}, "
+                f"p1|0={arch['p1_given_0']:.4f})")
+
+    arch = ARCH_DEFAULTS.get(architecture, ARCH_DEFAULTS["unknown"])
+    return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
+            f"No live SPAM path for architecture={architecture!r} — using "
+            "architecture defaults")
+
+
 @dataclass
 class CalibrationSource:
     """Provenance record for BackendProfile priors — audits which values came
@@ -94,6 +185,9 @@ class CalibrationSource:
     dw_source:  str
     timestamp:  str   # ISO timestamp of when calibration was pulled
     backend:    str   # backend name
+    spam_source: str = "literature_fallback"
+    # "live_asymmetric" | "live_scaled_from_combined" | "literature_fallback"
+    spam_note:  str = ""
 
 
 @dataclass
@@ -192,22 +286,29 @@ class BackendProfile:
 
         T2_prior = min(T2_prior, 2.0*T1_prior)
 
+        p0_given_1, p1_given_0, spam_source, spam_note = fetch_live_spam(
+            "superconducting", backend=backend, qubit_id=qubit)
+
         custom_arch = None
-        if eps_source == "live_calibration":
+        if eps_source == "live_calibration" or spam_source != "literature_fallback":
             custom_arch = dict(arch)
             custom_arch["eps_typical"] = eps_prior
+            custom_arch["p0_given_1"] = p0_given_1
+            custom_arch["p1_given_0"] = p1_given_0
 
         calibration_source = CalibrationSource(
             T1_source=T1_source, T2_source=T2_source,
             eps_source=eps_source, dw_source=dw_source,
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             backend=backend_name,
+            spam_source=spam_source, spam_note=spam_note,
         )
 
         print(f"[Canary] IBM live priors — qubit {qubit}: "
               f"T1={T1_prior*1e6:.1f}µs ({T1_source}), "
               f"T2={T2_prior*1e6:.1f}µs ({T2_source}), "
-              f"ε_sx={eps_prior:.2e} ({eps_source})")
+              f"ε_sx={eps_prior:.2e} ({eps_source})  "
+              f"SPAM: p0|1={p0_given_1:.4f}, p1|0={p1_given_0:.4f} ({spam_source})")
 
         return cls(architecture="superconducting", T1_prior_s=T1_prior,
                    T2_prior_s=T2_prior, dt_ns=dt_ns,
@@ -265,21 +366,29 @@ class BackendProfile:
 
         T2_prior = min(T2_prior, 2.0*T1_prior)
 
+        p0_given_1, p1_given_0, spam_source, spam_note = fetch_live_spam(
+            "trapped_ion", ionq_api_token=api_token, ionq_backend_name=backend_name,
+            qubit_id=qubit_id)
+
         custom_arch = None
-        if eps_source == "live_calibration":
+        if eps_source == "live_calibration" or spam_source != "literature_fallback":
             custom_arch = dict(arch)
             custom_arch["eps_typical"] = eps_prior
+            custom_arch["p0_given_1"] = p0_given_1
+            custom_arch["p1_given_0"] = p1_given_0
 
         calibration_source = CalibrationSource(
             T1_source=T1_source, T2_source=T2_source,
             eps_source=eps_source, dw_source=dw_source,
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             backend=f"ionq:{backend_name}",
+            spam_source=spam_source, spam_note=spam_note,
         )
 
         print(f"[Canary] IonQ live priors — backend {backend_name} qubit {qubit_id}: "
               f"T1={T1_prior:.2f}s ({T1_source}), T2={T2_prior:.2f}s ({T2_source}), "
-              f"ε_sx={eps_prior:.2e} ({eps_source})")
+              f"ε_sx={eps_prior:.2e} ({eps_source})  "
+              f"SPAM: p0|1={p0_given_1:.4f}, p1|0={p1_given_0:.4f} ({spam_source})")
 
         return cls(architecture="trapped_ion", T1_prior_s=T1_prior,
                    T2_prior_s=T2_prior, dt_ns=arch["dt_ns"],
@@ -303,12 +412,19 @@ class BackendProfile:
         except ImportError:
             pass
 
+        p0_given_1, p1_given_0, spam_source, spam_note = fetch_live_spam(
+            "neutral_atom", qubit_id=qubit_id)
+
         calibration_source = CalibrationSource(
             T1_source="arch_default", T2_source="arch_default",
             eps_source="arch_default", dw_source="arch_default",
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             backend=device_arn,
+            spam_source=spam_source, spam_note=spam_note,
         )
+
+        print(f"[Canary] Braket/QuEra priors — qubit {qubit_id}: "
+              f"SPAM: p0|1={p0_given_1:.4f}, p1|0={p1_given_0:.4f} ({spam_source})")
 
         return cls(architecture="neutral_atom", T1_prior_s=arch["T1_s"],
                    T2_prior_s=arch["T2_s"], dt_ns=arch["dt_ns"],
@@ -338,8 +454,18 @@ class BackendProfile:
         defaults = ARCH_DEFAULTS.get(architecture, ARCH_DEFAULTS["unknown"])
         T1 = T1_prior_s or defaults["T1_s"]
         T2 = min(T2_prior_s or defaults["T2_s"], 2.0*T1)
+
+        live_p0, live_p1, spam_source, spam_note = fetch_live_spam(architecture)
+        calibration_source = CalibrationSource(
+            T1_source="arch_default", T2_source="arch_default",
+            eps_source="arch_default", dw_source="arch_default",
+            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            backend=backend_name,
+            spam_source=spam_source, spam_note=spam_note,
+        )
         return cls(architecture=architecture, T1_prior_s=T1, T2_prior_s=T2,
-                   dt_ns=defaults["dt_ns"], backend_name=backend_name)
+                   dt_ns=defaults["dt_ns"], backend_name=backend_name,
+                   calibration_source=calibration_source)
 
     def updated(self, T1_est_s: float, T2_est_s: float) -> "BackendProfile":
         T2_est_s = min(T2_est_s, 2.0*T1_est_s)
@@ -730,6 +856,10 @@ class InversionResult:
             line += (f"  | priors: T1={cs.T1_source}, T2={cs.T2_source}, "
                      f"ε={cs.eps_source}, Δω={cs.dw_source} "
                      f"(pulled {cs.timestamp} from {cs.backend})")
+            if cs.spam_source != "literature_fallback":
+                line += f"  | SPAM: live ({cs.spam_source})"
+            else:
+                line += "  | SPAM: literature defaults"
         return line
 
 
@@ -857,4 +987,33 @@ if __name__ == "__main__":
         qubit_id=0, timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
     print(result.summary(arch=probe_profile.constants))
+
+    print("\n" + "=" * 70)
+    print("Canary self-test: live SPAM ingestion (fetch_live_spam)")
+    print("=" * 70)
+
+    print("\n[5] fetch_live_spam('superconducting', backend=None)"
+          " — expect literature_fallback")
+    p0, p1, src, note = fetch_live_spam("superconducting", backend=None)
+    print(f"p0|1={p0:.4f}, p1|0={p1:.4f}, source={src}\nnote: {note}")
+
+    print("\n[6] fetch_live_spam('trapped_ion', ionq_api_token='dummy')"
+          " — expect graceful fallback")
+    p0, p1, src, note = fetch_live_spam("trapped_ion", ionq_api_token="dummy")
+    print(f"p0|1={p0:.4f}, p1|0={p1:.4f}, source={src}\nnote: {note}")
+
+    print("\n[7] fetch_live_spam('neutral_atom') — expect literature_fallback")
+    p0, p1, src, note = fetch_live_spam("neutral_atom")
+    print(f"p0|1={p0:.4f}, p1|0={p1:.4f}, source={src}\nnote: {note}")
+
+    print("\n[8] IonQ ratio-rescaling formula check "
+          "(simulated spam_error=0.003305)")
+    spam_error = 0.003305
+    ratio = _MAI_2024_P0_GIVEN_1 / _MAI_2024_P1_GIVEN_0
+    p0_sim = spam_error * 2.0 * ratio / (1.0 + ratio)
+    p1_sim = spam_error * 2.0 / (1.0 + ratio)
+    print(f"spam_error={spam_error}, ratio={ratio:.4f} -> "
+          f"p0|1={p0_sim:.6f}, p1|0={p1_sim:.6f}")
+    print(f"check: (p0+p1)/2 = {(p0_sim+p1_sim)/2:.6f} (should equal spam_error)")
+
     print("\nAll self-tests completed without crashing.")
