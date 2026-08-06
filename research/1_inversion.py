@@ -1,4 +1,5 @@
 from __future__ import annotations
+import datetime
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional
@@ -7,9 +8,9 @@ from scipy.optimize import curve_fit
 
 __all__ = [
     "ARCH_DEFAULTS", "build_custom_arch", "BackendProfile",
-    "InversionResult", "forward_t1", "forward_ramsey_xy",
+    "CalibrationSource", "InversionResult", "forward_t1", "forward_ramsey_xy",
     "forward_gate", "forward_echo",
-    "build_probe_circuits", "lindblad_inversion",
+    "build_probe_circuits", "lindblad_inversion", "get_live_profile",
 ]
 
 # p0_given_1 / p1_given_0 are readout (SPAM) error rates: P(read 0 | true 1) and
@@ -84,6 +85,18 @@ def build_custom_arch(T1_prior_s: float, T2_prior_s: float,
 
 
 @dataclass
+class CalibrationSource:
+    """Provenance record for BackendProfile priors — audits which values came
+    from a live provider calibration pull vs. an architecture default."""
+    T1_source:  str   # "live_calibration" | "arch_default"
+    T2_source:  str
+    eps_source: str
+    dw_source:  str
+    timestamp:  str   # ISO timestamp of when calibration was pulled
+    backend:    str   # backend name
+
+
+@dataclass
 class BackendProfile:
     architecture: str
     T1_prior_s:   float
@@ -91,6 +104,7 @@ class BackendProfile:
     dt_ns:        Optional[float]
     backend_name: str = "unknown"
     custom_arch:  Optional[dict] = None
+    calibration_source: Optional[CalibrationSource] = None
 
     @property
     def constants(self) -> dict:
@@ -132,20 +146,173 @@ class BackendProfile:
 
     @classmethod
     def from_ibm_backend(cls, backend, qubit: int = 0) -> "BackendProfile":
-        dt_ns    = (backend.dt*1e9) if backend.dt else 0.2222
-        T1_prior = ARCH_DEFAULTS["superconducting"]["T1_s"]
-        T2_prior = ARCH_DEFAULTS["superconducting"]["T2_s"]
+        arch         = ARCH_DEFAULTS["superconducting"]
+        dt_ns        = (backend.dt*1e9) if backend.dt else 0.2222
+        backend_name = getattr(backend, "name", "ibm_unknown")
+
+        T1_prior,  T1_source  = arch["T1_s"], "arch_default"
+        T2_prior,  T2_source  = arch["T2_s"], "arch_default"
+        eps_prior, eps_source = arch["eps_typical"], "arch_default"
+        dw_source = "arch_default"  # IBM properties() does not expose Δω
+
         try:
             props = backend.properties()
-            t1    = props.qubit_property(qubit, "t1")[0]
-            t2    = props.qubit_property(qubit, "t2")[0]
-            if t1 and t1 > 0: T1_prior = float(t1)
-            if t2 and t2 > 0: T2_prior = min(float(t2), 2.0*T1_prior)
         except Exception:
-            pass
+            props = None
+
+        if props is not None:
+            try:
+                t1 = props.qubit_property(qubit, "t1")[0]
+                if t1 and t1 > 0:
+                    T1_prior, T1_source = float(t1), "live_calibration"
+            except Exception:
+                pass
+
+            try:
+                t2 = props.qubit_property(qubit, "t2")[0]
+                if t2 and t2 > 0:
+                    T2_prior, T2_source = float(t2), "live_calibration"
+            except Exception:
+                pass
+
+            eps_live = None
+            try:
+                eps_live = props.gate_error("sx", qubit)
+            except Exception:
+                try:
+                    eps_live = props.gate_error("x", qubit)
+                except Exception:
+                    eps_live = None
+            if eps_live is not None:
+                try:
+                    eps_prior  = float(np.clip(eps_live, 0.0, arch["eps_max"]))
+                    eps_source = "live_calibration"
+                except Exception:
+                    pass
+
+        T2_prior = min(T2_prior, 2.0*T1_prior)
+
+        custom_arch = None
+        if eps_source == "live_calibration":
+            custom_arch = dict(arch)
+            custom_arch["eps_typical"] = eps_prior
+
+        calibration_source = CalibrationSource(
+            T1_source=T1_source, T2_source=T2_source,
+            eps_source=eps_source, dw_source=dw_source,
+            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            backend=backend_name,
+        )
+
+        print(f"[Canary] IBM live priors — qubit {qubit}: "
+              f"T1={T1_prior*1e6:.1f}µs ({T1_source}), "
+              f"T2={T2_prior*1e6:.1f}µs ({T2_source}), "
+              f"ε_sx={eps_prior:.2e} ({eps_source})")
+
         return cls(architecture="superconducting", T1_prior_s=T1_prior,
                    T2_prior_s=T2_prior, dt_ns=dt_ns,
-                   backend_name=getattr(backend, "name", "ibm_unknown"))
+                   backend_name=backend_name, custom_arch=custom_arch,
+                   calibration_source=calibration_source)
+
+    @classmethod
+    def from_ionq_backend(cls, api_token: str, backend_name: str = "forte-1",
+                          qubit_id: int = 0) -> "BackendProfile":
+        arch = ARCH_DEFAULTS["trapped_ion"]
+
+        T1_prior,  T1_source  = arch["T1_s"], "arch_default"
+        T2_prior,  T2_source  = arch["T2_s"], "arch_default"
+        eps_prior, eps_source = arch["eps_typical"], "arch_default"
+        dw_source = "arch_default"  # IonQ does not expose detuning
+
+        try:
+            try:
+                import requests
+            except ImportError as exc:
+                raise RuntimeError("requests is not installed") from exc
+
+            url = (f"https://api.ionq.co/v0.3/characterizations/backends/"
+                   f"{backend_name}/current")
+            resp = requests.get(url, headers={"Authorization": f"apiKey {api_token}"},
+                                timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            characteristic = data.get("characteristic", {}) or {}
+
+            t1 = characteristic.get("t1_time")
+            if t1 is not None and float(t1) > 0:
+                T1_prior, T1_source = float(t1), "live_calibration"
+
+            t2 = characteristic.get("t2_time")
+            if t2 is not None and float(t2) > 0:
+                T2_prior, T2_source = float(t2), "live_calibration"
+
+            fidelity_1q = None
+            fid_dict = characteristic.get("fidelity", {}) or {}
+            if isinstance(fid_dict, dict) and isinstance(fid_dict.get("1q"), dict) \
+                    and fid_dict["1q"]:
+                fidelity_1q = next(iter(fid_dict["1q"].values()))
+            elif isinstance(fid_dict, dict) and isinstance(fid_dict.get("1q"), (int, float)):
+                fidelity_1q = fid_dict["1q"]
+            if fidelity_1q is None:
+                fidelity_1q = characteristic.get("1q_gate_fidelity")
+            if fidelity_1q is not None:
+                eps_prior  = float(np.clip(1.0 - float(fidelity_1q), 0.0, arch["eps_max"]))
+                eps_source = "live_calibration"
+
+        except Exception:
+            print("[Canary] IonQ API unavailable — using arch defaults for trapped_ion")
+            return cls.from_architecture("trapped_ion")
+
+        T2_prior = min(T2_prior, 2.0*T1_prior)
+
+        custom_arch = None
+        if eps_source == "live_calibration":
+            custom_arch = dict(arch)
+            custom_arch["eps_typical"] = eps_prior
+
+        calibration_source = CalibrationSource(
+            T1_source=T1_source, T2_source=T2_source,
+            eps_source=eps_source, dw_source=dw_source,
+            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            backend=f"ionq:{backend_name}",
+        )
+
+        print(f"[Canary] IonQ live priors — backend {backend_name} qubit {qubit_id}: "
+              f"T1={T1_prior:.2f}s ({T1_source}), T2={T2_prior:.2f}s ({T2_source}), "
+              f"ε_sx={eps_prior:.2e} ({eps_source})")
+
+        return cls(architecture="trapped_ion", T1_prior_s=T1_prior,
+                   T2_prior_s=T2_prior, dt_ns=arch["dt_ns"],
+                   backend_name=f"ionq:{backend_name}", custom_arch=custom_arch,
+                   calibration_source=calibration_source)
+
+    @classmethod
+    def from_braket_backend(cls,
+                            device_arn: str = "arn:aws:braket:us-east-1::device/qpu/quera/Aquila",
+                            qubit_id: int = 0) -> "BackendProfile":
+        arch = ARCH_DEFAULTS["neutral_atom"]
+        try:
+            from braket.aws import AwsDevice
+            try:
+                device = AwsDevice(device_arn)
+                _ = device.properties
+            except Exception:
+                pass
+            print("[Canary] Braket/QuEra: T1/T2/ε priors not available from "
+                  "provider — using neutral_atom arch defaults")
+        except ImportError:
+            pass
+
+        calibration_source = CalibrationSource(
+            T1_source="arch_default", T2_source="arch_default",
+            eps_source="arch_default", dw_source="arch_default",
+            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            backend=device_arn,
+        )
+
+        return cls(architecture="neutral_atom", T1_prior_s=arch["T1_s"],
+                   T2_prior_s=arch["T2_s"], dt_ns=arch["dt_ns"],
+                   backend_name=device_arn, calibration_source=calibration_source)
 
     @classmethod
     def from_architecture(cls, architecture: str, backend_name: str = "unknown",
@@ -179,6 +346,59 @@ class BackendProfile:
         return BackendProfile(architecture=self.architecture, T1_prior_s=T1_est_s,
                               T2_prior_s=T2_est_s, dt_ns=self.dt_ns,
                               backend_name=self.backend_name, custom_arch=self.custom_arch)
+
+
+def get_live_profile(backend, qubit_id: int = 0,
+                     ionq_token: Optional[str] = None) -> "BackendProfile":
+    """
+    Auto-detect the backend type and return a BackendProfile with
+    live calibration priors where available.
+
+    Accepts:
+      - A Qiskit IBMBackend object    → calls from_ibm_backend()
+      - The string "ionq:{backend}"  → calls from_ionq_backend()
+        e.g. "ionq:forte-1", requires ionq_token
+      - A Braket Device ARN string   → calls from_braket_backend()
+      - An architecture string       → calls from_architecture()
+        e.g. "superconducting", "trapped_ion", "neutral_atom"
+    """
+    if isinstance(backend, str):
+        if backend.startswith("ionq:"):
+            ionq_backend_name = backend.split(":", 1)[1]
+            if not ionq_token:
+                raise ValueError(
+                    "get_live_profile: 'ionq_token' is required for 'ionq:' backends")
+            return BackendProfile.from_ionq_backend(
+                ionq_token, backend_name=ionq_backend_name, qubit_id=qubit_id)
+        if backend.startswith("arn:"):
+            return BackendProfile.from_braket_backend(device_arn=backend, qubit_id=qubit_id)
+        if backend in ARCH_DEFAULTS:
+            return BackendProfile.from_architecture(backend)
+
+    is_ibm_backend = False
+    try:
+        from qiskit.providers import BackendV1, BackendV2
+        if isinstance(backend, (BackendV1, BackendV2)):
+            is_ibm_backend = True
+    except Exception:
+        pass
+    if not is_ibm_backend:
+        try:
+            from qiskit_ibm_runtime import IBMBackend
+            if isinstance(backend, IBMBackend):
+                is_ibm_backend = True
+        except Exception:
+            pass
+    if is_ibm_backend:
+        return BackendProfile.from_ibm_backend(backend, qubit=qubit_id)
+
+    raise ValueError(
+        "get_live_profile: unrecognized backend input. Accepted inputs are: "
+        "a Qiskit IBMBackend object, a string 'ionq:{backend_name}' "
+        "(with ionq_token), a Braket device ARN string ('arn:...'), or an "
+        f"architecture string in {sorted(ARCH_DEFAULTS.keys())}. "
+        f"Got: {backend!r}"
+    )
 
 
 def _snap(delay_s: float, dt_ns: Optional[float]) -> tuple[float, str]:
@@ -494,16 +714,23 @@ class InversionResult:
     T2_echo_sigma_s:    float = 0.0
     echo_residual:      float = 0.0
     echo_chi2_dof:      float = 0.0
+    calibration_source: Optional[CalibrationSource] = None
 
     def summary(self, arch: Optional[dict] = None) -> str:
         if arch is None:
             arch = ARCH_DEFAULTS["superconducting"]
         s  = arch["time_scale"]; u = arch["display_unit"]
         dw = self.delta_omega / (2*np.pi*1e3)
-        return (f"Qubit {self.qubit_id} | "
+        line = (f"Qubit {self.qubit_id} | "
                 f"T1={self.T1_s*s:.2f}±{self.T1_sigma_s*s:.2f}{u}  "
                 f"T2={self.T2_s*s:.2f}±{self.T2_sigma_s*s:.2f}{u}  "
                 f"Δω={dw:.3f}kHz  ε={self.epsilon_sx:.2e}")
+        if self.calibration_source is not None:
+            cs = self.calibration_source
+            line += (f"  | priors: T1={cs.T1_source}, T2={cs.T2_source}, "
+                     f"ε={cs.eps_source}, Δω={cs.dw_source} "
+                     f"(pulled {cs.timestamp} from {cs.backend})")
+        return line
 
 
 def lindblad_inversion(counts_list: list[dict],
@@ -591,4 +818,43 @@ def lindblad_inversion(counts_list: list[dict],
         t1_chi2_dof=t1_chi2, ramsey_chi2_dof=ramsey_chi2, gate_chi2_dof=gate_chi2,
         T2_ramsey_s=T2, T2_ramsey_sigma_s=sT2,
         T2_echo_s=T2_echo, T2_echo_sigma_s=sT2_echo,
-        echo_residual=r_echo, echo_chi2_dof=echo_chi2)
+        echo_residual=r_echo, echo_chi2_dof=echo_chi2,
+        calibration_source=profile.calibration_source)
+
+
+if __name__ == "__main__":
+    print("=" * 70)
+    print("Canary self-test: live calibration priors (get_live_profile)")
+    print("=" * 70)
+
+    print("\n[1] get_live_profile('superconducting', qubit_id=0)")
+    sc_profile = get_live_profile("superconducting", qubit_id=0)
+    print(sc_profile)
+    print("calibration_source:", sc_profile.calibration_source)
+
+    print("\n[2] get_live_profile('trapped_ion')")
+    ti_profile = get_live_profile("trapped_ion")
+    print(ti_profile)
+    print("calibration_source:", ti_profile.calibration_source)
+
+    print("\n[3] get_live_profile('ionq:forte-1', ionq_token='dummy_token')"
+          " — expect graceful fallback")
+    ionq_profile = get_live_profile("ionq:forte-1", ionq_token="dummy_token")
+    print(ionq_profile)
+    print("calibration_source:", ionq_profile.calibration_source)
+
+    print("\n[4] build_probe_circuits() + lindblad_inversion() end-to-end "
+          "with a get_live_profile() profile (synthetic all-zero counts)")
+    probe_profile = get_live_profile("superconducting", qubit_id=0)
+    circuits, metadata = build_probe_circuits(probe_profile)
+    n_circuits = len(circuits)
+    print(f"built {n_circuits} probe circuits")
+
+    zero_counts = [{"0": 300, "1": 0} for _ in range(n_circuits)]
+    result = lindblad_inversion(
+        zero_counts, metadata, probe_profile,
+        shots_t1=300, shots_ramsey=300, shots_gate=300, shots_echo=300,
+        qubit_id=0, timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    print(result.summary(arch=probe_profile.constants))
+    print("\nAll self-tests completed without crashing.")
