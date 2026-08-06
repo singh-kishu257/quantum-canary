@@ -105,11 +105,11 @@ $$p_{\text{meas}} = p_{\text{ideal}}\,(1 - p_{0|1}) + (1 - p_{\text{ideal}})\, p
 
 where $p_{0|1} = P(\text{read } 0 \mid \text{true } 1)$ and $p_{1|0} = P(\text{read } 1 \mid \text{true } 0)$. These are **fixed per-architecture constants** — not free fit parameters — sourced from published hardware specs. Keeping them fixed prevents parameter-count inflation and preserves the physical meaning of the inversion.
 
-| Architecture | $p_{0\|1}$ | $p_{1\|0}$ |
-|:---|:---:|:---:|
-| Superconducting | 0.02 | 0.01 |
-| Trapped ion | 0.005 | 0.005 |
-| Neutral atom | 0.02 | 0.02 |
+| Architecture | $p_{0\|1}$ | $p_{1\|0}$ | Citation/Platform Context |
+|:---|:---:|:---:|:---|
+| Superconducting | 0.0092 | 0.0009 | Chen et al. (2023), *Transmon qubit readout fidelity at the threshold for fault-tolerant quantum computing* |
+| Trapped ion | 0.0005 | 0.0018 | Mai et al. (2024), *High-Fidelity Detection on $^{171}\text{Yb}^+$ Qubit via $^{2}\text{D}_{3/2}$ Shelving* |
+| Neutral atom | 0.0060 | 0.0040 | Evered et al. (2023), *High-fidelity parallel entangling gates on a neutral-atom quantum computer* |
 
 ---
 
