@@ -785,19 +785,6 @@ def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
             T1_guess = float(np.clip(-tau_s[0]/np.log(x),
                                      arch["T1_min_s"], arch["T1_max_s"]))
 
-    # For geometric (log-spaced) delays t0, t0*r, t0*r^2, the ratio-based
-    # estimator above assumes roughly linear spacing and can land far off.
-    # When spacing is clearly geometric, use the closed-form geometric
-    # estimator instead: T = -t0*(r-1)/log(amps[1]/amps[0]).
-    dt_ratio = tau_s[1] / tau_s[0] if tau_s[0] > 0 else 1.0
-    if dt_ratio > 3.0 and float(p1_measured[0]) > 1e-6:
-        log_ratio = np.log(max(float(p1_measured[0]), 1e-9)) - \
-                    np.log(max(float(p1_measured[1]), 1e-9))
-        if log_ratio > 0:
-            T1_guess = float(np.clip(
-                tau_s[0] * (dt_ratio - 1.0) / log_ratio,
-                arch["T1_min_s"], arch["T1_max_s"]))
-
     p_guess = spam_model(tau_s, T1_guess)
     fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_t1), 1e-3)
     try:
@@ -840,7 +827,15 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
     angle  = float(np.arctan2(y_means[0], x_means[0]))
     dw     = angle / t1
     amp_t1 = float(amps[0])
-    sigma_angle = 1.0 / (max(amp_t1, 0.05) * np.sqrt(max(shots_ramsey, 1)))
+    # Cramér-Rao lower bound check: below this amplitude the angle estimate
+    # carries no reliable information at this shot count, so mark it
+    # infinite rather than papering over it with an arbitrary amplitude
+    # floor — downstream chi2-weighted combination then discounts it
+    # naturally instead of silently trusting a noisy angle.
+    if amp_t1 < 3.0 / np.sqrt(max(shots_ramsey, 1)):
+        sigma_angle = np.inf
+    else:
+        sigma_angle = 1.0 / (amp_t1 * np.sqrt(max(shots_ramsey, 1)))
     sdw    = float(np.clip(sigma_angle / t1, 0, np.inf))
 
     xy_meas = np.concatenate([p1_x_arr, p1_y_arr])
@@ -913,16 +908,6 @@ def _invert_echo(p1_measured: np.ndarray, tau_s: np.ndarray,
         x = (float(p1_measured[1]) - float(p1_measured[2])) / denom
         if 0 < x < 1:
             T2_guess = float(np.clip(-tau_s[0]/np.log(x), T2_min, T2_max))
-
-    # Same geometric-spacing correction as _invert_t1.
-    dt_ratio = tau_s[1] / tau_s[0] if tau_s[0] > 0 else 1.0
-    if dt_ratio > 3.0 and float(p1_measured[0]) > 1e-6:
-        log_ratio = np.log(max(float(p1_measured[0]), 1e-9)) - \
-                    np.log(max(float(p1_measured[1]), 1e-9))
-        if log_ratio > 0:
-            T2_guess = float(np.clip(
-                tau_s[0] * (dt_ratio - 1.0) / log_ratio,
-                T2_min, T2_max))
 
     p_guess = spam_model(tau_s, T2_guess)
     fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_echo), 1e-3)
@@ -1062,8 +1047,8 @@ def lindblad_inversion(counts_list: list[dict],
         forward_echo(echo_delays, T2_echo, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
         shots_echo, n_params=1)
 
-    ramsey_chi2_factor = max(ramsey_chi2, 1.0) if np.isfinite(ramsey_chi2) and ramsey_chi2 > 0 else 1.0
-    echo_chi2_factor   = max(echo_chi2, 1.0) if np.isfinite(echo_chi2) and echo_chi2 > 0 else 1.0
+    ramsey_chi2_factor = max(ramsey_chi2, 1.0) if np.isfinite(ramsey_chi2) else 1.0
+    echo_chi2_factor   = max(echo_chi2, 1.0) if np.isfinite(echo_chi2) else 1.0
     w_ramsey = 1.0/(sT2**2 * ramsey_chi2_factor) if np.isfinite(sT2) and sT2 > 0 else 0.0
     w_echo   = 1.0/(sT2_echo**2 * echo_chi2_factor) if np.isfinite(sT2_echo) and sT2_echo > 0 else 0.0
     if w_ramsey == 0.0 and w_echo == 0.0:
