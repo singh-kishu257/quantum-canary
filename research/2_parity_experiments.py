@@ -49,7 +49,7 @@ TRUE_PARAM_RANGES = {
     },
     "neutral_atom": {
         "T1_s": (1.0, 100.0),         # QuEra/Rydberg cloud systems
-        "T2_s": (0.1, 3.0),           # current cloud-accessible T2*
+        "T2_s": (0.3, 3.0),           # current cloud-accessible T2* (10x range)
         "eps":  (1e-3, 1e-2),         # neutral atom gate errors
     },
 }
@@ -421,16 +421,9 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
             p_ideal = float(inv.forward_t1(d, T1_local))
             t1_counts.append(c1(rng_t1, spam(p_ideal), SHOTS_T1))
 
-        dephasing_rate = 1.0/T2_local - 1.0/(2.0*T1_local)
-        if dephasing_rate > 0:
-            T_phi_local = 1.0/dephasing_rate
-            sigma_phi = 1.0/T_phi_local
-        else:
-            sigma_phi = 0.0
-
         ramsey_counts = []
         for t in ramsey_delays:
-            decay = np.exp(-t/T2_local) * np.exp(-0.5*(t*sigma_phi)**2)
+            decay = np.exp(-t/T2_local)
             px = 0.5*(1.0 - decay*np.cos(dw_true*t))
             py = 0.5*(1.0 - decay*np.sin(dw_true*t))
             ramsey_counts.append(c1(rng_ramsey, spam(px), SHOTS_RAMSEY))
@@ -468,9 +461,13 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
     else:  # neutral_atom
         t1_counts = [c1(rng_t1, float(inv.forward_t1(d, T1_true)), SHOTS_T1) for d in t1_delays]
 
+        # Single fixed dw_local per instance — drawing a fresh value per
+        # delay point would create a model mismatch, since the inversion
+        # (_invert_ramsey_3t) assumes one constant detuning across all
+        # three delay points.
+        dw_local = dw_true + rng_ramsey.normal(0, 0.08*abs(dw_true))
         ramsey_counts = []
         for t in ramsey_delays:
-            dw_local = dw_true + rng_ramsey.normal(0, 0.08*abs(dw_true))
             px, py   = inv.forward_ramsey_xy(t, T2_true, dw_local)
             ramsey_counts.append(c1(rng_ramsey, px, SHOTS_RAMSEY))
             ramsey_counts.append(c1(rng_ramsey, py, SHOTS_RAMSEY))

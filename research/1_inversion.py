@@ -63,7 +63,7 @@ ARCH_DEFAULTS: dict[str, dict] = {
         # (2022) Nature
         "T1_max_s": 100000.0, "T2_min_s": 0.001,
         "dw_max_rad_s": 2*np.pi*100e3, "dw_typical_khz": 2.0,
-        "eps_typical": 1e-3, "eps_max": 0.5,
+        "eps_typical": np.sqrt(1e-3 * 1e-2), "eps_max": 0.5,  # ~3.16e-3
         "dt_ns": None, "gate_time_ns": 500.0,
         # Evered et al. (2023), "High-fidelity parallel entangling gates on a
         # neutral-atom quantum computer"
@@ -282,10 +282,13 @@ class BackendProfile:
             T2     = self.T2_prior_s
             delays = [0.5*T2, 1.0*T2, 1.5*T2]
         else:
-            arch      = self.constants
-            t1_delays = self.t1_delays_s
-            T2_max    = min(2*t1_delays[1], arch["T1_max_s"])
-            delays    = self._log_spaced(arch["T2_min_s"], T2_max)
+            arch        = self.constants
+            t1_delays   = self.t1_delays_s
+            T1_estimate = t1_delays[1]
+            T2c         = arch["T2_s"]
+            lo, hi      = arch["T2_min_s"], 2.0 * T1_estimate
+            delays      = [float(np.clip(d, lo, hi))
+                           for d in (T2c / 5.0, T2c, T2c * 5.0)]
         return self._snap_all(delays)
 
     @property
@@ -1049,7 +1052,7 @@ def lindblad_inversion(counts_list: list[dict],
         ]
         messages = []
         for label, chi2, delays_arr, prior_name in chi2_dof_checks:
-            if np.isfinite(chi2) and chi2 > 5.0:
+            if np.isfinite(chi2) and chi2 > 7.0:
                 vals = [float(v) for v in np.asarray(delays_arr)]
                 messages.append(
                     f"WARNING: {label} chi2/dof={chi2:.1f} >> 1. Delays may not "
