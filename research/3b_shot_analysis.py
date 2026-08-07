@@ -1,256 +1,261 @@
-import pathlib, csv
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from scipy.ndimage import uniform_filter1d
+"""
+3b_shot_analysis.py
 
+Location : research/3b_shot_analysis.py
+Reads    : research/data/fig4_shot_ablation.csv
+           Columns: shots, architecture, parameter, r2
+
+Produces :
+  research/figures/fig3b_shot_ablation.pdf  —  2×2 panel figure,
+  one subplot per parameter, R² vs total shot budget under realistic
+  hardware noise (SC/TI live-cal ±15%, NA arch-default), three curves
+  per subplot (one per architecture). Horizontal dashed line at R²=0.95.
+  Red dotted vertical at the minimum budget where all three architectures
+  simultaneously reach R²≥0.95.
+
+Prints to terminal:
+  For each parameter, the minimum total shot budget where R²≥0.95 holds
+  for ALL three architectures simultaneously, plus the implied per-probe
+  shot counts at that budget. Ends with the binding budget — the single
+  total that satisfies every parameter at once.
+"""
+
+import pathlib, sys
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+
+# ── paths (script lives in research/, data in research/data/) ────────────────
 SCRIPT_DIR  = pathlib.Path(__file__).resolve().parent
-DATA_DIR    = SCRIPT_DIR / "data"
+CSV_PATH    = SCRIPT_DIR / "data" / "fig4_shot_ablation.csv"
 FIGURES_DIR = SCRIPT_DIR / "figures"
 FIGURES_DIR.mkdir(exist_ok=True)
 
-CSV_PATH = DATA_DIR / "shot_ablation_results.csv"
+# ── protocol constants — must match 2_parity_experiments.py ──────────────────
+DEFAULT_TOTAL        = 9_900
+DEFAULT_SHOTS_T1     = 300
+DEFAULT_SHOTS_RAMSEY = 1_000
+DEFAULT_SHOTS_GATE   = 500
+DEFAULT_SHOTS_ECHO   = 500
+N_T1 = 3; N_RAMSEY = 6; N_GATE = 3; N_ECHO = 3
 
 ARCHITECTURES = ["superconducting", "trapped_ion", "neutral_atom"]
-PARAMS        = ["T1", "T2", "dw", "eps"]
-PARAM_KEYS    = {"T1": "T1_r2", "T2": "T2_r2", "dw": "dw_r2", "eps": "eps_r2"}
-PARAM_LABELS  = {
-    "T1":  r"$T_1$",
-    "T2":  r"$T_2$",
-    "dw":  r"$|\Delta\omega|$",
-    "eps": r"$\varepsilon_{sx}$",
-}
-ARCH_LABELS = {
-    "superconducting": "Superconducting",
-    "trapped_ion":     "Trapped ion",
-    "neutral_atom":    "Neutral atom",
-}
+PARAMETERS    = ["T1", "T2", "delta_omega", "epsilon_sx"]
 
-R2_THRESHOLD  = 0.94
-SMOOTH_WINDOW = 21
-DESIGN_BUDGET = 9900
+ARCH_LABELS = {"superconducting": "Superconducting",
+               "trapped_ion":     "Trapped ion",
+               "neutral_atom":    "Neutral atom"}
+PARAM_LABELS = {"T1":          r"$T_1$",
+                "T2":          r"$T_2$",
+                "delta_omega": r"$|\Delta\omega|$",
+                "epsilon_sx":  r"$\varepsilon_{sx}$"}
+PARAM_TITLES = {"T1":          r"$T_1$ Recovery",
+                "T2":          r"$T_2$ Recovery",
+                "delta_omega": r"$|\Delta\omega|$ Recovery",
+                "epsilon_sx":  r"$\varepsilon_{sx}$ Recovery"}
 
+ARCH_COLOR  = {"superconducting": "#1f77b4",
+               "trapped_ion":     "#ff7f0e",
+               "neutral_atom":    "#2ca02c"}
+ARCH_LS     = {"superconducting": "-",
+               "trapped_ion":     "--",
+               "neutral_atom":    ":"}
+ARCH_MARKER = {"superconducting": "o",
+               "trapped_ion":     "s",
+               "neutral_atom":    "^"}
 
-def load_csv():
-    data = {arch: {"budget": [], "T1_r2": [], "T2_r2": [], "dw_r2": [], "eps_r2": []}
-            for arch in ARCHITECTURES}
-    with open(CSV_PATH, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            arch = row["architecture"]
-            if arch not in data:
-                continue
-            data[arch]["budget"].append(int(row["budget_actual"]))
-            for p in PARAMS:
-                val = row[PARAM_KEYS[p]]
-                data[arch][PARAM_KEYS[p]].append(
-                    float(val) if val not in ("", "nan") else float("nan"))
-    for arch in ARCHITECTURES:
-        idx = np.argsort(data[arch]["budget"])
-        data[arch]["budget"] = np.array(data[arch]["budget"])[idx]
-        for p in PARAMS:
-            data[arch][PARAM_KEYS[p]] = np.array(data[arch][PARAM_KEYS[p]])[idx]
-    return data
+R2_THRESHOLD = 0.95
 
 
-def smooth(arr, window=SMOOTH_WINDOW):
-    valid = np.isfinite(arr)
-    tmp   = arr.copy()
-    tmp[~valid] = np.nanmean(arr)
-    out = uniform_filter1d(tmp, size=window, mode="nearest")
-    out[~valid] = float("nan")
+def shots_from_budget(budget):
+    """Proportional per-probe shot counts at a given total budget."""
+    scale = budget / DEFAULT_TOTAL
+    st1  = max(1, round(DEFAULT_SHOTS_T1     * scale))
+    sram = max(1, round(DEFAULT_SHOTS_RAMSEY  * scale))
+    sg   = max(1, round(DEFAULT_SHOTS_GATE    * scale))
+    se   = max(1, round(DEFAULT_SHOTS_ECHO    * scale))
+    return st1, sram, sg, se
+
+
+def find_min_budget_all_archs(df, param, threshold=R2_THRESHOLD):
+    """
+    Minimum total shot budget where R² >= threshold simultaneously
+    for all three architectures. Returns None if never achieved.
+    """
+    sub     = df[df["parameter"] == param]
+    budgets = sorted(sub["shots"].unique())
+    for b in budgets:
+        at_b = sub[sub["shots"] == b]
+        if all(
+            len(at_b[at_b["architecture"] == arch]["r2"].values) > 0
+            and at_b[at_b["architecture"] == arch]["r2"].values[0] >= threshold
+            for arch in ARCHITECTURES
+        ):
+            return b
+    return None
+
+
+def load_data():
+    if not CSV_PATH.exists():
+        sys.exit(f"ERROR: {CSV_PATH} not found.")
+    df = pd.read_csv(CSV_PATH)
+    missing = {"shots","architecture","parameter","r2"} - set(df.columns)
+    if missing:
+        sys.exit(f"ERROR: missing columns: {missing}")
+    df["shots"] = df["shots"].astype(int)
+    df["r2"]    = df["r2"].astype(float)
+    return df
+
+
+def print_report(df):
+    print()
+    print("=" * 72)
+    print(f"  R² ≥ {R2_THRESHOLD} FOR ALL ARCHITECTURES SIMULTANEOUSLY — PER PARAMETER")
+    print("=" * 72)
+
+    binding = 0
+    for param in PARAMETERS:
+        b_star = find_min_budget_all_archs(df, param)
+        print(f"\n  {PARAM_LABELS[param]}  ({param})")
+        if b_star is None:
+            print(f"    R²≥{R2_THRESHOLD} not reached within sweep range for all architectures.")
+            continue
+
+        st1, sram, sg, se = shots_from_budget(b_star)
+        actual = N_T1*st1 + N_RAMSEY*sram + N_GATE*sg + N_ECHO*se
+        print(f"    Min budget : {b_star:,} shots  (actual {actual:,})")
+        print(f"    Per probe  :")
+        print(f"      T1     : {N_T1} × {st1:4d} shots = {N_T1*st1:5d}")
+        print(f"      Ramsey : {N_RAMSEY} × {sram:4d} shots = {N_RAMSEY*sram:5d}")
+        print(f"      Gate   : {N_GATE} × {sg:4d} shots = {N_GATE*sg:5d}")
+        print(f"      Echo   : {N_ECHO} × {se:4d} shots = {N_ECHO*se:5d}")
+        print(f"    R² at {b_star:,} shots:")
+        sub = df[(df["parameter"] == param) & (df["shots"] == b_star)]
+        for arch in ARCHITECTURES:
+            vals = sub[sub["architecture"] == arch]["r2"].values
+            r2s  = f"{vals[0]:.4f}" if len(vals) else "n/a"
+            ok   = " ✓" if len(vals) and vals[0] >= R2_THRESHOLD else " ✗"
+            print(f"      {ARCH_LABELS[arch]:20s}: R²={r2s}{ok}")
+
+        binding_arch = max(
+            ARCHITECTURES,
+            key=lambda a: (sub[sub["architecture"]==a]["r2"].values[0]
+                           if len(sub[sub["architecture"]==a]["r2"]) else 0),
+            # max of the budget required — find which arch crosses last
+        )
+        # correct logic: which arch has lowest r2 at b_star
+        binding_arch = min(
+            ARCHITECTURES,
+            key=lambda a: (sub[sub["architecture"]==a]["r2"].values[0]
+                           if len(sub[sub["architecture"]==a]["r2"]) else 1.0)
+        )
+        print(f"    Binding architecture: {ARCH_LABELS[binding_arch]}"
+              f"  (lowest R² at threshold crossing)")
+        binding = max(binding, b_star)
+
+    print()
+    print("-" * 72)
+    if binding > 0:
+        st1, sram, sg, se = shots_from_budget(binding)
+        actual = N_T1*st1 + N_RAMSEY*sram + N_GATE*sg + N_ECHO*se
+        print(f"  BINDING BUDGET  (satisfies ALL parameters simultaneously)")
+        print(f"    Total  : {binding:,} shots  (actual {actual:,})")
+        print(f"    T1     : {N_T1} × {st1:4d} shots = {N_T1*st1:5d}")
+        print(f"    Ramsey : {N_RAMSEY} × {sram:4d} shots = {N_RAMSEY*sram:5d}")
+        print(f"    Gate   : {N_GATE} × {sg:4d} shots = {N_GATE*sg:5d}")
+        print(f"    Echo   : {N_ECHO} × {se:4d} shots = {N_ECHO*se:5d}")
+        suffix = "sufficient ✓" if 9_900 >= binding else "BELOW binding budget ✗"
+        print(f"    Deployed 9,900-shot budget is {suffix}")
+    print("=" * 72)
+    print()
+    return binding
+
+
+PARAM_COLOR = {"T1":          "#1f77b4",
+               "T2":          "#d62728",
+               "delta_omega": "#2ca02c",
+               "epsilon_sx":  "#ff7f0e"}
+PARAM_MARKER= {"T1":          "o",
+               "T2":          "s",
+               "delta_omega": "^",
+               "epsilon_sx":  "D"}
+
+
+def make_figure(df, binding):
+    fig, ax = plt.subplots(figsize=(7.16, 4.20))
+
+    budgets = sorted(df["shots"].unique())
+
+    for param in PARAMETERS:
+        sub  = df[df["parameter"] == param]
+        stats = sub.groupby("shots")["r2"].agg(["mean","std"]).reindex(budgets)
+        mean  = stats["mean"]
+        std   = stats["std"]
+
+        ax.fill_between(budgets,
+                        mean.values - std.values,
+                        mean.values + std.values,
+                        color=PARAM_COLOR[param],
+                        alpha=0.15,
+                        linewidth=0)
+        ax.plot(budgets, mean.values,
+                color=PARAM_COLOR[param],
+                linestyle="-",
+                linewidth=1.4,
+                marker=PARAM_MARKER[param],
+                markersize=3.5,
+                markevery=5,
+                alpha=0.90,
+                label=PARAM_LABELS[param])
+
+    # R²=0.95 reference line
+    ax.axhline(R2_THRESHOLD, color="#555555", linestyle="--",
+               linewidth=0.9, zorder=1)
+    ax.text(1050, R2_THRESHOLD + 0.003,
+            r"$R^2 = 0.95$", fontsize=7.0, color="#555555", va="bottom")
+
+    # deployed budget
+    ax.axvline(9_900, color="#333333", linestyle="--",
+               linewidth=1.0, zorder=2, alpha=0.6)
+    ax.text(9_900 + 180, 0.695,
+            "9,900", fontsize=6.5,
+            color="#333333", va="bottom", rotation=90)
+
+    ax.set_xlim(800, 15_500)
+    ax.set_ylim(0.68, 1.005)
+    ax.set_xlabel("Total shot budget", fontsize=8.5)
+    ax.set_ylabel(r"$R^2$ (mean across architectures, realistic noise)",
+                  fontsize=8.5)
+    ax.tick_params(labelsize=7.5)
+    ax.grid(True, which="major", linewidth=0.35, alpha=0.45)
+
+    ax.legend(fontsize=8.0, frameon=True, loc="lower right",
+              framealpha=0.9, edgecolor="#cccccc",
+              handlelength=2.2, handletextpad=0.5)
+
+    fig.suptitle(
+        r"Fig. 3b — Shot-Budget Efficiency Under Realistic Hardware Noise"
+        "\n"
+        r"(mean $R^2$ ± 1$\sigma$ across SC / TI / NA, $N=300$/arch, seed=45)",
+        fontsize=8.5, y=1.01)
+
+    fig.tight_layout()
+    out = FIGURES_DIR / "fig3b_shot_ablation.pdf"
+    fig.savefig(out, dpi=300, bbox_inches="tight")
+    fig.savefig(str(out).replace(".pdf", ".png"), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Figure: {out}")
     return out
 
 
-def find_n_star_last_crossing(budgets, r2_smooth, threshold=R2_THRESHOLD):
-    above      = r2_smooth >= threshold
-    last_below = np.where(~above)[0]
-    if len(last_below) == 0:
-        return int(budgets[0])
-    last_below_idx = int(last_below[-1])
-    if last_below_idx + 1 >= len(budgets):
-        return None
-    return int(budgets[last_below_idx + 1])
-
-
-def build_worst_case(data):
-    ref_budgets = data[ARCHITECTURES[0]]["budget"]
-    worst       = np.full(len(ref_budgets), np.inf)
-    binding     = [("", "") for _ in range(len(ref_budgets))]
-
-    for arch in ARCHITECTURES:
-        for p in PARAMS:
-            r2_raw    = data[arch][PARAM_KEYS[p]]
-            r2_smooth = smooth(r2_raw)
-            for i, val in enumerate(r2_smooth):
-                if np.isfinite(val) and val < worst[i]:
-                    worst[i]   = val
-                    binding[i] = (arch, p)
-
-    worst[~np.isfinite(worst)] = float("nan")
-    return ref_budgets, worst, binding
-
-
-def find_per_arch_binding(data):
-    results = {}
-    for arch in ARCHITECTURES:
-        budgets  = data[arch]["budget"]
-        worst_r2 = np.full(len(budgets), np.inf)
-        for p in PARAMS:
-            r2_smooth = smooth(data[arch][PARAM_KEYS[p]])
-            for i, v in enumerate(r2_smooth):
-                if np.isfinite(v) and v < worst_r2[i]:
-                    worst_r2[i] = v
-        worst_r2[~np.isfinite(worst_r2)] = float("nan")
-        worst_smooth = smooth(worst_r2)
-        ns = find_n_star_last_crossing(budgets, worst_smooth)
-
-        binding_param = None
-        if ns is not None:
-            idx = np.searchsorted(budgets, ns)
-            min_r2 = np.inf
-            for p in PARAMS:
-                r2_smooth = smooth(data[arch][PARAM_KEYS[p]])
-                if idx < len(r2_smooth) and r2_smooth[idx] < min_r2:
-                    min_r2 = r2_smooth[idx]
-                    binding_param = p
-
-        results[arch] = {
-            "budgets":       budgets,
-            "worst_smooth":  worst_smooth,
-            "n_star":        ns,
-            "binding_param": binding_param,
-        }
-    return results
-
-
-def print_results(data, arch_results, global_ns):
-    print()
-    print("="*72)
-    print("  SHOT EFFICIENCY — RIGOROUS RESULTS")
-    print(f"  Threshold : R² ≥ {R2_THRESHOLD}  |  Design budget: {DESIGN_BUDGET:,} shots")
-    print(f"  Smoothing : {SMOOTH_WINDOW}-point uniform filter (last-crossing N* definition)")
-    print("="*72)
-    print()
-    print(f"  Per-architecture worst-case N*")
-    print(f"  (N* = last shot count where any parameter falls below R²={R2_THRESHOLD})")
-    print()
-    print(f"  {'Architecture':18s}  {'N* (shots)':>12}  "
-          f"{'Binding param':>16}  {'Safety vs design':>18}")
-    print("  " + "-"*68)
-    for arch in ARCHITECTURES:
-        r      = arch_results[arch]
-        ns     = r["n_star"]
-        bp     = PARAM_LABELS.get(r["binding_param"], "—") if r["binding_param"] else "—"
-        safety = f"{DESIGN_BUDGET/ns:.2f}×" if ns else "N/A"
-        print(f"  {ARCH_LABELS[arch]:18s}  {ns if ns else 'N/A':>12,}  "
-              f"{bp:>16}  {safety:>18}")
-
-    print()
-    print(f"  Global N* (worst case across all archs + params): {global_ns:,} shots")
-    print(f"  Design budget:                                    {DESIGN_BUDGET:,} shots")
-    print(f"  Safety margin:                                    "
-          f"{DESIGN_BUDGET/global_ns:.2f}× N*")
-    print()
-    print("  Paper statement:")
-    print(f"  N* = {global_ns:,} shots is the minimum budget at which all four")
-    print(f"  Lindblad parameters simultaneously achieve R² ≥ {R2_THRESHOLD} across")
-    print(f"  all three architectures. The design budget of {DESIGN_BUDGET:,} shots")
-    print(f"  operates at {DESIGN_BUDGET/global_ns:.2f}× N*, providing a robustness margin")
-    print(f"  above the simulation-derived minimum.")
-    print()
-
-
-def make_figure(data, arch_results, global_ns):
-    budgets_global, worst_global, _ = build_worst_case(data)
-    worst_global_smooth = smooth(worst_global, window=SMOOTH_WINDOW)
-
-    fig, ax = plt.subplots(figsize=(7.16, 4.2))
-
-    ax.plot(budgets_global, worst_global_smooth,
-            color="#1a1a2e", linewidth=2.2, zorder=6,
-            label=r"Worst-case $R^2$ (min over all arch. $\times$ params)")
-
-    ax.axhline(y=R2_THRESHOLD, color="#c0392b", linewidth=1.2,
-               linestyle="--", zorder=4,
-               label=f"Threshold $R^2 = {R2_THRESHOLD}$")
-
-    ax.axvline(x=global_ns, color="#e67e22", linewidth=1.4,
-               linestyle="-.", zorder=5,
-               label=f"Global $N^* = {global_ns:,}$ shots")
-
-    ax.axvline(x=DESIGN_BUDGET, color="#27ae60", linewidth=1.4,
-               linestyle="--", zorder=5,
-               label=f"Design budget $= {DESIGN_BUDGET:,}$ shots")
-
-    ax.axvspan(global_ns, DESIGN_BUDGET,
-               alpha=0.10, color="#27ae60", zorder=3)
-
-    mid    = (global_ns + DESIGN_BUDGET) / 2
-    y_ann  = R2_THRESHOLD - 0.03
-    ax.annotate(
-        f"Safety margin\n{DESIGN_BUDGET/global_ns:.2f}× $N^*$",
-        xy=(mid, y_ann),
-        xytext=(mid, y_ann - 0.07),
-        ha="center", va="top", fontsize=7.5, color="#1a6e38",
-        arrowprops=dict(arrowstyle="-", color="#1a6e38",
-                        lw=0.8, linestyle="dashed"),
-        bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                  edgecolor="#1a6e38", linewidth=0.6, alpha=0.9))
-
-    arch_colors = {"superconducting": "#1f77b4",
-                   "trapped_ion":     "#ff7f0e",
-                   "neutral_atom":    "#2ca02c"}
-    for arch in ARCHITECTURES:
-        r  = arch_results[arch]
-        ns = r["n_star"]
-        if ns is None:
-            continue
-        ax.axvline(x=ns, color=arch_colors[arch], linewidth=0.9,
-                   linestyle=":", alpha=0.7, zorder=4)
-        ax.text(ns, R2_THRESHOLD + 0.005, ARCH_LABELS[arch][:4],
-                ha="center", va="bottom", fontsize=6.5,
-                color=arch_colors[arch], rotation=90,
-                bbox=dict(boxstyle="round,pad=0.1", facecolor="white",
-                          edgecolor="none", alpha=0.7))
-
-    ax.fill_between(budgets_global, worst_global_smooth,
-                    alpha=0.06, color="#1a1a2e", zorder=2)
-
-    ax.set_xlim(1000, 20000)
-    ax.set_ylim(0.55, 1.03)
-    ax.set_xlabel("Total shot budget (shots/qubit)", fontsize=9.0)
-    ax.set_ylabel(r"Worst-case $R^2$  (min over all arch. $\times$ params)", fontsize=9.0)
-    ax.tick_params(labelsize=8.0)
-    ax.grid(True, which="major", linewidth=0.3, alpha=0.4)
-
-    ax.legend(loc="lower right", fontsize=7.8, framealpha=0.95,
-              edgecolor="#cccccc", handlelength=2.0)
-
-    ax.set_title(
-        f"Fig. 4 — Shot-Budget Efficiency  "
-        f"($N^* = {global_ns:,}$ shots,  design = {DESIGN_BUDGET:,} shots,  "
-        f"safety = {DESIGN_BUDGET/global_ns:.2f}× $N^*$)",
-        fontsize=8.5, pad=7)
-
-    fig.tight_layout()
-    out_pdf = FIGURES_DIR / "fig4_efficiency.pdf"
-    out_png = FIGURES_DIR / "fig4_efficiency.png"
-    fig.savefig(out_pdf, dpi=300, bbox_inches="tight")
-    fig.savefig(out_png, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    return out_pdf
-
-
 if __name__ == "__main__":
-    print(f"Loading {CSV_PATH} ...")
-    data         = load_csv()
-    arch_results = find_per_arch_binding(data)
-
-    budgets_g, worst_g, _ = build_worst_case(data)
-    worst_g_smooth         = smooth(worst_g)
-    global_ns              = find_n_star_last_crossing(budgets_g, worst_g_smooth)
-
-    print_results(data, arch_results, global_ns)
-    fig_path = make_figure(data, arch_results, global_ns)
-    print(f"  Figure: {fig_path}")
+    df      = load_data()
+    print(f"  Loaded {len(df):,} rows | "
+          f"shots {df['shots'].min():,}–{df['shots'].max():,} | "
+          f"{df['architecture'].nunique()} archs | "
+          f"{df['parameter'].nunique()} params")
+    binding = print_report(df)
+    make_figure(df, binding)

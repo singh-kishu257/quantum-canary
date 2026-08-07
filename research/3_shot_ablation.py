@@ -13,7 +13,7 @@ DATA_DIR    = SCRIPT_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 SEED          = 45
-N_INSTANCES   = 150
+N_INSTANCES   = 300
 ARCHITECTURES = ["superconducting", "trapped_ion", "neutral_atom"]
 
 DEFAULT_SHOTS_T1     = 300
