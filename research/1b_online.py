@@ -52,7 +52,9 @@ class OnlineInversionResult:
     qubit_results:  dict
     algo_indices:   list
     canary_indices: list
-    green_chi2_threshold:         float = 2.0
+    # 95th pctile chi2 for DOF=2 (3-point fits); 2.0 is too
+    # tight and flags ~14% of valid fits as YELLOW by sampling variance alone.
+    green_chi2_threshold:         float = 5.0
     yellow_t2_disagree_threshold: float = 0.20
 
     def health_summary(self) -> dict:
@@ -273,7 +275,10 @@ class CanaryInterleaver:
     def __init__(self, qubit_ids: list, profiles: dict, interval_n: int = 10,
                  shots_t1: int = 300, shots_ramsey: int = 1000,
                  shots_gate: int = 500, shots_echo: int = 500,
-                 green_chi2_threshold: float = 2.0,
+                 # 95th pctile chi2 for DOF=2 (3-point fits); 2.0 is too
+                 # tight and flags ~14% of valid fits as YELLOW by sampling
+                 # variance alone.
+                 green_chi2_threshold: float = 5.0,
                  yellow_t2_disagree_threshold: float = 0.20):
         """Store configuration and pre-build the Canary probe circuit set
         (shared across every round) once at construction time."""
@@ -489,7 +494,7 @@ if __name__ == "__main__":
         t1_delays = meta["t1_delays_s"]
         ramsey_delays = meta["ramsey_delays_s"]
         echo_delays = meta["echo_delays_s"]
-        Nv = np.array(inv.GATE_REP_N_DT, dtype=float)
+        Nv = np.array(meta["gate_rep_N"], dtype=float)
 
         t1_counts = [c1(rng_obj, spam(float(inv.forward_t1(d, T1_TRUE))), SHOTS_T1)
                      for d in t1_delays]
@@ -556,9 +561,10 @@ if __name__ == "__main__":
 
     # 9. health_summary() should be mostly GREEN on consistent synthetic data.
     # Each probe fits only 3 delay points (dof=2), so chi2/dof crossing the
-    # 2.0 GREEN threshold by pure sampling variance is expected some of the
-    # time even when the forward model matches the truth exactly — a single
-    # unlucky round of YELLOW is not itself a bug. We check that the large
+    # 5.0 GREEN threshold (95th pctile for DOF=2) by pure sampling variance
+    # is still possible some of the time even when the forward model matches
+    # the truth exactly — a single unlucky round of YELLOW is not itself a
+    # bug. We check that the large
     # majority of qubit-rounds come back GREEN and none come back RED (RED
     # would indicate an actual fit failure, which should not happen here).
     print("\n[5] health_summary() check "

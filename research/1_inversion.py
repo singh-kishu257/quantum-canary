@@ -561,11 +561,20 @@ class BackendProfile:
         Used exclusively for Fig. 2 (ideal hardware validation) in
         2_parity_experiments.py. Never used for real hardware runs.
         """
-        profile = cls.from_architecture(architecture,
-                                        T1_prior_s=T1_true_s,
-                                        T2_prior_s=T2_true_s)
-        profile.prior_confidence = "live"
-        return profile
+        defaults = ARCH_DEFAULTS.get(architecture, ARCH_DEFAULTS["unknown"])
+        T1 = T1_true_s
+        T2 = min(T2_true_s, 2.0 * T1_true_s)
+        live_p0, live_p1, spam_source, spam_note = fetch_live_spam(architecture)
+        calibration_source = CalibrationSource(
+            T1_source="arch_default", T2_source="arch_default",
+            eps_source="arch_default", dw_source="arch_default",
+            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            backend="from_true_params",
+            spam_source=spam_source, spam_note=spam_note)
+        return cls(architecture=architecture, T1_prior_s=T1, T2_prior_s=T2,
+                   dt_ns=defaults["dt_ns"], backend_name="from_true_params",
+                   calibration_source=calibration_source,
+                   prior_confidence="live")
 
     def updated(self, T1_est_s: float, T2_est_s: float) -> "BackendProfile":
         T2_est_s = min(T2_est_s, 2.0*T1_est_s)
@@ -775,6 +784,20 @@ def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
         if 0 < x < 1:
             T1_guess = float(np.clip(-tau_s[0]/np.log(x),
                                      arch["T1_min_s"], arch["T1_max_s"]))
+
+    # For geometric (log-spaced) delays t0, t0*r, t0*r^2, the ratio-based
+    # estimator above assumes roughly linear spacing and can land far off.
+    # When spacing is clearly geometric, use the closed-form geometric
+    # estimator instead: T = -t0*(r-1)/log(amps[1]/amps[0]).
+    dt_ratio = tau_s[1] / tau_s[0] if tau_s[0] > 0 else 1.0
+    if dt_ratio > 3.0 and float(p1_measured[0]) > 1e-6:
+        log_ratio = np.log(max(float(p1_measured[0]), 1e-9)) - \
+                    np.log(max(float(p1_measured[1]), 1e-9))
+        if log_ratio > 0:
+            T1_guess = float(np.clip(
+                tau_s[0] * (dt_ratio - 1.0) / log_ratio,
+                arch["T1_min_s"], arch["T1_max_s"]))
+
     p_guess = spam_model(tau_s, T1_guess)
     fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_t1), 1e-3)
     try:
@@ -890,6 +913,17 @@ def _invert_echo(p1_measured: np.ndarray, tau_s: np.ndarray,
         x = (float(p1_measured[1]) - float(p1_measured[2])) / denom
         if 0 < x < 1:
             T2_guess = float(np.clip(-tau_s[0]/np.log(x), T2_min, T2_max))
+
+    # Same geometric-spacing correction as _invert_t1.
+    dt_ratio = tau_s[1] / tau_s[0] if tau_s[0] > 0 else 1.0
+    if dt_ratio > 3.0 and float(p1_measured[0]) > 1e-6:
+        log_ratio = np.log(max(float(p1_measured[0]), 1e-9)) - \
+                    np.log(max(float(p1_measured[1]), 1e-9))
+        if log_ratio > 0:
+            T2_guess = float(np.clip(
+                tau_s[0] * (dt_ratio - 1.0) / log_ratio,
+                T2_min, T2_max))
+
     p_guess = spam_model(tau_s, T2_guess)
     fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_echo), 1e-3)
     try:

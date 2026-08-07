@@ -59,38 +59,9 @@ def _log_uniform(r, lo: float, hi: float) -> float:
     return float(10 ** r.uniform(np.log10(lo), np.log10(hi)))
 
 
-def sample_true_t1_t2_eps(arch_name: str, rng_obj=None):
-    r = rng_obj if rng_obj is not None else rng
-    ranges = TRUE_PARAM_RANGES[arch_name]
-    T1_lo, T1_hi = ranges["T1_s"]
-    T2_lo, T2_hi = ranges["T2_s"]
-    eps_lo, eps_hi = ranges["eps"]
-
-    # T1 spans >1 decade for trapped_ion/neutral_atom -> log-uniform; for
-    # superconducting it spans <1 decade -> linear uniform is fine either way,
-    # but log-uniform is used whenever the ratio exceeds 10x.
-    if T1_hi / T1_lo > 10.0:
-        T1 = _log_uniform(r, T1_lo, T1_hi)
-    else:
-        T1 = r.uniform(T1_lo, T1_hi)
-
-    T2 = r.uniform(T2_lo, T2_hi)
-    T2 = min(T2, 2.0*T1)
-
-    eps = _log_uniform(r, eps_lo, eps_hi)
-    return T1, T2, eps
-
-
 def sample_dw(dw_max: float, rng_obj=None):
     r = rng_obj if rng_obj is not None else rng
     return r.choice([-1,1]) * r.uniform(0.2*dw_max, dw_max)
-
-
-def sample_true_params(arch_name: str, dw_max: float, rng_obj=None):
-    r = rng_obj if rng_obj is not None else rng
-    T1, T2, eps = sample_true_t1_t2_eps(arch_name, r)
-    dw = sample_dw(dw_max, r)
-    return T1, T2, dw, eps
 
 
 def _spawn_probe_rngs(base_seed: int, *keys, n_streams: int = 4):
@@ -196,7 +167,7 @@ def run_experiment(use_true_prior: bool = True):
         arch_default_dw_max = inv.BackendProfile.from_architecture(arch).dw_max_rad_s
         success = 0
         while success < N_INSTANCES:
-            T1_t, T2_t, eps_t = sample_true_t1_t2_eps(arch)
+            T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(arch, rng)
             if use_true_prior:
                 # dw_max must reflect the delay grid actually used for this
                 # instance (Strategy A, centred on T1_t/T2_t), not a fixed
@@ -379,9 +350,13 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
         # Same gate-rep centring rationale as Fig. 2 (simulate_inversion):
         # gate_rep_n is driven by constants["eps_typical"], untouched by
         # from_true_params. A live-calibration backend would also report a
-        # live gate-error estimate, so centre it on eps_true here too.
+        # live gate-error estimate — but that estimate carries the same
+        # +/-15% calibration uncertainty as T1/T2, not the exact truth.
+        eps_prior = float(np.clip(
+            eps_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
+            arch["eps_typical"] * 0.01, arch["eps_max"]))
         custom_arch = dict(arch)
-        custom_arch["eps_typical"] = eps_true
+        custom_arch["eps_typical"] = eps_prior
         profile.custom_arch = custom_arch
     else:  # neutral_atom
         profile = inv.BackendProfile.from_architecture(arch_name)
@@ -437,9 +412,12 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
                        for t in echo_delays]
 
     elif arch_name == "trapped_ion":
+        # Single fixed T1_local per instance — 1% motional-heating
+        # perturbation, drawn once rather than a (dead) per-delay decay.
+        T1_local = T1_true * (1.0 + rng_t1.normal(0, 0.01))
+        T1_local = float(np.clip(T1_local, arch["T1_min_s"], arch["T1_max_s"]))
         t1_counts = []
         for d in t1_delays:
-            T1_local = T1_true * np.exp(-d/(50.0*T1_true))
             p_ideal  = float(inv.forward_t1(d, T1_local))
             t1_counts.append(c1(rng_t1, p_ideal, SHOTS_T1))
 
@@ -447,10 +425,8 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
         for t in ramsey_delays:
             dw_local = dw_true + rng_ramsey.normal(0, 0.05*abs(dw_true))
             px, py   = inv.forward_ramsey_xy(t, T2_true, dw_local)
-            px_eff   = px * (1.0 + 0.03*np.cos(2*np.pi*t/T2_true))
-            py_eff   = py * (1.0 + 0.03*np.sin(2*np.pi*t/T2_true))
-            ramsey_counts.append(c1(rng_ramsey, px_eff, SHOTS_RAMSEY))
-            ramsey_counts.append(c1(rng_ramsey, py_eff, SHOTS_RAMSEY))
+            ramsey_counts.append(c1(rng_ramsey, px, SHOTS_RAMSEY))
+            ramsey_counts.append(c1(rng_ramsey, py, SHOTS_RAMSEY))
 
         p0_gate = inv.forward_gate(Nv, eps_true)
         gate_counts = [c0(rng_gate, p, SHOTS_GATE) for p in p0_gate]
@@ -645,10 +621,11 @@ if __name__ == "__main__":
     print(f"  Protocol : 3-time XY Ramsey (Shnaiderov+) + 3-point T1 + adaptive gate-rep N")
     print(f"  Shots    : T1={SHOTS_T1}/circuit  Ramsey={SHOTS_RAMSEY}/circuit  Gate={SHOTS_GATE}/circuit")
     print(f"  Budget   : {shot_budget('superconducting'):,} shots/qubit (all architectures)")
-    print(f"  Sampling (Fig. 2 & 3):")
-    print(f"    superconducting: T1=[80,400]µs  T2=[40,200]µs  ε=[1e-4,2e-3]")
-    print(f"    trapped_ion:     T1=[100,10000]s  T2=[0.1,3]s  ε=[1e-4,2e-3]")
-    print(f"    neutral_atom:    T1=[1,100]s  T2=[0.1,3]s  ε=[1e-3,1e-2]")
+    print(f"  Sampling (Fig. 2 & 3, unified): T1 ~ TRUE_PARAM_RANGES; "
+          f"T2 = 1/(1/(2*T1) + 1/T_phi), T_phi ~ TRUE_PARAM_RANGES T2 range")
+    print(f"    superconducting: T1=[80,400]µs  T_phi=[40,200]µs  ε=[1e-4,2e-3]")
+    print(f"    trapped_ion:     T1=[100,10000]s  T_phi=[0.1,3]s  ε=[1e-4,2e-3]")
+    print(f"    neutral_atom:    T1=[1,100]s  T_phi=[0.3,3]s  ε=[1e-3,1e-2]")
     print(f"  Fig. 2 uses true-parameter priors (ideal, Strategy A delays)")
     print(f"  Fig. 3 operating mode per architecture:")
     print(f"    superconducting : live calibration prior ±15% + TLS/SPAM noise")
