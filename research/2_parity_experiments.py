@@ -34,35 +34,103 @@ def shot_budget(arch_name: str) -> int:
     return 3*SHOTS_T1 + 6*SHOTS_RAMSEY + 3*SHOTS_GATE + 3*SHOTS_ECHO
 
 
+# Realistic current-hardware sampling ranges (not just ±40% of the arch
+# default prior) — used for both Fig. 2 and Fig. 3 true-parameter draws.
+TRUE_PARAM_RANGES = {
+    "superconducting": {
+        "T1_s": (80e-6, 400e-6),      # IBM Eagle/Heron, Jurcevic et al. (2021)
+        "T2_s": (40e-6, 200e-6),
+        "eps":  (1e-4, 2e-3),         # IBM published gate errors
+    },
+    "trapped_ion": {
+        "T1_s": (100.0, 10000.0),     # IonQ Forte / Quantinuum H2
+        "T2_s": (0.1, 3.0),           # T2* Ramsey, B-field limited
+        "eps":  (1e-4, 2e-3),         # IonQ published gate errors
+    },
+    "neutral_atom": {
+        "T1_s": (1.0, 100.0),         # QuEra/Rydberg cloud systems
+        "T2_s": (0.1, 3.0),           # current cloud-accessible T2*
+        "eps":  (1e-3, 1e-2),         # neutral atom gate errors
+    },
+}
+
+
+def _log_uniform(r, lo: float, hi: float) -> float:
+    return float(10 ** r.uniform(np.log10(lo), np.log10(hi)))
+
+
+def sample_true_t1_t2_eps(arch_name: str, rng_obj=None):
+    r = rng_obj if rng_obj is not None else rng
+    ranges = TRUE_PARAM_RANGES[arch_name]
+    T1_lo, T1_hi = ranges["T1_s"]
+    T2_lo, T2_hi = ranges["T2_s"]
+    eps_lo, eps_hi = ranges["eps"]
+
+    # T1 spans >1 decade for trapped_ion/neutral_atom -> log-uniform; for
+    # superconducting it spans <1 decade -> linear uniform is fine either way,
+    # but log-uniform is used whenever the ratio exceeds 10x.
+    if T1_hi / T1_lo > 10.0:
+        T1 = _log_uniform(r, T1_lo, T1_hi)
+    else:
+        T1 = r.uniform(T1_lo, T1_hi)
+
+    T2 = r.uniform(T2_lo, T2_hi)
+    T2 = min(T2, 2.0*T1)
+
+    eps = _log_uniform(r, eps_lo, eps_hi)
+    return T1, T2, eps
+
+
+def sample_dw(dw_max: float, rng_obj=None):
+    r = rng_obj if rng_obj is not None else rng
+    return r.choice([-1,1]) * r.uniform(0.2*dw_max, dw_max)
+
+
 def sample_true_params(arch_name: str, dw_max: float, rng_obj=None):
     r = rng_obj if rng_obj is not None else rng
-    c    = inv.ARCH_DEFAULTS[arch_name]
-    T1   = c["T1_s"] * r.uniform(0.6, 1.4)
-    T2   = min(c["T2_s"] * r.uniform(0.6, 1.4), 1.95*T1)
-    dw   = r.choice([-1,1]) * r.uniform(0.2*dw_max, dw_max)
-    eps  = c["eps_typical"] * r.uniform(0.3, 5.0)
+    T1, T2, eps = sample_true_t1_t2_eps(arch_name, r)
+    dw = sample_dw(dw_max, r)
     return T1, T2, dw, eps
 
 
-def _spawn_probe_rngs(base_seed: int, *keys):
-    """Independent, reproducible child RNGs for the t1/ramsey/gate/echo probe families."""
+def _spawn_probe_rngs(base_seed: int, *keys, n_streams: int = 4):
+    """Independent, reproducible child RNGs for the t1/ramsey/gate/echo probe
+    families (n_streams=4), plus an optional 5th stream (n_streams=5) for
+    the ±15% live-calibration prior jitter used in Fig. 3's live-cal arms.
+    The extra stream is appended so the first 4 streams are unaffected."""
     ss = np.random.SeedSequence([base_seed, *keys])
-    t1_ss, ramsey_ss, gate_ss, echo_ss = ss.spawn(4)
-    return (np.random.default_rng(t1_ss),
-            np.random.default_rng(ramsey_ss),
-            np.random.default_rng(gate_ss),
-            np.random.default_rng(echo_ss))
+    streams = ss.spawn(n_streams)
+    rngs = [np.random.default_rng(s) for s in streams]
+    return tuple(rngs)
 
 
-def simulate_inversion(arch_name, T1_true, T2_true, dw_true, eps_true, instance_id):
-    profile  = inv.BackendProfile.from_architecture(arch_name)
+def simulate_inversion(arch_name, T1_true, T2_true, dw_true, eps_true, instance_id,
+                       use_true_prior=True):
+    if use_true_prior:
+        # Fig. 2 — ideal hardware: priors = truth, prior_confidence="live",
+        # so delays are linearly centred on the true decay (Strategy A).
+        profile = inv.BackendProfile.from_true_params(arch_name, T1_true, T2_true)
+        # gate_rep_n is driven by constants["eps_typical"], which
+        # from_true_params does not touch. For the "ideal" scenario the
+        # gate-rep probe should likewise be centred on the true epsilon
+        # (same rationale as the T1/T2 delay-centring above) — otherwise
+        # a true epsilon far from the arch-typical value saturates or
+        # under-drives the fixed [n_low, n_mid, n_max] repetition counts.
+        custom_arch = dict(inv.ARCH_DEFAULTS[arch_name])
+        custom_arch["eps_typical"] = eps_true
+        profile.custom_arch = custom_arch
+    else:
+        # Fig. 3 — real-world: arch-default priors, prior_confidence=
+        # "arch_default", so delays are log-spaced across the full plausible
+        # range (Strategy B), independent of the (unknown) true values.
+        profile = inv.BackendProfile.from_architecture(arch_name)
     arch     = inv.ARCH_DEFAULTS[arch_name]
     _, meta  = inv.build_probe_circuits(profile)
 
     t1_delays     = meta["t1_delays_s"]
     ramsey_delays = meta["ramsey_delays_s"]
     echo_delays   = meta["echo_delays_s"]
-    Nv            = np.array(inv.GATE_REP_N_DT, dtype=float)
+    Nv            = np.array(meta["gate_rep_N"], dtype=float)
 
     arch_idx = ARCHITECTURES.index(arch_name)
     rng_t1, rng_ramsey, rng_gate, rng_echo = _spawn_probe_rngs(SEED, arch_idx, instance_id)
@@ -110,7 +178,7 @@ def compute_metrics(true_vals, rec_vals):
     return r2, rmse
 
 
-def run_experiment():
+def run_experiment(use_true_prior: bool = True):
     rec = {k: [] for k in ["arch",
         "T1_true","T1_rec","T1_sig",
         "T2_true","T2_rec","T2_sig",
@@ -125,14 +193,23 @@ def run_experiment():
     fit_attempts  = {arch: 0 for arch in ARCHITECTURES}
 
     for arch in ARCHITECTURES:
-        profile = inv.BackendProfile.from_architecture(arch)
-        dw_max  = profile.dw_max_rad_s
+        arch_default_dw_max = inv.BackendProfile.from_architecture(arch).dw_max_rad_s
         success = 0
         while success < N_INSTANCES:
-            T1_t, T2_t, dw_t, eps_t = sample_true_params(arch, dw_max)
+            T1_t, T2_t, eps_t = sample_true_t1_t2_eps(arch)
+            if use_true_prior:
+                # dw_max must reflect the delay grid actually used for this
+                # instance (Strategy A, centred on T1_t/T2_t), not a fixed
+                # arch-default t1 — otherwise the Ramsey phase can alias
+                # (|dw*t1| > pi) and corrupt the arctan2 sign/angle recovery.
+                dw_max = inv.BackendProfile.from_true_params(arch, T1_t, T2_t).dw_max_rad_s
+            else:
+                dw_max = arch_default_dw_max
+            dw_t = sample_dw(dw_max)
             fit_attempts[arch] += 1
             try:
-                r = simulate_inversion(arch, T1_t, T2_t, dw_t, eps_t, fit_attempts[arch])
+                r = simulate_inversion(arch, T1_t, T2_t, dw_t, eps_t, fit_attempts[arch],
+                                       use_true_prior=use_true_prior)
             except (RuntimeError, ValueError):
                 fit_failures[arch] += 1
                 continue
@@ -235,8 +312,9 @@ def make_figure(rec):
 
     budget = shot_budget(ARCHITECTURES[0])
     fig.suptitle(
-        f"Fig. 2 — Parameter Recovery Accuracy (Digital Twin, $N={N_INSTANCES}$/arch, "
-        f"seed={SEED}, {budget} shots/qubit)",
+        f"Fig. 2 — Parameter Recovery Accuracy\n"
+        f"(Ideal hardware, true-parameter priors, $N={N_INSTANCES}$/arch, "
+        f"seed={SEED}, {budget:,} shots/qubit)",
         fontsize=8.5, y=0.98)
 
     out = FIGURES_DIR / "fig2_parity.pdf"
@@ -246,34 +324,74 @@ def make_figure(rec):
     return out
 
 
-def sample_true_params_realistic(arch_name: str, dw_max: float, rng_obj):
-    """Physically self-consistent (T1, T_phi -> T2) sampling: T2 = 1/(1/(2*T1) + 1/T_phi)."""
-    c = inv.ARCH_DEFAULTS[arch_name]
-    T1 = c["T1_s"] * rng_obj.uniform(0.6, 1.4)
-    if arch_name == "neutral_atom":
-        T_phi = c["T2_s"] * rng_obj.uniform(0.3, 0.8)
+def sample_true_t1_t2_eps_realistic(arch_name: str, rng_obj):
+    """Physically self-consistent (T1, T_phi -> T2) sampling: T2 = 1/(1/(2*T1) + 1/T_phi).
+    Draws from the same realistic current-hardware ranges (TRUE_PARAM_RANGES)
+    as Fig. 2, so Fig. 2 and Fig. 3 are directly comparable — only the delay
+    grid (true-centred vs arch-default log-spaced) differs between them."""
+    ranges = TRUE_PARAM_RANGES[arch_name]
+    T1_lo, T1_hi = ranges["T1_s"]
+    T2_lo, T2_hi = ranges["T2_s"]
+    eps_lo, eps_hi = ranges["eps"]
+
+    if T1_hi / T1_lo > 10.0:
+        T1 = _log_uniform(rng_obj, T1_lo, T1_hi)
     else:
-        T_phi = c["T2_s"] * rng_obj.uniform(0.6, 1.4)
-    T2  = 1.0 / (1.0/(2.0*T1) + 1.0/T_phi)
-    dw  = rng_obj.choice([-1,1]) * rng_obj.uniform(0.2*dw_max, dw_max)
-    eps = c["eps_typical"] * rng_obj.uniform(0.3, 5.0)
+        T1 = rng_obj.uniform(T1_lo, T1_hi)
+
+    T_phi = rng_obj.uniform(T2_lo, T2_hi)
+    T2    = 1.0 / (1.0/(2.0*T1) + 1.0/T_phi)
+    T2    = min(T2, 2.0*T1)
+
+    eps = _log_uniform(rng_obj, eps_lo, eps_hi)
+    return T1, T2, eps
+
+
+def sample_true_params_realistic(arch_name: str, dw_max: float, rng_obj):
+    T1, T2, eps = sample_true_t1_t2_eps_realistic(arch_name, rng_obj)
+    dw = sample_dw(dw_max, rng_obj)
     return T1, T2, dw, eps
 
 
 def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
                                  instance_id, rng_mismatch):
-    profile  = inv.BackendProfile.from_architecture(arch_name)
     arch     = inv.ARCH_DEFAULTS[arch_name]
+
+    arch_idx   = ARCHITECTURES.index(arch_name)
+    extra_seed = int(rng_mismatch.integers(1, 2**31 - 1))
+    rng_t1, rng_ramsey, rng_gate, rng_echo, rng_param = _spawn_probe_rngs(
+        SEED + 1, arch_idx, instance_id, extra_seed, n_streams=5)
+
+    # Fig. 3 per-architecture real operating mode:
+    #   superconducting / trapped_ion: live calibration is always available
+    #     (IBM backend.properties() / IonQ characterization API) -> prior =
+    #     truth +/- calibration uncertainty, Strategy A linear delays.
+    #   neutral_atom: QuEra exposes no live calibration -> arch-default
+    #     prior, Strategy B log-spaced delays. T2 may degrade honestly.
+    if arch_name in ("superconducting", "trapped_ion"):
+        T1_prior = float(np.clip(
+            T1_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
+            arch["T1_min_s"], arch["T1_max_s"]))
+        T2_prior = float(np.clip(
+            T2_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
+            arch["T2_min_s"], min(2.0*T1_prior, arch["T1_max_s"])))
+        profile = inv.BackendProfile.from_true_params(arch_name, T1_prior, T2_prior)
+        # Same gate-rep centring rationale as Fig. 2 (simulate_inversion):
+        # gate_rep_n is driven by constants["eps_typical"], untouched by
+        # from_true_params. A live-calibration backend would also report a
+        # live gate-error estimate, so centre it on eps_true here too.
+        custom_arch = dict(arch)
+        custom_arch["eps_typical"] = eps_true
+        profile.custom_arch = custom_arch
+    else:  # neutral_atom
+        profile = inv.BackendProfile.from_architecture(arch_name)
+
     _, meta  = inv.build_probe_circuits(profile)
 
     t1_delays     = meta["t1_delays_s"]
     ramsey_delays = meta["ramsey_delays_s"]
     echo_delays   = meta["echo_delays_s"]
-    Nv            = np.array(inv.GATE_REP_N_DT, dtype=float)
-
-    arch_idx   = ARCHITECTURES.index(arch_name)
-    extra_seed = int(rng_mismatch.integers(1, 2**31 - 1))
-    rng_t1, rng_ramsey, rng_gate, rng_echo = _spawn_probe_rngs(SEED + 1, arch_idx, instance_id, extra_seed)
+    Nv            = np.array(meta["gate_rep_N"], dtype=float)
 
     def c1(rng_obj, p, sh):
         n1 = int(rng_obj.binomial(sh, float(np.clip(p,0,1))))
@@ -386,17 +504,30 @@ def run_realistic_mismatch_experiment():
         "T2_ramsey_rec","T2_ramsey_sig",
         "T2_echo_rec","T2_echo_sig",
         "dw_true","dw_rec","dw_sig",
-        "eps_true","eps_rec","eps_sig"]}
+        "eps_true","eps_rec","eps_sig",
+        "t1_chi2","ramsey_chi2","gate_chi2","echo_chi2"]}
 
     fit_failures  = {arch: 0 for arch in ARCHITECTURES}
     fit_attempts  = {arch: 0 for arch in ARCHITECTURES}
 
     for arch in ARCHITECTURES:
-        profile = inv.BackendProfile.from_architecture(arch)
-        dw_max  = profile.dw_max_rad_s
+        arch_default_dw_max = inv.BackendProfile.from_architecture(arch).dw_max_rad_s
         success = 0
         while success < N_INSTANCES:
-            T1_t, T2_t, dw_t, eps_t = sample_true_params_realistic(arch, dw_max, rng_mismatch)
+            T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(arch, rng_mismatch)
+            # dw_max must reflect the delay grid actually used for this
+            # instance's architecture — same aliasing hazard as Fig. 2:
+            # superconducting/trapped_ion now use Strategy A (live-cal
+            # prior, close to truth) so dw_max should track T2_t, not a
+            # fixed arch-default T2 that may differ by orders of
+            # magnitude. neutral_atom stays on the fixed arch-default
+            # Strategy B grid, so its dw_max stays fixed too.
+            if arch in ("superconducting", "trapped_ion"):
+                dw_max = inv.BackendProfile.from_true_params(
+                    arch, T1_t, T2_t).dw_max_rad_s
+            else:
+                dw_max = arch_default_dw_max
+            dw_t = sample_dw(dw_max, rng_mismatch)
             fit_attempts[arch] += 1
             try:
                 r = simulate_realistic_inversion(arch, T1_t, T2_t, dw_t, eps_t,
@@ -414,6 +545,10 @@ def run_realistic_mismatch_experiment():
             rec["T2_echo_rec"].append(r.T2_echo_s);     rec["T2_echo_sig"].append(r.T2_echo_sigma_s)
             rec["dw_true"].append(abs(dw_t)); rec["dw_rec"].append(abs(r.delta_omega)); rec["dw_sig"].append(r.delta_omega_sigma)
             rec["eps_true"].append(eps_t); rec["eps_rec"].append(r.epsilon_sx); rec["eps_sig"].append(r.epsilon_sx_sigma)
+            rec["t1_chi2"].append(r.t1_chi2_dof)
+            rec["ramsey_chi2"].append(r.ramsey_chi2_dof)
+            rec["gate_chi2"].append(r.gate_chi2_dof)
+            rec["echo_chi2"].append(r.echo_chi2_dof)
             success += 1
 
     fit_failure_rate = {
@@ -493,9 +628,11 @@ def make_mismatch_figure(rec):
                fontsize=7.5, frameon=True, bbox_to_anchor=(0.5, 0.005),
                handletextpad=0.4, columnspacing=0.8, framealpha=0.9, edgecolor="#cccccc")
 
+    budget = shot_budget(ARCHITECTURES[0])
     fig.suptitle(
-        f"Fig. 3 — Realistic Noise Robustness (Physically Consistent, "
-        f"$N={N_INSTANCES}$/arch, seed={SEED+1})",
+        f"Fig. 3 — Realistic Hardware Performance\n"
+        f"(Per-arch operating mode: SC/TI live cal ±15%, NA arch-default, "
+        f"$N={N_INSTANCES}$/arch, seed={SEED+1}, {budget:,} shots/qubit)",
         fontsize=8.5, y=0.98)
 
     out = FIGURES_DIR / "fig3_mismatch.pdf"
@@ -508,19 +645,30 @@ def make_mismatch_figure(rec):
 if __name__ == "__main__":
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"[{ts}] Fig. 2 — Parity Experiment")
-    print(f"  Protocol : 3-time XY Ramsey (Shnaiderov+) + 3-point T1 + gate-rep N=[20,40,80]")
+    print(f"  Protocol : 3-time XY Ramsey (Shnaiderov+) + 3-point T1 + adaptive gate-rep N")
     print(f"  Shots    : T1={SHOTS_T1}/circuit  Ramsey={SHOTS_RAMSEY}/circuit  Gate={SHOTS_GATE}/circuit")
-    print(f"  Budget   : {shot_budget('superconducting')} shots/qubit (all architectures)")
-    print(f"  Sampling : T1,T2 in [0.6,1.4]×prior  |Δω| in [0.2,1.0]×dw_max  ε in [0.3,5]×eps_typical")
+    print(f"  Budget   : {shot_budget('superconducting'):,} shots/qubit (all architectures)")
+    print(f"  Sampling (Fig. 2 & 3):")
+    print(f"    superconducting: T1=[80,400]µs  T2=[40,200]µs  ε=[1e-4,2e-3]")
+    print(f"    trapped_ion:     T1=[100,10000]s  T2=[0.1,3]s  ε=[1e-4,2e-3]")
+    print(f"    neutral_atom:    T1=[1,100]s  T2=[0.1,3]s  ε=[1e-3,1e-2]")
+    print(f"  Fig. 2 uses true-parameter priors (ideal, Strategy A delays)")
+    print(f"  Fig. 3 operating mode per architecture:")
+    print(f"    superconducting : live calibration prior ±15% + TLS/SPAM noise")
+    print(f"    trapped_ion     : live calibration prior ±15% + B-field/motion noise")
+    print(f"    neutral_atom    : arch-default prior (no live cal) + laser/tweezer noise")
     print()
     for arch in ARCHITECTURES:
-        p      = inv.BackendProfile.from_architecture(arch)
-        t_dels = [f"{d:.3g}s" for d in p.t1_delays_s]
-        r_dels = [f"{d:.3g}s" for d in p.ramsey_delays_s]
-        print(f"  {arch:16s}: T1 delays={t_dels}  Ramsey delays={r_dels}")
+        p_ideal = inv.BackendProfile.from_true_params(
+            arch, inv.ARCH_DEFAULTS[arch]["T1_s"], inv.ARCH_DEFAULTS[arch]["T2_s"])
+        p_real  = inv.BackendProfile.from_architecture(arch)
+        print(f"  {arch:16s}: [ideal] T1 delays={[f'{d:.3g}s' for d in p_ideal.t1_delays_s]}  "
+              f"Ramsey={[f'{d:.3g}s' for d in p_ideal.ramsey_delays_s]}")
+        print(f"  {'':16s}  [real ] T1 delays={[f'{d:.3g}s' for d in p_real.t1_delays_s]}  "
+              f"Ramsey={[f'{d:.3g}s' for d in p_real.ramsey_delays_s]}")
     print()
 
-    rec, fit_failure_rate = run_experiment()
+    rec, fit_failure_rate = run_experiment(use_true_prior=True)
     csv_path = save_csv(rec)
     fig_path = make_figure(rec)
 
@@ -560,7 +708,7 @@ if __name__ == "__main__":
     print(f"  Figure: {fig_path}")
 
     print()
-    print("Realistic Noise Robustness (all 3 architectures, physically consistent)")
+    print("Fig. 3 — Per-arch real operating mode (SC/TI live cal +/-15%, NA arch-default)")
     mismatch_rec, mismatch_fail_rate = run_realistic_mismatch_experiment()
     mismatch_csv = save_mismatch_csv(mismatch_rec)
     mismatch_fig = make_mismatch_figure(mismatch_rec)
@@ -584,6 +732,14 @@ if __name__ == "__main__":
         T2_ram_r2, _  = compute_metrics(np.array(mismatch_rec["T2_true"])[mask]*s, np.array(mismatch_rec["T2_ramsey_rec"])[mask]*s)
         T2_echo_r2, _ = compute_metrics(np.array(mismatch_rec["T2_true"])[mask]*s, np.array(mismatch_rec["T2_echo_rec"])[mask]*s)
         print(f"      T2 (combined)={T2_r2:.4f}  T2 (ramsey-only)={T2_ram_r2:.4f}  T2 (echo-only)={T2_echo_r2:.4f}")
+        t1_chi2_arr   = np.array(mismatch_rec["t1_chi2"])[mask]
+        ram_chi2_arr  = np.array(mismatch_rec["ramsey_chi2"])[mask]
+        gate_chi2_arr = np.array(mismatch_rec["gate_chi2"])[mask]
+        echo_chi2_arr = np.array(mismatch_rec["echo_chi2"])[mask]
+        print(f"      χ²/dof: T1={t1_chi2_arr.mean():.2f}±{t1_chi2_arr.std():.2f}  "
+              f"Ramsey={ram_chi2_arr.mean():.2f}±{ram_chi2_arr.std():.2f}  "
+              f"Gate={gate_chi2_arr.mean():.2f}±{gate_chi2_arr.std():.2f}  "
+              f"Echo={echo_chi2_arr.mean():.2f}±{echo_chi2_arr.std():.2f}")
 
     print(f"\n  Mismatch data  : {mismatch_csv}")
     print(f"  Mismatch figure: {mismatch_fig}")

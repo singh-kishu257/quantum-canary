@@ -13,6 +13,8 @@ __all__ = [
     "build_probe_circuits", "lindblad_inversion", "get_live_profile",
     "fetch_live_spam",
 ]
+# NOTE: GATE_REP_N_DT is intentionally excluded — it is a deprecated alias,
+# see BackendProfile.gate_rep_n.
 
 # Mai et al. (2024) trapped-ion asymmetry, used to rescale IonQ's single
 # combined spam_error figure into an approximate (p0_given_1, p1_given_0) pair.
@@ -25,7 +27,11 @@ _MAI_2024_P1_GIVEN_0 = 0.0018
 ARCH_DEFAULTS: dict[str, dict] = {
     "superconducting": {
         "T1_s": 150e-6, "T2_s": 90e-6,
-        "T1_min_s": 1e-6, "T1_max_s": 1000e-6, "T2_min_s": 0.5e-6,
+        "T1_min_s": 100e-9,
+        # T1_max_s: state-of-the-art transmon, Place et al. (2021) Nat. Commun.
+        # (>1ms coherence); general platform range per Krantz et al. (2019)
+        # Appl. Phys. Rev.
+        "T1_max_s": 1e-3, "T2_min_s": 100e-9,
         "dw_max_rad_s": 2*np.pi*500e3, "dw_typical_khz": 5.0,
         "eps_typical": 3.5e-4, "eps_max": 0.5,
         "dt_ns": 0.2222, "gate_time_ns": 50.0,
@@ -35,8 +41,12 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "display_unit": "µs", "time_scale": 1e6,
     },
     "trapped_ion": {
-        "T1_s": 10.0, "T2_s": 1.0,
-        "T1_min_s": 0.01, "T1_max_s": 1000.0, "T2_min_s": 0.005,
+        "T1_s": 1000.0, "T2_s": 1.0,
+        "T1_min_s": 0.01,
+        # T1_max_s: >1 hour coherence demonstrated on Quantinuum H2; see also
+        # Bruzewicz et al. (2019) Appl. Phys. Rev., Wang et al. (2021) Nat.
+        # Photon.
+        "T1_max_s": 100000.0, "T2_min_s": 0.001,
         "dw_max_rad_s": 2*np.pi*10e3, "dw_typical_khz": 0.5,
         "eps_typical": 5e-4, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 135_000.0,
@@ -46,8 +56,12 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "display_unit": "ms", "time_scale": 1e3,
     },
     "neutral_atom": {
-        "T1_s": 4.0, "T2_s": 1.0,
-        "T1_min_s": 0.001, "T1_max_s": 100.0, "T2_min_s": 0.001,
+        "T1_s": 10.0, "T2_s": 1.0,
+        "T1_min_s": 0.001,
+        # T1_max_s: ground-state hyperfine coherence, hours demonstrated in
+        # optical lattices — Evered et al. (2023) Nature; Bluvstein et al.
+        # (2022) Nature
+        "T1_max_s": 100000.0, "T2_min_s": 0.001,
         "dw_max_rad_s": 2*np.pi*100e3, "dw_typical_khz": 2.0,
         "eps_typical": 1e-3, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 500.0,
@@ -59,7 +73,17 @@ ARCH_DEFAULTS: dict[str, dict] = {
 }
 ARCH_DEFAULTS["unknown"] = ARCH_DEFAULTS["superconducting"]
 
-GATE_REP_N_DT = [20, 40, 80]
+class _DeprecatedGateRepN(list):
+    """Deprecated module-level gate-rep constant. Use BackendProfile.gate_rep_n."""
+    def __iter__(self):
+        warnings.warn(
+            "GATE_REP_N_DT is deprecated and no longer used by "
+            "build_probe_circuits(); use BackendProfile.gate_rep_n instead.",
+            DeprecationWarning, stacklevel=2)
+        return super().__iter__()
+
+
+GATE_REP_N_DT = _DeprecatedGateRepN([20, 40, 80])
 
 
 def build_custom_arch(T1_prior_s: float, T2_prior_s: float,
@@ -192,6 +216,29 @@ class CalibrationSource:
 
 @dataclass
 class BackendProfile:
+    """
+    architecture, T1_prior_s/T2_prior_s: platform and prior decoherence estimates.
+    dt_ns: hardware sample-time quantization, if applicable.
+    backend_name, custom_arch, calibration_source: provenance/bookkeeping.
+    prior_confidence: "live" | "arch_default". "live" means T1_prior_s/T2_prior_s
+      were read from a provider calibration API and are trusted; "arch_default"
+      means they are architecture-typical literature values that may be off by
+      an order of magnitude or more for the actual device.
+
+    Delay-grid strategy: when prior_confidence == "live", t1_delays_s /
+    ramsey_delays_s / echo_delays_s use linear multiples of the prior
+    (0.5x/1.0x/1.5x etc) — this is Fisher-optimal when the prior is close to
+    the true decay constant. When prior_confidence == "arch_default", the
+    prior may be wrong by 10x or more, so delays are instead log-spaced across
+    the architecture's full plausible [T1_min_s, T1_max_s] (or T2 equivalent)
+    range at the 15th/50th/85th percentile in log space — this maximizes the
+    chance that at least one delay point lands where the signal has partially
+    decayed, regardless of where the true timescale actually falls.
+
+    gate_rep_n: architecture-appropriate gate-repetition counts, computed from
+    eps_typical so the total depolarizing signal neither saturates nor stays
+    flat (see BackendProfile.gate_rep_n).
+    """
     architecture: str
     T1_prior_s:   float
     T2_prior_s:   float
@@ -199,6 +246,7 @@ class BackendProfile:
     backend_name: str = "unknown"
     custom_arch:  Optional[dict] = None
     calibration_source: Optional[CalibrationSource] = None
+    prior_confidence: str = "arch_default"  # "live" | "arch_default"
 
     @property
     def constants(self) -> dict:
@@ -206,37 +254,56 @@ class BackendProfile:
             return self.custom_arch
         return ARCH_DEFAULTS.get(self.architecture, ARCH_DEFAULTS["unknown"])
 
+    def _snap_all(self, delays: list[float]) -> list[float]:
+        if self.dt_ns is not None:
+            dt_s = self.dt_ns * 1e-9
+            return [max(dt_s, round(d/dt_s)*dt_s) for d in delays]
+        return delays
+
+    @staticmethod
+    def _log_spaced(lo: float, hi: float) -> list[float]:
+        log_min, log_max = np.log10(lo), np.log10(hi)
+        return [float(10**(log_min + frac*(log_max-log_min)))
+                for frac in (0.15, 0.50, 0.85)]
+
     @property
     def t1_delays_s(self) -> list[float]:
-        base   = 0.50 * self.T1_prior_s
-        delays = [base, 2*base, 3*base]
-        if self.dt_ns is not None:
-            dt_s   = self.dt_ns * 1e-9
-            delays = [max(dt_s, round(d/dt_s)*dt_s) for d in delays]
-        return delays
+        if self.prior_confidence == "live":
+            base   = 0.50 * self.T1_prior_s
+            delays = [base, 2*base, 3*base]
+        else:
+            arch   = self.constants
+            delays = self._log_spaced(arch["T1_min_s"], arch["T1_max_s"])
+        return self._snap_all(delays)
 
     @property
     def ramsey_delays_s(self) -> list[float]:
-        T2     = self.T2_prior_s
-        delays = [0.5*T2, 1.0*T2, 1.5*T2]
-        if self.dt_ns is not None:
-            dt_s   = self.dt_ns * 1e-9
-            delays = [max(dt_s, round(d/dt_s)*dt_s) for d in delays]
-        return delays
+        if self.prior_confidence == "live":
+            T2     = self.T2_prior_s
+            delays = [0.5*T2, 1.0*T2, 1.5*T2]
+        else:
+            arch      = self.constants
+            t1_delays = self.t1_delays_s
+            T2_max    = min(2*t1_delays[1], arch["T1_max_s"])
+            delays    = self._log_spaced(arch["T2_min_s"], T2_max)
+        return self._snap_all(delays)
 
     @property
     def echo_delays_s(self) -> list[float]:
-        T2     = self.T2_prior_s
-        delays = [0.5*T2, 1.0*T2, 1.5*T2]
-        if self.dt_ns is not None:
-            dt_s   = self.dt_ns * 1e-9
-            delays = [max(dt_s, round(d/dt_s)*dt_s) for d in delays]
-        return delays
+        return self.ramsey_delays_s
 
     @property
     def dw_max_rad_s(self) -> float:
         t1 = self.ramsey_delays_s[0]
         return 0.90 * np.pi / t1
+
+    @property
+    def gate_rep_n(self) -> list[int]:
+        eps    = self.constants["eps_typical"]
+        n_max  = max(5, min(int(1.0 / (4.0 * eps)), 2000))
+        n_mid  = max(3, n_max // 2)
+        n_low  = max(1, n_max // 4)
+        return sorted(set([n_low, n_mid, n_max]))
 
     @classmethod
     def from_ibm_backend(cls, backend, qubit: int = 0) -> "BackendProfile":
@@ -310,10 +377,13 @@ class BackendProfile:
               f"ε_sx={eps_prior:.2e} ({eps_source})  "
               f"SPAM: p0|1={p0_given_1:.4f}, p1|0={p1_given_0:.4f} ({spam_source})")
 
+        prior_confidence = ("live" if T1_source == "live_calibration"
+                            and T2_source == "live_calibration" else "arch_default")
         return cls(architecture="superconducting", T1_prior_s=T1_prior,
                    T2_prior_s=T2_prior, dt_ns=dt_ns,
                    backend_name=backend_name, custom_arch=custom_arch,
-                   calibration_source=calibration_source)
+                   calibration_source=calibration_source,
+                   prior_confidence=prior_confidence)
 
     @classmethod
     def from_ionq_backend(cls, api_token: str, backend_name: str = "forte-1",
@@ -390,10 +460,13 @@ class BackendProfile:
               f"ε_sx={eps_prior:.2e} ({eps_source})  "
               f"SPAM: p0|1={p0_given_1:.4f}, p1|0={p1_given_0:.4f} ({spam_source})")
 
+        prior_confidence = ("live" if T1_source == "live_calibration"
+                            and T2_source == "live_calibration" else "arch_default")
         return cls(architecture="trapped_ion", T1_prior_s=T1_prior,
                    T2_prior_s=T2_prior, dt_ns=arch["dt_ns"],
                    backend_name=f"ionq:{backend_name}", custom_arch=custom_arch,
-                   calibration_source=calibration_source)
+                   calibration_source=calibration_source,
+                   prior_confidence=prior_confidence)
 
     @classmethod
     def from_braket_backend(cls,
@@ -428,7 +501,8 @@ class BackendProfile:
 
         return cls(architecture="neutral_atom", T1_prior_s=arch["T1_s"],
                    T2_prior_s=arch["T2_s"], dt_ns=arch["dt_ns"],
-                   backend_name=device_arn, calibration_source=calibration_source)
+                   backend_name=device_arn, calibration_source=calibration_source,
+                   prior_confidence="arch_default")
 
     @classmethod
     def from_architecture(cls, architecture: str, backend_name: str = "unknown",
@@ -450,7 +524,8 @@ class BackendProfile:
                                        p1_given_0=p1_given_0)
             return cls(architecture="custom", T1_prior_s=custom["T1_s"],
                        T2_prior_s=custom["T2_s"], dt_ns=None,
-                       backend_name=backend_name, custom_arch=custom)
+                       backend_name=backend_name, custom_arch=custom,
+                       prior_confidence="arch_default")
         defaults = ARCH_DEFAULTS.get(architecture, ARCH_DEFAULTS["unknown"])
         T1 = T1_prior_s or defaults["T1_s"]
         T2 = min(T2_prior_s or defaults["T2_s"], 2.0*T1)
@@ -463,15 +538,38 @@ class BackendProfile:
             backend=backend_name,
             spam_source=spam_source, spam_note=spam_note,
         )
+        # from_architecture() always uses literature/arch-typical priors, even
+        # when explicit T1_prior_s/T2_prior_s overrides are passed in, so it
+        # always sets prior_confidence="arch_default". Only a genuine live
+        # API read (from_ibm_backend / from_ionq_backend) sets "live".
         return cls(architecture=architecture, T1_prior_s=T1, T2_prior_s=T2,
                    dt_ns=defaults["dt_ns"], backend_name=backend_name,
-                   calibration_source=calibration_source)
+                   calibration_source=calibration_source,
+                   prior_confidence="arch_default")
+
+    @classmethod
+    def from_true_params(cls, architecture: str,
+                         T1_true_s: float,
+                         T2_true_s: float) -> "BackendProfile":
+        """
+        Constructs a BackendProfile with priors set to the true parameter
+        values and prior_confidence="live", so Strategy A (linear delays)
+        is used and delays are perfectly centred on the true decay.
+        Used exclusively for Fig. 2 (ideal hardware validation) in
+        2_parity_experiments.py. Never used for real hardware runs.
+        """
+        profile = cls.from_architecture(architecture,
+                                        T1_prior_s=T1_true_s,
+                                        T2_prior_s=T2_true_s)
+        profile.prior_confidence = "live"
+        return profile
 
     def updated(self, T1_est_s: float, T2_est_s: float) -> "BackendProfile":
         T2_est_s = min(T2_est_s, 2.0*T1_est_s)
         return BackendProfile(architecture=self.architecture, T1_prior_s=T1_est_s,
                               T2_prior_s=T2_est_s, dt_ns=self.dt_ns,
-                              backend_name=self.backend_name, custom_arch=self.custom_arch)
+                              backend_name=self.backend_name, custom_arch=self.custom_arch,
+                              prior_confidence=self.prior_confidence)
 
 
 def get_live_profile(backend, qubit_id: int = 0,
@@ -607,7 +705,8 @@ def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
         circuits.append(_build_ramsey_x_circuit(t, profile.dt_ns, i))
         circuits.append(_build_ramsey_y_circuit(t, profile.dt_ns, i))
 
-    for N in GATE_REP_N_DT:
+    gate_rep_n = profile.gate_rep_n
+    for N in gate_rep_n:
         circuits.append(_build_gate_rep_circuit(N))
 
     for i, t in enumerate(echo_delays):
@@ -615,13 +714,13 @@ def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
 
     n_t1     = len(t1_delays)
     n_ramsey = 2 * len(ramsey_delays)
-    n_gate   = len(GATE_REP_N_DT)
+    n_gate   = len(gate_rep_n)
     n_echo   = len(echo_delays)
 
     metadata = {
         "t1_delays_s":    t1_delays,
         "ramsey_delays_s": ramsey_delays,
-        "gate_rep_N":     GATE_REP_N_DT,
+        "gate_rep_N":     gate_rep_n,
         "echo_delays_s":  echo_delays,
         "n_t1":           n_t1,
         "n_ramsey":       n_ramsey,
@@ -841,6 +940,7 @@ class InversionResult:
     echo_residual:      float = 0.0
     echo_chi2_dof:      float = 0.0
     calibration_source: Optional[CalibrationSource] = None
+    prior_warning:      str = ""
 
     def summary(self, arch: Optional[dict] = None) -> str:
         if arch is None:
@@ -860,6 +960,8 @@ class InversionResult:
                 line += f"  | SPAM: live ({cs.spam_source})"
             else:
                 line += "  | SPAM: literature defaults"
+        if self.prior_warning:
+            line += f"\n{self.prior_warning}"
         return line
 
 
@@ -937,6 +1039,27 @@ def lindblad_inversion(counts_list: list[dict],
         T2_combined = (w_ramsey*T2 + w_echo*T2_echo) / (w_ramsey + w_echo)
         sT2_combined = float(np.sqrt(1.0/(w_ramsey + w_echo)))
 
+    prior_warning = ""
+    if profile.prior_confidence == "arch_default":
+        chi2_dof_checks = [
+            ("T1", t1_chi2, t1d, "T1_prior_s"),
+            ("Ramsey/T2", ramsey_chi2, ramsey_delays, "T2_prior_s"),
+            ("Echo/T2", echo_chi2, echo_delays, "T2_prior_s"),
+            ("Gate-rep/eps", gate_chi2, N_vals, "eps_typical"),
+        ]
+        messages = []
+        for label, chi2, delays_arr, prior_name in chi2_dof_checks:
+            if np.isfinite(chi2) and chi2 > 5.0:
+                vals = [float(v) for v in np.asarray(delays_arr)]
+                messages.append(
+                    f"WARNING: {label} chi2/dof={chi2:.1f} >> 1. Delays may not "
+                    f"span the true timescale. Consider re-running with updated "
+                    f"{prior_name}. Current values: {vals}.")
+        if messages:
+            prior_warning = "\n".join(messages)
+            for msg in messages:
+                print(f"[Canary] {msg}")
+
     return InversionResult(
         backend_name=metadata.get("backend_name", profile.backend_name),
         qubit_id=qubit_id, timestamp=timestamp, architecture=profile.architecture,
@@ -949,7 +1072,8 @@ def lindblad_inversion(counts_list: list[dict],
         T2_ramsey_s=T2, T2_ramsey_sigma_s=sT2,
         T2_echo_s=T2_echo, T2_echo_sigma_s=sT2_echo,
         echo_residual=r_echo, echo_chi2_dof=echo_chi2,
-        calibration_source=profile.calibration_source)
+        calibration_source=profile.calibration_source,
+        prior_warning=prior_warning)
 
 
 if __name__ == "__main__":
@@ -966,6 +1090,18 @@ if __name__ == "__main__":
     ti_profile = get_live_profile("trapped_ion")
     print(ti_profile)
     print("calibration_source:", ti_profile.calibration_source)
+    print(f"trapped_ion t1_delays_s (log-spaced [0.01, 100000]): {ti_profile.t1_delays_s}")
+    print(f"trapped_ion ramsey_delays_s: {ti_profile.ramsey_delays_s}")
+
+    na_profile = get_live_profile("neutral_atom")
+    print(f"neutral_atom t1_delays_s (log-spaced [0.001, 100000]): {na_profile.t1_delays_s}")
+    print(f"neutral_atom ramsey_delays_s: {na_profile.ramsey_delays_s}")
+
+    print("\n[2b] gate_rep_n for all three architectures")
+    for arch_name in ("superconducting", "trapped_ion", "neutral_atom"):
+        p = get_live_profile(arch_name)
+        print(f"{arch_name}: eps_typical={p.constants['eps_typical']:.2e} "
+              f"gate_rep_n={p.gate_rep_n}")
 
     print("\n[3] get_live_profile('ionq:forte-1', ionq_token='dummy_token')"
           " — expect graceful fallback")
@@ -987,6 +1123,21 @@ if __name__ == "__main__":
         qubit_id=0, timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
     print(result.summary(arch=probe_profile.constants))
+
+    print("\n[4b] build_probe_circuits() + lindblad_inversion() on all three "
+          "architectures with synthetic all-zero counts")
+    for arch_name in ("superconducting", "trapped_ion", "neutral_atom"):
+        p = get_live_profile(arch_name)
+        circs, meta = build_probe_circuits(p)
+        zc = [{"0": 300, "1": 0} for _ in range(len(circs))]
+        res = lindblad_inversion(
+            zc, meta, p, shots_t1=300, shots_ramsey=300, shots_gate=300,
+            shots_echo=300, qubit_id=0,
+            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
+        assert np.isfinite(res.T1_s) and np.isfinite(res.T2_s), \
+            f"{arch_name}: non-finite T1/T2"
+        print(f"{arch_name}: {len(circs)} circuits, T1={res.T1_s:.4g}s "
+              f"T2={res.T2_s:.4g}s (finite: OK)")
 
     print("\n" + "=" * 70)
     print("Canary self-test: live SPAM ingestion (fetch_live_spam)")
