@@ -698,8 +698,9 @@ def _build_echo_circuit(delay_s: float, dt_ns: Optional[float], idx: int):
 def _build_gate_rep_circuit(N: int):
     from qiskit import QuantumCircuit
     qc = QuantumCircuit(1, 1, name=f"gate_rep_N{N}")
-    for _ in range(2*N):
-        qc.x(0)
+    for _ in range(N):
+        qc.sx(0)
+        qc.sxdg(0)
     qc.measure(0, 0)
     return qc
 
