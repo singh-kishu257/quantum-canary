@@ -106,26 +106,12 @@ def fetch_published_device_eps(api_key, bname):
         if not chars:
             return float("nan"), float("nan"), None
         c = chars[0]
-        f1q    = c.get("fidelity", {}).get("1q", {})
-        mean   = f1q.get("mean")
-        median = f1q.get("median")
+        f1q = c.get("fidelity", {}).get("1q", {})
+        mean = f1q.get("mean")
         stderr = f1q.get("stderr")
-
-        eps_mean   = (1.0 - float(mean))   if mean   is not None else float("nan")
-        eps_median = (1.0 - float(median)) if median is not None else float("nan")
-
-        if median is not None:
-            eps, stat_used = eps_median, "median"
-        elif mean is not None:
-            eps, stat_used = eps_mean, "mean (median unavailable)"
-        else:
+        if mean is None:
             return float("nan"), float("nan"), c.get("date")
-
-        print(f"  IonQ 1Q fidelity stats: "
-              f"median_eps={eps_median if np.isfinite(eps_median) else 'n/a'}  "
-              f"mean_eps={eps_mean if np.isfinite(eps_mean) else 'n/a'}  "
-              f"(using {stat_used})")
-
+        eps = 1.0 - float(mean)
         eps_sigma = float(stderr) if stderr is not None else float("nan")
         return eps, eps_sigma, c.get("date")
     except Exception as e:
@@ -226,84 +212,91 @@ def fit_canary(p0_meas, Nv, arch, shots):
 
 
 def run_canary(backend, qubits, profiles, chk, chk_path, shots):
-    n_q        = len(qubits)
-    full_width = max(qubits) + 1
-    Nv_raw     = profiles[qubits[0]].gate_rep_n
-    Nv         = [N if N % 2 == 0 else N + 1 for N in Nv_raw]
+    Nv_raw = profiles[qubits[0]].gate_rep_n
+    Nv     = [N if N % 2 == 0 else N + 1 for N in Nv_raw]
     print(f"  Canary: N={Nv}  ({[2*N for N in Nv]} native gate pairs/qubit)  "
-          f"{shots} shots  {n_q}q  circuit_width={full_width}")
+          f"{shots} shots  single-qubit circuits, one qubit at a time")
+    print(f"  Loop: for each qubit → run all {len(Nv)} N values → fit ε_sx → next qubit")
 
-    p0_by_N = chk.get("canary_p0_by_N", {})
+    by_qubit = {int(k): v for k, v in
+                chk.get("canary_results_by_qubit", {}).items()}
 
-    for N in Nv:
-        if str(N) in p0_by_N:
-            print(f"    N={N:4d}: loaded from checkpoint")
+    results = {}
+
+    for q in qubits:
+        q_data = by_qubit.get(q, {})
+
+        # Already fully done — load from checkpoint
+        if "eps_sx" in q_data:
+            eps = q_data["eps_sx"]
+            sig = q_data.get("eps_sx_sigma", float("nan"))
+            cal = profiles[q].constants
+            results[q] = dict(
+                Nv=Nv,
+                p0_measured=[q_data.get(str(N), float("nan")) for N in Nv],
+                eps_sx=eps, eps_sx_sigma=sig,
+                p0g1=cal["p0_given_1"], p1g0=cal["p1_given_0"])
+            print(f"  Q{q:2d}: checkpoint  eps_sx={eps:.4e} ± {sig:.2e}")
             continue
 
-        ops_per_qubit = 2 * N
-        batches = inv.split_qubits_for_op_limit(qubits, ops_per_qubit,
-                                                max_total_ops=24_000)
-        if len(batches) > 1:
-            total_ops = ops_per_qubit * len(qubits)
-            print(f"    N={N:4d}: {ops_per_qubit} ops/qubit x {len(qubits)}q = "
-                  f"{total_ops} total ops > 24,000 limit — proactively "
-                  f"splitting into {len(batches)} batches "
-                  f"({[len(b) for b in batches]} qubits each)")
+        print(f"  Q{q:2d}: submitting N={Nv} ...")
+        stopped = False
 
-        p0_this_N   = chk.get("canary_p0_partial", {}).get(str(N), {})
-        p0_this_N   = {int(k): v for k, v in p0_this_N.items()}
-        batch_key   = "canary_p0_partial"
-        stopped     = False
-        for batch in batches:
-            remaining = [q for q in batch if q not in p0_this_N]
-            if not remaining:
+        for N in Nv:
+            if str(N) in q_data:
+                print(f"    N={N:5d}: checkpoint  p0={q_data[str(N)]:.4f}")
                 continue
             try:
-                qc     = canary_circuit(N, remaining)
+                qc     = canary_circuit(N, [q])
                 counts = submit_one(backend, qc, shots)
-                per_q  = counts_to_per_qubit(counts, remaining, shots)
-                for q_id in remaining:
-                    p0_this_N[q_id] = p0_from_counts(per_q, q_id, shots)
-                chk.setdefault(batch_key, {})[str(N)] = p0_this_N
+                per_q  = counts_to_per_qubit(counts, [q], shots)
+                p0     = p0_from_counts(per_q, q, shots)
+                q_data[str(N)] = p0
+                by_qubit[q] = q_data
+                chk["canary_results_by_qubit"] = {str(k): v
+                                                   for k, v in by_qubit.items()}
                 save_chk(chk_path, chk)
-                print(f"      batch {remaining}: OK")
+                print(f"    N={N:5d}: p0={p0:.4f}")
             except Exception as e:
-                chk.setdefault(batch_key, {})[str(N)] = p0_this_N
+                chk["canary_results_by_qubit"] = {str(k): v
+                                                   for k, v in by_qubit.items()}
                 save_chk(chk_path, chk)
-                print(f"      batch {remaining}: FAILED ({e}) — "
-                      f"checkpoint saved, stopping Canary")
+                print(f"    N={N:5d}: FAILED ({e}) — checkpoint saved, stopping")
                 stopped = True
                 break
 
         if stopped:
             break
 
-        p0_by_N[str(N)] = p0_this_N
-        chk["canary_p0_by_N"] = p0_by_N
-        save_chk(chk_path, chk)
-        print(f"    N={N:4d}: p0 mean={np.mean(list(p0_by_N[str(N)].values())):.4f}  "
-              f"min={min(p0_by_N[str(N)].values()):.4f}  "
-              f"max={max(p0_by_N[str(N)].values()):.4f}")
+        # All N values done for this qubit — fit ε_sx now
+        p0_meas = [q_data.get(str(N), float("nan")) for N in Nv]
+        Nv_done = [N for N, p in zip(Nv, p0_meas) if np.isfinite(p)]
+        p0_done = [p for p in p0_meas if np.isfinite(p)]
 
-    results = {}
-    for q_id in qubits:
-        cal  = profiles[q_id].constants
+        cal  = profiles[q].constants
         arch = dict(ARCH)
         arch["p0_given_1"]  = cal["p0_given_1"]
         arch["p1_given_0"]  = cal["p1_given_0"]
         arch["eps_typical"] = cal["eps_typical"]
-        Nv_done = [N for N in Nv if str(N) in p0_by_N]
-        p0_meas = [p0_by_N[str(N)][str(q_id) if str(q_id) in p0_by_N[str(N)] else q_id]
-                   for N in Nv_done]
-        if len(Nv_done) < 2:
-            results[q_id] = dict(Nv=Nv_done, p0_measured=p0_meas,
-                                 eps_sx=float("nan"), eps_sx_sigma=float("nan"),
-                                 p0g1=cal["p0_given_1"], p1g0=cal["p1_given_0"])
-            continue
-        eps, sig, _ = fit_canary(p0_meas, Nv_done, arch, shots)
-        results[q_id] = dict(Nv=Nv_done, p0_measured=p0_meas,
-                             eps_sx=eps, eps_sx_sigma=sig,
-                             p0g1=cal["p0_given_1"], p1g0=cal["p1_given_0"])
+
+        if len(Nv_done) >= 2:
+            eps, sig, _ = fit_canary(p0_done, Nv_done, arch, shots)
+        else:
+            eps, sig = float("nan"), float("nan")
+
+        q_data["eps_sx"]       = eps
+        q_data["eps_sx_sigma"] = sig
+        by_qubit[q] = q_data
+        chk["canary_results_by_qubit"] = {str(k): v for k, v in by_qubit.items()}
+        save_chk(chk_path, chk)
+
+        results[q] = dict(
+            Nv=Nv_done, p0_measured=p0_done,
+            eps_sx=eps, eps_sx_sigma=sig,
+            p0g1=cal["p0_given_1"], p1g0=cal["p1_given_0"])
+        print(f"  Q{q:2d}: eps_sx={eps:.4e} ± {sig:.2e}  "
+              f"p0={[f'{p:.3f}' for p in p0_done]}")
+
     return results, Nv
 
 
@@ -340,8 +333,9 @@ def print_comparison(canary, qubits, published_eps, published_eps_sigma):
 
 
 def estimate_cost(qubits, Nv, shots_c):
-    n_q     = len(qubits)
-    gates_c = sum(2 * N for N in Nv) * n_q * shots_c
+    # Single-qubit circuits: cost = same total gate-shots as parallel
+    # IonQ bills by gate-qubit-shot regardless of circuit structure
+    gates_c = sum(2 * N for N in Nv) * len(qubits) * shots_c
     return gates_c * COST_PER_QGS
 
 
@@ -371,7 +365,7 @@ def main():
     print(f"\n[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}]  6_ionq_eps_rb.py")
     print(f"  Backend       : {args.backend}")
     print(f"  Canary shots  : {args.canary_shots}")
-    print(f"  Method        : Canary gate repetition, all qubits in parallel")
+    print(f"  Method        : Canary gate repetition, one qubit at a time (single-qubit circuits)")
     print(f"  No error mitigation, no optimization, native gateset")
 
     backend = get_backend(args.backend, api_key)

@@ -1,4 +1,4 @@
-name: Fig7 Benchmark - Parallel Matrix
+name: Fig7 Benchmark - Parallel Matrix (all architectures)
 
 on:
   workflow_dispatch:
@@ -11,6 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         budget: [1000, 2500, 5000, 9900, 15000, 25000, 50000]
+        architecture: [superconducting, trapped_ion, neutral_atom]
     steps:
       - uses: actions/checkout@v4
 
@@ -24,17 +25,60 @@ jobs:
       - name: Make output folders
         run: mkdir -p research/data research/figures
 
-      - name: Run benchmark (budget=${{ matrix.budget }})
+      - name: Run benchmark (budget=${{ matrix.budget }}, arch=${{ matrix.architecture }})
         run: |
           cd research
           export BUDGET_SUBSET="${{ matrix.budget }}"
-          export JOB_TAG="${{ matrix.budget }}"
+          export ARCH="${{ matrix.architecture }}"
+          export JOB_TAG="${{ matrix.budget }}_${{ matrix.architecture }}"
           N_WORKERS=4 python 7_benchmark_experiments.py
 
       - name: Upload results (always, even on timeout/failure)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fig7-results-${{ matrix.budget }}
-          path: research/data/fig7_benchmark_${{ matrix.budget }}.csv
+          name: fig7-results-${{ matrix.budget }}-${{ matrix.architecture }}
+          path: research/data/fig7_benchmark_${{ matrix.budget }}_${{ matrix.architecture }}.csv
+          if-no-files-found: warn
+
+  merge:
+    needs: run
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install qiskit==2.5.1 qiskit-aer==0.17.2 qiskit-experiments==0.14.1 qiskit-ibm-runtime matplotlib
+
+      - name: Make output folders
+        run: mkdir -p research/data research/figures
+
+      - name: Download all split results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fig7-results-*
+          path: research/data
+          merge-multiple: true
+
+      - name: Merge into single CSV, threshold table, and figure
+        run: |
+          cd research
+          python 7_merge_results.py
+
+      - name: Upload final merged results (single artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fig7-FINAL-merged
+          path: |
+            research/data/fig7_benchmark.csv
+            research/data/fig7_threshold.csv
+            research/figures/fig7_benchmark.pdf
+            research/figures/fig7_benchmark.png
           if-no-files-found: warn

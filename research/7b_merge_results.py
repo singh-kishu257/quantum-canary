@@ -46,28 +46,31 @@ if __name__ == "__main__":
     print(f"Merging {len(paths)} file(s):")
 
     all_rows = []
-    seen_budgets = set()
+    seen = set()
     for path in paths:
         rows = load_rows(path)
-        budgets_here = sorted(set(r["budget"] for r in rows))
-        overlap = seen_budgets.intersection(budgets_here)
+        combos_here = sorted(set((r["architecture"], r["budget"]) for r in rows))
+        overlap = seen.intersection(combos_here)
         if overlap:
-            print(f"  WARNING: budgets {overlap} already seen — "
+            print(f"  WARNING: (arch,budget) combos {overlap} already seen — "
                  f"duplicate rows will be kept, check for overlapping jobs.")
-        seen_budgets.update(budgets_here)
-        print(f"  {path.name}: budgets={budgets_here}  ({len(rows)} rows)")
+        seen.update(combos_here)
+        print(f"  {path.name}: {combos_here}  ({len(rows)} rows)")
         all_rows.extend(rows)
 
-    all_rows.sort(key=lambda r: (r["budget"], r["parameter"], r["method"]))
+    all_rows.sort(key=lambda r: (r["architecture"], r["budget"], r["parameter"], r["method"]))
 
     print(f"\nTotal merged rows: {len(all_rows)}")
-    print(f"All budgets present: {sorted(seen_budgets)}")
-    expected = set(bench._ALL_BUDGETS)
-    missing_budgets = expected - seen_budgets
-    if missing_budgets:
-        print(f"WARNING: missing budgets from full sweep: {sorted(missing_budgets)}")
+
+    expected = {(a, b) for a in bench.ALL_ARCHITECTURES for b in bench._ALL_BUDGETS}
+    missing_combos = expected - seen
+    print(f"Architectures present: {sorted(set(a for a,b in seen))}")
+    print(f"Budgets present: {sorted(set(b for a,b in seen))}")
+    if missing_combos:
+        print(f"WARNING: missing (architecture, budget) combinations: "
+             f"{sorted(missing_combos)}")
     else:
-        print("All expected budgets present: OK")
+        print("All expected (architecture, budget) combinations present: OK")
 
     merged_path = DATA_DIR / "fig7_benchmark.csv"
     with open(merged_path, "w", newline="", encoding="utf-8") as f:
