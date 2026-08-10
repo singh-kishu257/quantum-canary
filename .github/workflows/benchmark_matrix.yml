@@ -69,7 +69,7 @@ jobs:
       - name: Merge into single CSV, threshold table, and figure
         run: |
           cd research
-          python 7_merge_results.py
+          python 7b_merge_results.py
 
       - name: Upload final merged results (single artifact)
         if: always()
