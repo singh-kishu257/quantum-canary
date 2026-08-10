@@ -16,6 +16,7 @@ __all__ = [
     "build_probe_circuits", "run_probe_circuits_aer", "lindblad_inversion",
     "get_live_profile", "fetch_live_spam",
     "_sqrtx_native_inverse_pair", "_build_gate_rep_circuit",
+    "split_qubits_for_op_limit",
 ]
 # NOTE: GATE_REP_N_DT is intentionally excluded — it is a deprecated alias,
 # see BackendProfile.gate_rep_n.
@@ -154,23 +155,29 @@ def fetch_live_spam(
                 raise ValueError("no ionq_api_token provided")
             import requests
             url = (f"https://api.ionq.co/v0.3/characterizations/backends/"
-                   f"{ionq_backend_name}/current")
+                   f"qpu.{ionq_backend_name}/current")
             resp = requests.get(
                 url, headers={"Authorization": f"apiKey {ionq_api_token}"}, timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
             spam_error = None
+            def _extract_scalar(v):
+                if isinstance(v, dict):
+                    v = v.get("mean")
+                return v
             for path in (
                 lambda d: d.get("spam_error"),
-                lambda d: d.get("fidelity", {}).get("spam"),
+                lambda d: _extract_scalar(d.get("fidelity", {}).get("spam")),
                 lambda d: d.get("characteristic", {}).get("spam_error"),
-                lambda d: d.get("characteristic", {}).get("fidelity", {}).get("spam"),
+                lambda d: _extract_scalar(
+                    d.get("characteristic", {}).get("fidelity", {}).get("spam")),
             ):
                 try:
                     v = path(data)
                     if v is not None:
-                        spam_error = float(v)
+                        raw = float(v)
+                        spam_error = (1.0 - raw) if raw > 0.5 else raw
                         break
                 except Exception:
                     continue
@@ -409,33 +416,50 @@ class BackendProfile:
                 raise RuntimeError("requests is not installed") from exc
 
             url = (f"https://api.ionq.co/v0.3/characterizations/backends/"
-                   f"{backend_name}/current")
+                   f"qpu.{backend_name}/current")
             resp = requests.get(url, headers={"Authorization": f"apiKey {api_token}"},
                                 timeout=10)
             resp.raise_for_status()
             data = resp.json()
-            characteristic = data.get("characteristic", {}) or {}
 
-            t1 = characteristic.get("t1_time")
+            timing = data.get("timing", {}) or {}
+            t1 = timing.get("t1")
             if t1 is not None and float(t1) > 0:
                 T1_prior, T1_source = float(t1), "live_calibration"
 
-            t2 = characteristic.get("t2_time")
+            t2 = timing.get("t2")
             if t2 is not None and float(t2) > 0:
                 T2_prior, T2_source = float(t2), "live_calibration"
 
             fidelity_1q = None
-            fid_dict = characteristic.get("fidelity", {}) or {}
-            if isinstance(fid_dict, dict) and isinstance(fid_dict.get("1q"), dict) \
-                    and fid_dict["1q"]:
-                fidelity_1q = next(iter(fid_dict["1q"].values()))
-            elif isinstance(fid_dict, dict) and isinstance(fid_dict.get("1q"), (int, float)):
-                fidelity_1q = fid_dict["1q"]
-            if fidelity_1q is None:
-                fidelity_1q = characteristic.get("1q_gate_fidelity")
+            fidelity_1q_stat_used = None
+            fid_dict = data.get("fidelity", {}) or {}
+            f1q = fid_dict.get("1q")
+            f1q_mean   = None
+            f1q_median = None
+            if isinstance(f1q, dict):
+                f1q_mean   = f1q.get("mean")
+                f1q_median = f1q.get("median")
+                if f1q_median is not None:
+                    fidelity_1q = f1q_median
+                    fidelity_1q_stat_used = "median"
+                elif f1q_mean is not None:
+                    fidelity_1q = f1q_mean
+                    fidelity_1q_stat_used = "mean (median unavailable)"
+            elif isinstance(f1q, (int, float)):
+                fidelity_1q = f1q
+                fidelity_1q_stat_used = "scalar"
             if fidelity_1q is not None:
                 eps_prior  = float(np.clip(1.0 - float(fidelity_1q), 0.0, arch["eps_max"]))
                 eps_source = "live_calibration"
+                diag_parts = []
+                if f1q_median is not None:
+                    diag_parts.append(f"median_eps={1.0-float(f1q_median):.2e}")
+                if f1q_mean is not None:
+                    diag_parts.append(f"mean_eps={1.0-float(f1q_mean):.2e}")
+                if diag_parts:
+                    print(f"[Canary] IonQ 1Q fidelity stats — using {fidelity_1q_stat_used}: "
+                          f"{', '.join(diag_parts)}")
 
         except Exception:
             print("[Canary] IonQ API unavailable — using arch defaults for trapped_ion")
@@ -840,6 +864,46 @@ def _build_gate_rep_circuit(N: int, architecture: str = "superconducting"):
     return qc
 
 
+def split_qubits_for_op_limit(target_qubits: list, ops_per_qubit: int,
+                              max_total_ops: int = 24_000) -> list:
+    """
+    Proactively splits target_qubits into batches so that
+    ops_per_qubit * len(batch) never exceeds max_total_ops.
+
+    This avoids ever submitting a circuit that would be rejected for
+    exceeding a hardware provider's per-job operation-count limit —
+    computed BEFORE submission, so no job is ever charged and then
+    fails. Each returned batch is a literal subset of target_qubits
+    (order preserved), so physical qubit identity is never altered —
+    "qubit 7" in a split batch is exactly the same physical qubit as
+    "qubit 7" in the unsplit case.
+
+    max_total_ops=24_000 is a conservative default based on IonQ Forte
+    QuantumCircuitComplexityError behaviour observed empirically:
+    16 qubits x 1252 ops/qubit = 20,032 ops succeeded;
+    16 qubits x 2500 ops/qubit = 40,000 ops failed.
+    24,000 sits safely below the failure threshold with margin.
+    """
+    if ops_per_qubit <= 0 or len(target_qubits) == 0:
+        return [list(target_qubits)]
+    max_qubits_per_batch = max(1, int(max_total_ops // ops_per_qubit))
+    n_qubits = len(target_qubits)
+    if max_qubits_per_batch >= n_qubits:
+        return [list(target_qubits)]
+
+    num_batches = -(-n_qubits // max_qubits_per_batch)  # ceil division
+    base_size   = n_qubits // num_batches
+    remainder   = n_qubits % num_batches
+
+    batches = []
+    idx = 0
+    for b in range(num_batches):
+        size = base_size + (1 if b < remainder else 0)
+        batches.append(list(target_qubits[idx:idx + size]))
+        idx += size
+    return batches
+
+
 def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
     t1_delays     = profile.t1_delays_s
     ramsey_delays = profile.ramsey_delays_s
@@ -1004,9 +1068,12 @@ def _invert_gate(p0_measured: np.ndarray, N_values: np.ndarray,
     p1_given_0 = arch.get("p1_given_0", 0.0)
     spam_model = lambda N_values, epsilon_sx: forward_gate(N_values, epsilon_sx, p0_given_1, p1_given_0)
 
+    if len(p0_measured) < 2:
+        return arch["eps_typical"], float("inf"), float("inf")
+
     denom    = float(p0_measured[0]) - float(p0_measured[1])
     eps_guess = arch["eps_typical"]
-    if abs(denom) > 1e-6:
+    if len(p0_measured) >= 3 and abs(denom) > 1e-6:
         x = (float(p0_measured[1]) - float(p0_measured[2])) / denom
         if 0 < x < 1:
             eps_guess = float(np.clip((1 - x**(1.0/(2.0*N_values[0])))/2.0,

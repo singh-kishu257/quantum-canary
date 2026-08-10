@@ -1,0 +1,40 @@
+name: Fig7 Benchmark - Parallel Matrix
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        budget: [1000, 2500, 5000, 9900, 15000, 25000, 50000]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install qiskit==2.5.1 qiskit-aer==0.17.2 qiskit-experiments==0.14.1 qiskit-ibm-runtime matplotlib
+
+      - name: Make output folders
+        run: mkdir -p research/data research/figures
+
+      - name: Run benchmark (budget=${{ matrix.budget }})
+        run: |
+          cd research
+          export BUDGET_SUBSET="${{ matrix.budget }}"
+          export JOB_TAG="${{ matrix.budget }}"
+          N_WORKERS=4 python 7_benchmark_experiments.py
+
+      - name: Upload results (always, even on timeout/failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fig7-results-${{ matrix.budget }}
+          path: research/data/fig7_benchmark_${{ matrix.budget }}.csv
+          if-no-files-found: warn

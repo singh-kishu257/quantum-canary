@@ -106,12 +106,26 @@ def fetch_published_device_eps(api_key, bname):
         if not chars:
             return float("nan"), float("nan"), None
         c = chars[0]
-        f1q = c.get("fidelity", {}).get("1q", {})
-        mean = f1q.get("mean")
+        f1q    = c.get("fidelity", {}).get("1q", {})
+        mean   = f1q.get("mean")
+        median = f1q.get("median")
         stderr = f1q.get("stderr")
-        if mean is None:
+
+        eps_mean   = (1.0 - float(mean))   if mean   is not None else float("nan")
+        eps_median = (1.0 - float(median)) if median is not None else float("nan")
+
+        if median is not None:
+            eps, stat_used = eps_median, "median"
+        elif mean is not None:
+            eps, stat_used = eps_mean, "mean (median unavailable)"
+        else:
             return float("nan"), float("nan"), c.get("date")
-        eps = 1.0 - float(mean)
+
+        print(f"  IonQ 1Q fidelity stats: "
+              f"median_eps={eps_median if np.isfinite(eps_median) else 'n/a'}  "
+              f"mean_eps={eps_mean if np.isfinite(eps_mean) else 'n/a'}  "
+              f"(using {stat_used})")
+
         eps_sigma = float(stderr) if stderr is not None else float("nan")
         return eps, eps_sigma, c.get("date")
     except Exception as e:
@@ -136,14 +150,6 @@ def load_profiles(qubits, api_key, backend_arg):
     return profiles
 
 
-def _gpi2_gate(qc, q):
-    try:
-        from qiskit_ionq.ionq_gates import GPI2Gate
-        qc.append(GPI2Gate(0), [q])
-    except ImportError:
-        qc.sx(q)
-
-
 def _gpi2_phi_gate(qc, q, phi):
     try:
         from qiskit_ionq.ionq_gates import GPI2Gate
@@ -154,31 +160,13 @@ def _gpi2_phi_gate(qc, q, phi):
 
 def canary_circuit(N, target_qubits):
     from qiskit import QuantumCircuit
-    assert N % 2 == 0, f"N must be even for GPI2 gate rep (GPI2^4=I), got N={N}"
-    full_width = max(target_qubits) + 1
-    qc         = QuantumCircuit(full_width, len(target_qubits), name=f"canary_N{N}")
-    for _ in range(2 * N):
-        for q in target_qubits:
-            _gpi2_gate(qc, q)
-        qc.barrier(*target_qubits)
-    for i, q in enumerate(target_qubits):
-        qc.measure(q, i)
-    return qc
-
-
-def canary_circuit_twirled(N, target_qubits, seed):
-    from qiskit import QuantumCircuit
     assert N % 2 == 0, f"N must be even, got N={N}"
-    n_pairs    = N
     full_width = max(target_qubits) + 1
-    qc         = QuantumCircuit(full_width, len(target_qubits), name=f"canary_tw_N{N}")
-    rng            = np.random.default_rng([SEED, int(seed), int(N)])
-    signs_by_qubit = {q: rng.choice([0.0, 0.5], size=n_pairs) for q in target_qubits}
-    for pair_idx in range(n_pairs):
-        for _rep in range(2):
-            for q in target_qubits:
-                _gpi2_phi_gate(qc, q, signs_by_qubit[q][pair_idx])
-            qc.barrier(*target_qubits)
+    qc = QuantumCircuit(full_width, len(target_qubits), name=f"canary_N{N}")
+    for _ in range(N):
+        for q in target_qubits:
+            inv._sqrtx_native_inverse_pair(qc, q, "trapped_ion")
+        qc.barrier(*target_qubits)
     for i, q in enumerate(target_qubits):
         qc.measure(q, i)
     return qc
@@ -237,13 +225,12 @@ def fit_canary(p0_meas, Nv, arch, shots):
         arch, shots)
 
 
-def run_canary(backend, qubits, profiles, chk, chk_path, shots, twirl=False):
+def run_canary(backend, qubits, profiles, chk, chk_path, shots):
     n_q        = len(qubits)
     full_width = max(qubits) + 1
     Nv_raw     = profiles[qubits[0]].gate_rep_n
     Nv         = [N if N % 2 == 0 else N + 1 for N in Nv_raw]
-    mode_label = "Pauli-twirled" if twirl else "deterministic"
-    print(f"  Canary ({mode_label}): N={Nv}  ({[2*N for N in Nv]} GPI2 gates/qubit)  "
+    print(f"  Canary: N={Nv}  ({[2*N for N in Nv]} native gate pairs/qubit)  "
           f"{shots} shots  {n_q}q  circuit_width={full_width}")
 
     p0_by_N = chk.get("canary_p0_by_N", {})
@@ -252,23 +239,51 @@ def run_canary(backend, qubits, profiles, chk, chk_path, shots, twirl=False):
         if str(N) in p0_by_N:
             print(f"    N={N:4d}: loaded from checkpoint")
             continue
-        try:
-            qc     = (canary_circuit_twirled(N, qubits, seed=N) if twirl
-                      else canary_circuit(N, qubits))
-            counts = submit_one(backend, qc, shots)
-            per_q  = counts_to_per_qubit(counts, qubits, shots)
-            p0_by_N[str(N)] = {q_id: p0_from_counts(per_q, q_id, shots)
-                               for q_id in qubits}
-            chk["canary_p0_by_N"] = p0_by_N
-            save_chk(chk_path, chk)
-            print(f"    N={N:4d}: p0 mean={np.mean(list(p0_by_N[str(N)].values())):.4f}  "
-                  f"min={min(p0_by_N[str(N)].values()):.4f}  "
-                  f"max={max(p0_by_N[str(N)].values()):.4f}")
-        except Exception as e:
-            chk["canary_p0_by_N"] = p0_by_N
-            save_chk(chk_path, chk)
-            print(f"    N={N:4d}: FAILED ({e}) — checkpoint saved, stopping Canary")
+
+        ops_per_qubit = 2 * N
+        batches = inv.split_qubits_for_op_limit(qubits, ops_per_qubit,
+                                                max_total_ops=24_000)
+        if len(batches) > 1:
+            total_ops = ops_per_qubit * len(qubits)
+            print(f"    N={N:4d}: {ops_per_qubit} ops/qubit x {len(qubits)}q = "
+                  f"{total_ops} total ops > 24,000 limit — proactively "
+                  f"splitting into {len(batches)} batches "
+                  f"({[len(b) for b in batches]} qubits each)")
+
+        p0_this_N   = chk.get("canary_p0_partial", {}).get(str(N), {})
+        p0_this_N   = {int(k): v for k, v in p0_this_N.items()}
+        batch_key   = "canary_p0_partial"
+        stopped     = False
+        for batch in batches:
+            remaining = [q for q in batch if q not in p0_this_N]
+            if not remaining:
+                continue
+            try:
+                qc     = canary_circuit(N, remaining)
+                counts = submit_one(backend, qc, shots)
+                per_q  = counts_to_per_qubit(counts, remaining, shots)
+                for q_id in remaining:
+                    p0_this_N[q_id] = p0_from_counts(per_q, q_id, shots)
+                chk.setdefault(batch_key, {})[str(N)] = p0_this_N
+                save_chk(chk_path, chk)
+                print(f"      batch {remaining}: OK")
+            except Exception as e:
+                chk.setdefault(batch_key, {})[str(N)] = p0_this_N
+                save_chk(chk_path, chk)
+                print(f"      batch {remaining}: FAILED ({e}) — "
+                      f"checkpoint saved, stopping Canary")
+                stopped = True
+                break
+
+        if stopped:
             break
+
+        p0_by_N[str(N)] = p0_this_N
+        chk["canary_p0_by_N"] = p0_by_N
+        save_chk(chk_path, chk)
+        print(f"    N={N:4d}: p0 mean={np.mean(list(p0_by_N[str(N)].values())):.4f}  "
+              f"min={min(p0_by_N[str(N)].values()):.4f}  "
+              f"max={max(p0_by_N[str(N)].values()):.4f}")
 
     results = {}
     for q_id in qubits:
@@ -338,11 +353,6 @@ def main():
     ap.add_argument("--backend",       default="ionq_simulator:forte-1")
     ap.add_argument("--live",          action="store_true")
     ap.add_argument("--canary-shots",  type=int, default=CANARY_SHOTS)
-    ap.add_argument("--twirl",         action="store_true",
-                    help="Use Pauli-twirled gate repetition (random per-pair "
-                         "axis flip) instead of deterministic repeated GPI2. "
-                         "Suppresses coherent over/under-rotation bias; "
-                         "ideal net unitary is unchanged (numerically verified).")
     ap.add_argument("--resume",        default=None)
     args = ap.parse_args()
 
@@ -388,11 +398,9 @@ def main():
         if input("  Type RUN to confirm: ").strip() != "RUN":
             sys.exit("Aborted.")
 
-    print(f"\n--- Canary gate repetition (all qubits, "
-          f"{'twirled' if args.twirl else 'deterministic'}) ---")
+    print(f"\n--- Canary gate repetition (all qubits) ---")
     canary_results, Nv = run_canary(backend, qubits, all_profiles,
-                                    chk, chk_path, args.canary_shots,
-                                    twirl=args.twirl)
+                                    chk, chk_path, args.canary_shots)
 
     print_comparison(canary_results, qubits, published_eps, published_eps_sigma)
 
@@ -401,14 +409,12 @@ def main():
                            p1g0=all_profiles[q].constants["p1_given_0"])
                    for q in qubits}
 
-    mode = "twirled" if args.twirl else "det"
-    stem = f"ionq_canary_allq_{mode}_{qubits[0]}-{qubits[-1]}_{ts}"
+    stem = f"ionq_canary_allq_{qubits[0]}-{qubits[-1]}_{ts}"
 
     try:
         out_json = DATA_DIR / f"{stem}.json"
         with open(out_json, "w") as f:
             json.dump(dict(backend=args.backend,
-                           twirled=args.twirl,
                            timestamp=datetime.now(timezone.utc).isoformat(),
                            qubits=qubits,
                            gate_rep_N=Nv,
@@ -430,7 +436,6 @@ def main():
             rows.append(dict(
                 qubit                  = q,
                 backend                = args.backend,
-                twirled                = args.twirl,
                 timestamp              = datetime.now(timezone.utc).isoformat(),
                 canary_eps_sx          = c.get("eps_sx",       float("nan")),
                 canary_sigma           = c.get("eps_sx_sigma", float("nan")),

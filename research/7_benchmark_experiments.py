@@ -45,7 +45,14 @@ QE_RB_LENGTHS      = [1, 2, 4, 8, 16, 32, 64, 128]
 QE_RB_SAMPLES      = 5
 QE_SX_PER_CLIFFORD = 1.875
 
-SHOT_BUDGETS = [1_000, 2_500, 5_000, 9_900, 15_000, 25_000, 50_000]
+import os as _os
+_ALL_BUDGETS = [1_000, 2_500, 5_000, 9_900, 15_000, 25_000, 50_000]
+_budget_env  = _os.environ.get("BUDGET_SUBSET", "").strip()
+if _budget_env:
+    SHOT_BUDGETS = [int(b.strip()) for b in _budget_env.split(",") if b.strip()]
+else:
+    SHOT_BUDGETS = _ALL_BUDGETS
+JOB_TAG = _os.environ.get("JOB_TAG", "full")
 
 TRUE_PARAM_RANGES = {
     "T1_s": (80e-6,  400e-6),
@@ -104,7 +111,7 @@ def _make_backend(qc, T1, T2, eps, p0g1, p1g0):
     nm   = NoiseModel()
     sx_e = (thermal_relaxation_error(T1, T2, 50e-9)
             .compose(depolarizing_error(2.0 * eps, 1)))
-    nm.add_quantum_error(sx_e, ["sx", "x", "id", "rx", "rz", "u1", "p"], [0])
+    nm.add_quantum_error(sx_e, ["sx", "x", "id", "rx", "u1", "p"], [0])
     seen = set()
     for inst in qc.data:
         if inst.operation.name == "delay":
@@ -120,14 +127,17 @@ def _make_backend(qc, T1, T2, eps, p0g1, p1g0):
     return AerSimulator(noise_model=nm)
 
 
-def _run_exp(exp_obj, T1, T2, eps, p0g1, p1g0, shots):
+def _run_exp(exp_obj, T1, T2, eps, p0g1, p1g0, shots,
+            dw_true=0.0, dt_ns=None, inject_detuning=False):
     from qiskit import transpile
     exp_obj.set_run_options(shots=shots)
     circuits = exp_obj.circuits()
     exp_data = exp_obj._initialize_experiment_data()
     for qc in circuits:
-        b    = _make_backend(qc, T1, T2, eps, p0g1, p1g0)
-        tqc  = transpile(qc, b, optimization_level=0)
+        run_qc = (inv._inject_ramsey_detuning(qc, dw_true, dt_ns)
+                  if inject_detuning else qc)
+        b    = _make_backend(run_qc, T1, T2, eps, p0g1, p1g0)
+        tqc  = transpile(run_qc, b, optimization_level=0)
         cnts = b.run(tqc, shots=shots).result().get_counts()
         meta = {**dict(qc.metadata), "count_ops": [(((0,), g), c) for g, c in tqc.count_ops().items()]}
         exp_data.add_data({"counts": cnts, "shots": shots, "metadata": meta})
@@ -168,14 +178,7 @@ def run_canary(T1_true, T2_true, dw_true, eps_true, seed, budget):
     p0g1    = arch["p0_given_1"]
     p1g0    = arch["p1_given_0"]
 
-    def spam(p):
-        return p * (1 - p0g1) + (1 - p) * p1g0
-
-    _, meta       = inv.build_probe_circuits(profile)
-    t1_delays     = meta["t1_delays_s"]
-    ramsey_delays = meta["ramsey_delays_s"]
-    echo_delays   = meta["echo_delays_s"]
-    Nv            = np.array(meta["gate_rep_N"], dtype=float)
+    circuits, meta = inv.build_probe_circuits(profile)
 
     scale   = budget / CANARY_TOTAL
     sh_t1   = max(10, int(round(CANARY_SHOTS_T1     * scale)))
@@ -183,40 +186,17 @@ def run_canary(T1_true, T2_true, dw_true, eps_true, seed, budget):
     sh_gate = max(10, int(round(CANARY_SHOTS_GATE    * scale)))
     sh_echo = max(10, int(round(CANARY_SHOTS_ECHO    * scale)))
 
-    rngs = [np.random.default_rng(s)
-            for s in np.random.SeedSequence(int(seed)).spawn(4)]
-    rng_t1, rng_ram, rng_gate, rng_echo = rngs
-
-    def binom(rng_obj, p, sh):
-        n1 = int(rng_obj.binomial(sh, float(np.clip(spam(p), 0, 1))))
-        return {"0": sh - n1, "1": n1}
-
-    t1_counts = [binom(rng_t1, float(inv.forward_t1(d, T1_true)), sh_t1)
-                 for d in t1_delays]
-
-    ramsey_counts = []
-    for t in ramsey_delays:
-        px, py = inv.forward_ramsey_xy(t, T2_true, dw_true)
-        n1x = int(rng_ram.binomial(sh_ram, float(np.clip(spam(px), 0, 1))))
-        n1y = int(rng_ram.binomial(sh_ram, float(np.clip(spam(py), 0, 1))))
-        ramsey_counts.append({"0": sh_ram - n1x, "1": n1x})
-        ramsey_counts.append({"0": sh_ram - n1y, "1": n1y})
-
-    gate_counts = []
-    for p in inv.forward_gate(Nv, eps_true, p0g1, p1g0):
-        n0 = int(rng_gate.binomial(sh_gate, float(np.clip(p, 0, 1))))
-        gate_counts.append({"0": n0, "1": sh_gate - n0})
-
-    T2e = min(T2_true, 2.0 * T1_true)
-    echo_counts = []
-    for t in echo_delays:
-        pe = float(inv.forward_echo(t, T2e, p0g1, p1g0))
-        n1 = int(rng_echo.binomial(sh_echo, float(np.clip(pe, 0, 1))))
-        echo_counts.append({"0": sh_echo - n1, "1": n1})
-
     try:
+        counts_list = inv.run_probe_circuits_aer(
+            circuits, meta,
+            T1_true, T2_true, eps_true,
+            p0g1, p1g0,
+            profile.dt_ns,
+            sh_t1, sh_ram, sh_gate, sh_echo,
+            dw_s=dw_true,
+        )
         r = inv.lindblad_inversion(
-            t1_counts + ramsey_counts + gate_counts + echo_counts,
+            counts_list,
             meta, profile,
             shots_t1=sh_t1, shots_ramsey=sh_ram,
             shots_gate=sh_gate, shots_echo=sh_echo,
@@ -263,13 +243,16 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed):
         pass
 
     try:
+        osc_freq_hz      = arch["dw_typical_khz"] * 1e3
+        dt_ns            = arch.get("dt_ns")
         data             = _run_exp(
-            T2Ramsey([0], delays=delays_t2, osc_freq=0.0, backend=backend),
-            T1_true, T2_true, eps_true, p0g1, p1g0, shots_t2r)
+            T2Ramsey([0], delays=delays_t2, osc_freq=osc_freq_hz, backend=backend),
+            T1_true, T2_true, eps_true, p0g1, p1g0, shots_t2r,
+            dw_true=dw_true, dt_ns=dt_ns, inject_detuning=True)
         T2r_qe, T2r_std  = _extract(data, "T2star")
         freq_hz, _        = _extract(data, "Frequency")
         if np.isfinite(freq_hz):
-            dw_qe = abs(freq_hz) * 2.0 * np.pi
+            dw_qe = abs(freq_hz - osc_freq_hz) * 2.0 * np.pi
     except Exception:
         pass
 
@@ -384,7 +367,7 @@ def run_sweep(n_workers):
     rows       = []
 
     print(f"  N={N_INSTANCES}  budgets={SHOT_BUDGETS}  workers={n_workers}", flush=True)
-    print(f"  Canary={CANARY_TOTAL} shots | QE=budget/4 per exp | osc_freq=0 | RB lengths={QE_RB_LENGTHS}", flush=True)
+    print(f"  Canary={CANARY_TOTAL} shots | QE=budget/4 per exp | osc_freq=arch-typical | RB lengths={QE_RB_LENGTHS}", flush=True)
 
     for bi, budget in enumerate(SHOT_BUDGETS):
         print(f"\n[{bi+1}/{len(SHOT_BUDGETS)}] budget={budget:,}", flush=True)
@@ -445,11 +428,15 @@ def run_sweep(n_workers):
             print(f"  {pname:12s}: Canary R2={rc:+.4f} ({nc}/{N_INSTANCES})"
                   f"  QE R2={rq:+.4f} ({nq}/{N_INSTANCES})", flush=True)
 
+        save_benchmark_csv(rows)
+        print(f"  [checkpoint] saved after budget={budget:,} "
+              f"({bi+1}/{len(SHOT_BUDGETS)} budgets complete)", flush=True)
+
     return rows
 
 
 def save_benchmark_csv(rows):
-    path = DATA_DIR / "fig7_benchmark.csv"
+    path = DATA_DIR / f"fig7_benchmark_{JOB_TAG}.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=BENCH_COLS)
         w.writeheader()
@@ -578,7 +565,7 @@ def plot_results(rows):
         "Fig. 7 - Canary vs. Qiskit Experiments: "
         r"$R^2$ and failure rate vs. total shot budget"
         "\n(N=200 instances, 2000-resample bootstrap 95% CI; "
-        "QE: osc_freq=0, arch-prior delays, equal budget; "
+        "QE: osc_freq=arch-typical prior, arch-prior delays, equal budget; "
         "vertical dotted = Canary 9,900 shots; dashed = 0.95 target)",
         fontsize=9, y=1.01)
 
@@ -603,5 +590,11 @@ if __name__ == "__main__":
 
     rows = run_sweep(n_workers)
     save_benchmark_csv(rows)
-    save_threshold_csv(rows)
-    plot_results(rows)
+    if _budget_env:
+        print(f"\n[split-run mode: JOB_TAG={JOB_TAG}] "
+              f"Skipping threshold CSV and plot — run 7_merge_results.py "
+              f"after all split jobs complete to produce final outputs.",
+              flush=True)
+    else:
+        save_threshold_csv(rows)
+        plot_results(rows)
