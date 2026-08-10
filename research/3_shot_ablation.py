@@ -82,13 +82,18 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true,
                                   eps_true, instance_id, rng_mismatch,
                                   shots_t1, shots_ramsey, shots_gate,
                                   shots_echo):
-    arch     = inv.ARCH_DEFAULTS[arch_name]
-    arch_idx = ARCHITECTURES.index(arch_name)
-    extra_seed = int(rng_mismatch.integers(1, 2**31 - 1))
-    rng_t1, rng_ramsey, rng_gate, rng_echo, rng_param = _spawn_probe_rngs(
-        SEED + 1, arch_idx, instance_id, extra_seed, n_streams=5)
+    arch = inv.ARCH_DEFAULTS[arch_name]
 
+    # Build profile with realistic prior mismatch (±15% for SC/TI,
+    # arch-default for NA) — exactly as before. The profile determines
+    # the DELAY SCHEDULE used by the inversion. The noise model always
+    # uses the TRUE parameters — AerSimulator simulates what real hardware
+    # would produce, regardless of what Canary thinks the prior is.
     if arch_name in ("superconducting", "trapped_ion"):
+        rng_param = np.random.default_rng(
+            np.random.SeedSequence([SEED + 1,
+                                    ARCHITECTURES.index(arch_name),
+                                    instance_id]).generate_state(4)[0])
         T1_prior = float(np.clip(
             T1_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
             arch["T1_min_s"], arch["T1_max_s"]))
@@ -102,104 +107,15 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true,
     else:
         profile = inv.BackendProfile.from_architecture(arch_name)
 
-    _, meta       = inv.build_probe_circuits(profile)
-    t1_delays     = meta["t1_delays_s"]
-    ramsey_delays = meta["ramsey_delays_s"]
-    echo_delays   = meta["echo_delays_s"]
-    Nv            = np.array(meta["gate_rep_N"], dtype=float)
+    circuits, meta = inv.build_probe_circuits(profile)
 
-    def c1(r, p, sh):
-        n1 = int(r.binomial(sh, float(np.clip(p, 0, 1))))
-        return {"0": sh-n1, "1": n1}
-
-    def c0(r, p, sh):
-        n0 = int(r.binomial(sh, float(np.clip(p, 0, 1))))
-        return {"0": n0, "1": sh-n0}
-
-    T2_echo_true = min(T2_true, 2.0*T1_true)
-
-    if arch_name == "superconducting":
-        p0_base    = arch["p0_given_1"]
-        p1_base    = arch["p1_given_0"]
-        spam_drift = float(np.clip(rng_t1.normal(0, 0.005), 0.0, 0.05))
-        p0_eff     = float(np.clip(p0_base + spam_drift, 0.0, 0.05))
-        p1_eff     = float(np.clip(p1_base + spam_drift, 0.0, 0.05))
-        def spam(p): return p*(1.0 - p0_eff) + (1.0 - p)*p1_eff
-
-        T1_local = float(np.clip(T1_true * (1.0 + rng_t1.normal(0, 0.08)),
-                                 arch["T1_min_s"], arch["T1_max_s"]))
-        T2_local = float(np.clip(T2_true * (1.0 + rng_ramsey.normal(0, 0.08)),
-                                 arch["T2_min_s"],
-                                 min(2.0*T1_local, arch["T1_max_s"])))
-
-        t1_counts = [c1(rng_t1, spam(float(inv.forward_t1(d, T1_local))),
-                        shots_t1) for d in t1_delays]
-
-        ramsey_counts = []
-        for t in ramsey_delays:
-            decay = np.exp(-t / T2_local)
-            px = 0.5*(1.0 - decay*np.cos(dw_true*t))
-            py = 0.5*(1.0 - decay*np.sin(dw_true*t))
-            ramsey_counts.append(c1(rng_ramsey, spam(px), shots_ramsey))
-            ramsey_counts.append(c1(rng_ramsey, spam(py), shots_ramsey))
-
-        p0_gate    = inv.forward_gate(Nv, eps_true)
-        gate_counts = [c0(rng_gate, spam(p), shots_gate) for p in p0_gate]
-
-        T2_echo_local = min(T2_local, 2.0*T1_local)
-        echo_counts = [c1(rng_echo,
-                          spam(float(inv.forward_echo(t, T2_echo_local))),
-                          shots_echo) for t in echo_delays]
-
-    elif arch_name == "trapped_ion":
-        t1_counts = []
-        for d in t1_delays:
-            T1_local = T1_true * np.exp(-d / (50.0*T1_true))
-            t1_counts.append(c1(rng_t1,
-                                float(inv.forward_t1(d, T1_local)),
-                                shots_t1))
-
-        ramsey_counts = []
-        for t in ramsey_delays:
-            dw_local = dw_true + rng_ramsey.normal(0, 0.05*abs(dw_true))
-            px, py   = inv.forward_ramsey_xy(t, T2_true, dw_local)
-            px_eff   = px * (1.0 + 0.03*np.cos(2*np.pi*t/T2_true))
-            py_eff   = py * (1.0 + 0.03*np.sin(2*np.pi*t/T2_true))
-            ramsey_counts.append(c1(rng_ramsey, px_eff, shots_ramsey))
-            ramsey_counts.append(c1(rng_ramsey, py_eff, shots_ramsey))
-
-        p0_gate    = inv.forward_gate(Nv, eps_true)
-        gate_counts = [c0(rng_gate, p, shots_gate) for p in p0_gate]
-
-        echo_counts = [c1(rng_echo,
-                          float(inv.forward_echo(t, T2_echo_true)),
-                          shots_echo) for t in echo_delays]
-
-    else:  # neutral_atom
-        t1_counts = [c1(rng_t1,
-                        float(inv.forward_t1(d, T1_true)),
-                        shots_t1) for d in t1_delays]
-
-        dw_local = dw_true + rng_ramsey.normal(0, 0.08*abs(dw_true))
-        ramsey_counts = []
-        for t in ramsey_delays:
-            px, py = inv.forward_ramsey_xy(t, T2_true, dw_local)
-            ramsey_counts.append(c1(rng_ramsey, px, shots_ramsey))
-            ramsey_counts.append(c1(rng_ramsey, py, shots_ramsey))
-
-        eps_max     = arch["eps_max"]
-        gate_counts = []
-        for N in Nv:
-            eps_local = float(np.clip(
-                eps_true * (1.0 + rng_gate.normal(0, 0.10)), 0.0, eps_max))
-            p0 = float(inv.forward_gate(np.array([N]), eps_local)[0])
-            gate_counts.append(c0(rng_gate, p0, shots_gate))
-
-        echo_counts = [c1(rng_echo,
-                          float(inv.forward_echo(t, T2_echo_true)),
-                          shots_echo) for t in echo_delays]
-
-    counts_list = t1_counts + ramsey_counts + gate_counts + echo_counts
+    counts_list = inv.run_probe_circuits_aer(
+        circuits, meta,
+        T1_true, T2_true, eps_true,
+        arch["p0_given_1"], arch["p1_given_0"],
+        profile.dt_ns,
+        shots_t1, shots_ramsey, shots_gate, shots_echo,
+    )
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore")

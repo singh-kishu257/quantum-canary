@@ -1,4 +1,5 @@
-import importlib.util, pathlib, sys, csv
+import importlib.util, pathlib, sys, csv, os
+import multiprocessing as mp
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -75,70 +76,34 @@ def _spawn_probe_rngs(base_seed: int, *keys, n_streams: int = 4):
     return tuple(rngs)
 
 
-def simulate_inversion(arch_name, T1_true, T2_true, dw_true, eps_true, instance_id,
-                       use_true_prior=True):
+def simulate_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
+                       instance_id, use_true_prior=True):
     if use_true_prior:
-        # Fig. 2 — ideal hardware: priors = truth, prior_confidence="live",
-        # so delays are linearly centred on the true decay (Strategy A).
         profile = inv.BackendProfile.from_true_params(arch_name, T1_true, T2_true)
-        # gate_rep_n is driven by constants["eps_typical"], which
-        # from_true_params does not touch. For the "ideal" scenario the
-        # gate-rep probe should likewise be centred on the true epsilon
-        # (same rationale as the T1/T2 delay-centring above) — otherwise
-        # a true epsilon far from the arch-typical value saturates or
-        # under-drives the fixed [n_low, n_mid, n_max] repetition counts.
         custom_arch = dict(inv.ARCH_DEFAULTS[arch_name])
         custom_arch["eps_typical"] = eps_true
         profile.custom_arch = custom_arch
     else:
-        # Fig. 3 — real-world: arch-default priors, prior_confidence=
-        # "arch_default", so delays are log-spaced across the full plausible
-        # range (Strategy B), independent of the (unknown) true values.
         profile = inv.BackendProfile.from_architecture(arch_name)
-    arch     = inv.ARCH_DEFAULTS[arch_name]
-    _, meta  = inv.build_probe_circuits(profile)
 
-    t1_delays     = meta["t1_delays_s"]
-    ramsey_delays = meta["ramsey_delays_s"]
-    echo_delays   = meta["echo_delays_s"]
-    Nv            = np.array(meta["gate_rep_N"], dtype=float)
+    arch = inv.ARCH_DEFAULTS[arch_name]
+    circuits, meta = inv.build_probe_circuits(profile)
 
-    arch_idx = ARCHITECTURES.index(arch_name)
-    rng_t1, rng_ramsey, rng_gate, rng_echo = _spawn_probe_rngs(SEED, arch_idx, instance_id)
-
-    p0_given_1 = arch["p0_given_1"]
-    p1_given_0 = arch["p1_given_0"]
-    def spam(p):
-        return p*(1.0 - p0_given_1) + (1.0 - p)*p1_given_0
-
-    def c1(rng_obj, p, sh):
-        n1 = int(rng_obj.binomial(sh, float(np.clip(p,0,1))))
-        return {"0": sh-n1, "1": n1}
-    def c0(rng_obj, p, sh):
-        n0 = int(rng_obj.binomial(sh, float(np.clip(p,0,1))))
-        return {"0": n0, "1": sh-n0}
-
-    t1_counts = [c1(rng_t1, spam(float(inv.forward_t1(d, T1_true))), SHOTS_T1) for d in t1_delays]
-
-    ramsey_counts = []
-    for t in ramsey_delays:
-        px, py = inv.forward_ramsey_xy(t, T2_true, dw_true)
-        ramsey_counts.append(c1(rng_ramsey, px, SHOTS_RAMSEY))
-        ramsey_counts.append(c1(rng_ramsey, py, SHOTS_RAMSEY))
-
-    p0_gate = inv.forward_gate(Nv, eps_true)
-    gate_counts = [c0(rng_gate, spam(p), SHOTS_GATE) for p in p0_gate]
-
-    T2_echo_true = min(T2_true, 2.0*T1_true)
-    echo_counts = [c1(rng_echo, spam(float(inv.forward_echo(t, T2_echo_true))), SHOTS_ECHO) for t in echo_delays]
-
-    counts_list = t1_counts + ramsey_counts + gate_counts + echo_counts
+    counts_list = inv.run_probe_circuits_aer(
+        circuits, meta,
+        T1_true, T2_true, eps_true,
+        arch["p0_given_1"], arch["p1_given_0"],
+        profile.dt_ns,
+        SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO,
+        dw_s=dw_true,
+    )
 
     return inv.lindblad_inversion(
         counts_list, meta, profile,
         shots_t1=SHOTS_T1, shots_ramsey=SHOTS_RAMSEY,
         shots_gate=SHOTS_GATE, shots_echo=SHOTS_ECHO,
-        qubit_id=0, timestamp=datetime.now(timezone.utc).isoformat())
+        qubit_id=0,
+        timestamp=datetime.now(timezone.utc).isoformat())
 
 
 def compute_metrics(true_vals, rec_vals):
@@ -149,7 +114,22 @@ def compute_metrics(true_vals, rec_vals):
     return r2, rmse
 
 
-def run_experiment(use_true_prior: bool = True):
+def _worker_fig2(args):
+    arch, T1_t, T2_t, dw_t, eps_t, instance_id, use_true_prior = args
+    try:
+        r = simulate_inversion(arch, T1_t, T2_t, dw_t, eps_t, instance_id,
+                               use_true_prior=use_true_prior)
+    except (RuntimeError, ValueError):
+        return (arch, T1_t, T2_t, dw_t, eps_t, None)
+    if not (np.isfinite(r.T1_s) and np.isfinite(r.T2_s)):
+        return (arch, T1_t, T2_t, dw_t, eps_t, None)
+    return (arch, T1_t, T2_t, dw_t, eps_t, r)
+
+
+def run_experiment(use_true_prior: bool = True, n_workers: int = None):
+    if n_workers is None:
+        n_workers = max(1, mp.cpu_count() - 1)
+
     rec = {k: [] for k in ["arch",
         "T1_true","T1_rec","T1_sig",
         "T2_true","T2_rec","T2_sig",
@@ -166,43 +146,54 @@ def run_experiment(use_true_prior: bool = True):
     for arch in ARCHITECTURES:
         arch_default_dw_max = inv.BackendProfile.from_architecture(arch).dw_max_rad_s
         success = 0
+        attempt_counter = 0
+
         while success < N_INSTANCES:
-            T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(arch, rng)
-            if use_true_prior:
-                # dw_max must reflect the delay grid actually used for this
-                # instance (Strategy A, centred on T1_t/T2_t), not a fixed
-                # arch-default t1 — otherwise the Ramsey phase can alias
-                # (|dw*t1| > pi) and corrupt the arctan2 sign/angle recovery.
-                dw_max = inv.BackendProfile.from_true_params(arch, T1_t, T2_t).dw_max_rad_s
-            else:
-                dw_max = arch_default_dw_max
-            dw_t = sample_dw(dw_max)
-            fit_attempts[arch] += 1
-            try:
-                r = simulate_inversion(arch, T1_t, T2_t, dw_t, eps_t, fit_attempts[arch],
-                                       use_true_prior=use_true_prior)
-            except (RuntimeError, ValueError):
-                fit_failures[arch] += 1
-                continue
-            if not (np.isfinite(r.T1_s) and np.isfinite(r.T2_s)):
-                fit_failures[arch] += 1
-                continue
-            rec["arch"].append(arch)
-            rec["T1_true"].append(T1_t);   rec["T1_rec"].append(r.T1_s);        rec["T1_sig"].append(r.T1_sigma_s)
-            rec["T2_true"].append(T2_t);   rec["T2_rec"].append(r.T2_s);        rec["T2_sig"].append(r.T2_sigma_s)
-            rec["T2_ramsey_rec"].append(r.T2_ramsey_s); rec["T2_ramsey_sig"].append(r.T2_ramsey_sigma_s)
-            rec["T2_echo_rec"].append(r.T2_echo_s);     rec["T2_echo_sig"].append(r.T2_echo_sigma_s)
-            rec["dw_true"].append(abs(dw_t)); rec["dw_rec"].append(abs(r.delta_omega)); rec["dw_sig"].append(r.delta_omega_sigma)
-            rec["eps_true"].append(eps_t); rec["eps_rec"].append(r.epsilon_sx); rec["eps_sig"].append(r.epsilon_sx_sigma)
-            rec["t1_resid"].append(r.t1_residual)
-            rec["ram_resid"].append(r.ramsey_residual)
-            rec["gate_resid"].append(r.gate_residual)
-            rec["echo_resid"].append(r.echo_residual)
-            rec["t1_chi2"].append(r.t1_chi2_dof)
-            rec["ramsey_chi2"].append(r.ramsey_chi2_dof)
-            rec["gate_chi2"].append(r.gate_chi2_dof)
-            rec["echo_chi2"].append(r.echo_chi2_dof)
-            success += 1
+            n_needed = N_INSTANCES - success
+            batch_size = max(n_workers, int(n_needed * 1.05))
+
+            batch_args = []
+            for _ in range(batch_size):
+                T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(arch, rng)
+                if use_true_prior:
+                    dw_max = inv.BackendProfile.from_true_params(
+                        arch, T1_t, T2_t).dw_max_rad_s
+                else:
+                    dw_max = arch_default_dw_max
+                dw_t = sample_dw(dw_max)
+                attempt_counter += 1
+                batch_args.append((arch, T1_t, T2_t, dw_t, eps_t,
+                                   attempt_counter, use_true_prior))
+
+            fit_attempts[arch] += len(batch_args)
+
+            with mp.Pool(n_workers) as pool:
+                results = pool.map(_worker_fig2, batch_args)
+
+            for _, T1_t, T2_t, dw_t, eps_t, r in results:
+                if r is None:
+                    fit_failures[arch] += 1
+                    continue
+                if success >= N_INSTANCES:
+                    continue
+                rec["arch"].append(arch)
+                rec["T1_true"].append(T1_t);   rec["T1_rec"].append(r.T1_s);        rec["T1_sig"].append(r.T1_sigma_s)
+                rec["T2_true"].append(T2_t);   rec["T2_rec"].append(r.T2_s);        rec["T2_sig"].append(r.T2_sigma_s)
+                rec["T2_ramsey_rec"].append(r.T2_ramsey_s); rec["T2_ramsey_sig"].append(r.T2_ramsey_sigma_s)
+                rec["T2_echo_rec"].append(r.T2_echo_s);     rec["T2_echo_sig"].append(r.T2_echo_sigma_s)
+                rec["dw_true"].append(abs(dw_t)); rec["dw_rec"].append(abs(r.delta_omega)); rec["dw_sig"].append(r.delta_omega_sigma)
+                rec["eps_true"].append(eps_t); rec["eps_rec"].append(r.epsilon_sx); rec["eps_sig"].append(r.epsilon_sx_sigma)
+                rec["t1_resid"].append(r.t1_residual)
+                rec["ram_resid"].append(r.ramsey_residual)
+                rec["gate_resid"].append(r.gate_residual)
+                rec["echo_resid"].append(r.echo_residual)
+                rec["t1_chi2"].append(r.t1_chi2_dof)
+                rec["ramsey_chi2"].append(r.ramsey_chi2_dof)
+                rec["gate_chi2"].append(r.gate_chi2_dof)
+                rec["echo_chi2"].append(r.echo_chi2_dof)
+                success += 1
+
+            print(f"  [{arch}] {success}/{N_INSTANCES} complete", flush=True)
 
     fit_failure_rate = {
         arch: fit_failures[arch] / fit_attempts[arch] if fit_attempts[arch] else 0.0
@@ -284,8 +275,8 @@ def make_figure(rec):
     budget = shot_budget(ARCHITECTURES[0])
     fig.suptitle(
         f"Fig. 2 — Parameter Recovery Accuracy\n"
-        f"(Ideal hardware, true-parameter priors, $N={N_INSTANCES}$/arch, "
-        f"seed={SEED}, {budget:,} shots/qubit)",
+        f"(N={N_INSTANCES}/arch, AerSimulator noise model, seed={SEED}, "
+        f"{budget:,} shots/qubit)",
         fontsize=8.5, y=0.98)
 
     out = FIGURES_DIR / "fig2_parity.pdf"
@@ -325,13 +316,11 @@ def sample_true_params_realistic(arch_name: str, dw_max: float, rng_obj):
 
 
 def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
-                                 instance_id, rng_mismatch):
-    arch     = inv.ARCH_DEFAULTS[arch_name]
+                                 instance_id, extra_seed):
+    arch = inv.ARCH_DEFAULTS[arch_name]
 
     arch_idx   = ARCHITECTURES.index(arch_name)
-    extra_seed = int(rng_mismatch.integers(1, 2**31 - 1))
-    rng_t1, rng_ramsey, rng_gate, rng_echo, rng_param = _spawn_probe_rngs(
-        SEED + 1, arch_idx, instance_id, extra_seed, n_streams=5)
+    rng_param, = _spawn_probe_rngs(SEED + 1, arch_idx, instance_id, extra_seed, n_streams=1)
 
     # Fig. 3 per-architecture real operating mode:
     #   superconducting / trapped_ion: live calibration is always available
@@ -339,6 +328,9 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
     #     truth +/- calibration uncertainty, Strategy A linear delays.
     #   neutral_atom: QuEra exposes no live calibration -> arch-default
     #     prior, Strategy B log-spaced delays. T2 may degrade honestly.
+    # In all cases the noise model below is driven by the TRUE parameters —
+    # AerSimulator simulates what real hardware would actually produce,
+    # regardless of what Canary's prior believes.
     if arch_name in ("superconducting", "trapped_ion"):
         T1_prior = float(np.clip(
             T1_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
@@ -347,11 +339,6 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
             T2_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
             arch["T2_min_s"], min(2.0*T1_prior, arch["T1_max_s"])))
         profile = inv.BackendProfile.from_true_params(arch_name, T1_prior, T2_prior)
-        # Same gate-rep centring rationale as Fig. 2 (simulate_inversion):
-        # gate_rep_n is driven by constants["eps_typical"], untouched by
-        # from_true_params. A live-calibration backend would also report a
-        # live gate-error estimate — but that estimate carries the same
-        # +/-15% calibration uncertainty as T1/T2, not the exact truth.
         eps_prior = float(np.clip(
             eps_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
             arch["eps_typical"] * 0.01, arch["eps_max"]))
@@ -361,114 +348,41 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
     else:  # neutral_atom
         profile = inv.BackendProfile.from_architecture(arch_name)
 
-    _, meta  = inv.build_probe_circuits(profile)
+    circuits, meta = inv.build_probe_circuits(profile)
 
-    t1_delays     = meta["t1_delays_s"]
-    ramsey_delays = meta["ramsey_delays_s"]
-    echo_delays   = meta["echo_delays_s"]
-    Nv            = np.array(meta["gate_rep_N"], dtype=float)
-
-    def c1(rng_obj, p, sh):
-        n1 = int(rng_obj.binomial(sh, float(np.clip(p,0,1))))
-        return {"0": sh-n1, "1": n1}
-    def c0(rng_obj, p, sh):
-        n0 = int(rng_obj.binomial(sh, float(np.clip(p,0,1))))
-        return {"0": n0, "1": sh-n0}
-
-    T2_echo_true = min(T2_true, 2.0*T1_true)
-
-    if arch_name == "superconducting":
-        p0_base = arch["p0_given_1"]
-        p1_base = arch["p1_given_0"]
-        spam_drift = float(np.clip(rng_t1.normal(0, 0.005), 0.0, 0.05))
-        p0_eff = float(np.clip(p0_base + spam_drift, 0.0, 0.05))
-        p1_eff = float(np.clip(p1_base + spam_drift, 0.0, 0.05))
-        def spam(p):
-            return p*(1.0 - p0_eff) + (1.0 - p)*p1_eff
-
-        T1_local = float(np.clip(T1_true * (1.0 + rng_t1.normal(0, 0.08)),
-                                 arch["T1_min_s"], arch["T1_max_s"]))
-        T2_local = float(np.clip(T2_true * (1.0 + rng_ramsey.normal(0, 0.08)),
-                                 arch["T2_min_s"], min(2.0*T1_local, arch["T1_max_s"])))
-
-        t1_counts = []
-        for d in t1_delays:
-            p_ideal = float(inv.forward_t1(d, T1_local))
-            t1_counts.append(c1(rng_t1, spam(p_ideal), SHOTS_T1))
-
-        ramsey_counts = []
-        for t in ramsey_delays:
-            decay = np.exp(-t/T2_local)
-            px = 0.5*(1.0 - decay*np.cos(dw_true*t))
-            py = 0.5*(1.0 - decay*np.sin(dw_true*t))
-            ramsey_counts.append(c1(rng_ramsey, spam(px), SHOTS_RAMSEY))
-            ramsey_counts.append(c1(rng_ramsey, spam(py), SHOTS_RAMSEY))
-
-        p0_gate = inv.forward_gate(Nv, eps_true)
-        gate_counts = [c0(rng_gate, spam(p), SHOTS_GATE) for p in p0_gate]
-
-        T2_echo_local = min(T2_local, 2.0*T1_local)
-        echo_counts = [c1(rng_echo, spam(float(inv.forward_echo(t, T2_echo_local))), SHOTS_ECHO)
-                       for t in echo_delays]
-
-    elif arch_name == "trapped_ion":
-        # Single fixed T1_local per instance — 1% motional-heating
-        # perturbation, drawn once rather than a (dead) per-delay decay.
-        T1_local = T1_true * (1.0 + rng_t1.normal(0, 0.01))
-        T1_local = float(np.clip(T1_local, arch["T1_min_s"], arch["T1_max_s"]))
-        t1_counts = []
-        for d in t1_delays:
-            p_ideal  = float(inv.forward_t1(d, T1_local))
-            t1_counts.append(c1(rng_t1, p_ideal, SHOTS_T1))
-
-        ramsey_counts = []
-        for t in ramsey_delays:
-            dw_local = dw_true + rng_ramsey.normal(0, 0.05*abs(dw_true))
-            px, py   = inv.forward_ramsey_xy(t, T2_true, dw_local)
-            ramsey_counts.append(c1(rng_ramsey, px, SHOTS_RAMSEY))
-            ramsey_counts.append(c1(rng_ramsey, py, SHOTS_RAMSEY))
-
-        p0_gate = inv.forward_gate(Nv, eps_true)
-        gate_counts = [c0(rng_gate, p, SHOTS_GATE) for p in p0_gate]
-
-        echo_counts = [c1(rng_echo, float(inv.forward_echo(t, T2_echo_true)), SHOTS_ECHO)
-                       for t in echo_delays]
-
-    else:  # neutral_atom
-        t1_counts = [c1(rng_t1, float(inv.forward_t1(d, T1_true)), SHOTS_T1) for d in t1_delays]
-
-        # Single fixed dw_local per instance — drawing a fresh value per
-        # delay point would create a model mismatch, since the inversion
-        # (_invert_ramsey_3t) assumes one constant detuning across all
-        # three delay points.
-        dw_local = dw_true + rng_ramsey.normal(0, 0.08*abs(dw_true))
-        ramsey_counts = []
-        for t in ramsey_delays:
-            px, py   = inv.forward_ramsey_xy(t, T2_true, dw_local)
-            ramsey_counts.append(c1(rng_ramsey, px, SHOTS_RAMSEY))
-            ramsey_counts.append(c1(rng_ramsey, py, SHOTS_RAMSEY))
-
-        eps_max = arch["eps_max"]
-        gate_counts = []
-        for N in Nv:
-            eps_local = eps_true * (1.0 + rng_gate.normal(0, 0.10))
-            eps_local = float(np.clip(eps_local, 0.0, eps_max))
-            p0 = float(inv.forward_gate(np.array([N]), eps_local)[0])
-            gate_counts.append(c0(rng_gate, p0, SHOTS_GATE))
-
-        echo_counts = [c1(rng_echo, float(inv.forward_echo(t, T2_echo_true)), SHOTS_ECHO)
-                       for t in echo_delays]
-
-    counts_list = t1_counts + ramsey_counts + gate_counts + echo_counts
+    counts_list = inv.run_probe_circuits_aer(
+        circuits, meta,
+        T1_true, T2_true, eps_true,
+        arch["p0_given_1"], arch["p1_given_0"],
+        profile.dt_ns,
+        SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO,
+        dw_s=dw_true,
+    )
 
     return inv.lindblad_inversion(
         counts_list, meta, profile,
         shots_t1=SHOTS_T1, shots_ramsey=SHOTS_RAMSEY,
         shots_gate=SHOTS_GATE, shots_echo=SHOTS_ECHO,
-        qubit_id=0, timestamp=datetime.now(timezone.utc).isoformat())
+        qubit_id=0,
+        timestamp=datetime.now(timezone.utc).isoformat())
 
 
-def run_realistic_mismatch_experiment():
+def _worker_fig3(args):
+    arch, T1_t, T2_t, dw_t, eps_t, instance_id, extra_seed = args
+    try:
+        r = simulate_realistic_inversion(arch, T1_t, T2_t, dw_t, eps_t,
+                                         instance_id, extra_seed)
+    except (RuntimeError, ValueError):
+        return (arch, T1_t, T2_t, dw_t, eps_t, None)
+    if not (np.isfinite(r.T1_s) and np.isfinite(r.T2_s)):
+        return (arch, T1_t, T2_t, dw_t, eps_t, None)
+    return (arch, T1_t, T2_t, dw_t, eps_t, r)
+
+
+def run_realistic_mismatch_experiment(n_workers: int = None):
+    if n_workers is None:
+        n_workers = max(1, mp.cpu_count() - 1)
+
     rng_mismatch = np.random.default_rng(SEED + 1)
 
     rec = {k: [] for k in ["arch",
@@ -486,43 +400,51 @@ def run_realistic_mismatch_experiment():
     for arch in ARCHITECTURES:
         arch_default_dw_max = inv.BackendProfile.from_architecture(arch).dw_max_rad_s
         success = 0
+        attempt_counter = 0
+
         while success < N_INSTANCES:
-            T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(arch, rng_mismatch)
-            # dw_max must reflect the delay grid actually used for this
-            # instance's architecture — same aliasing hazard as Fig. 2:
-            # superconducting/trapped_ion now use Strategy A (live-cal
-            # prior, close to truth) so dw_max should track T2_t, not a
-            # fixed arch-default T2 that may differ by orders of
-            # magnitude. neutral_atom stays on the fixed arch-default
-            # Strategy B grid, so its dw_max stays fixed too.
-            if arch in ("superconducting", "trapped_ion"):
-                dw_max = inv.BackendProfile.from_true_params(
-                    arch, T1_t, T2_t).dw_max_rad_s
-            else:
-                dw_max = arch_default_dw_max
-            dw_t = sample_dw(dw_max, rng_mismatch)
-            fit_attempts[arch] += 1
-            try:
-                r = simulate_realistic_inversion(arch, T1_t, T2_t, dw_t, eps_t,
-                                                 fit_attempts[arch], rng_mismatch)
-            except (RuntimeError, ValueError):
-                fit_failures[arch] += 1
-                continue
-            if not (np.isfinite(r.T1_s) and np.isfinite(r.T2_s)):
-                fit_failures[arch] += 1
-                continue
-            rec["arch"].append(arch)
-            rec["T1_true"].append(T1_t);   rec["T1_rec"].append(r.T1_s);        rec["T1_sig"].append(r.T1_sigma_s)
-            rec["T2_true"].append(T2_t);   rec["T2_rec"].append(r.T2_s);        rec["T2_sig"].append(r.T2_sigma_s)
-            rec["T2_ramsey_rec"].append(r.T2_ramsey_s); rec["T2_ramsey_sig"].append(r.T2_ramsey_sigma_s)
-            rec["T2_echo_rec"].append(r.T2_echo_s);     rec["T2_echo_sig"].append(r.T2_echo_sigma_s)
-            rec["dw_true"].append(abs(dw_t)); rec["dw_rec"].append(abs(r.delta_omega)); rec["dw_sig"].append(r.delta_omega_sigma)
-            rec["eps_true"].append(eps_t); rec["eps_rec"].append(r.epsilon_sx); rec["eps_sig"].append(r.epsilon_sx_sigma)
-            rec["t1_chi2"].append(r.t1_chi2_dof)
-            rec["ramsey_chi2"].append(r.ramsey_chi2_dof)
-            rec["gate_chi2"].append(r.gate_chi2_dof)
-            rec["echo_chi2"].append(r.echo_chi2_dof)
-            success += 1
+            n_needed = N_INSTANCES - success
+            batch_size = max(n_workers, int(n_needed * 1.05))
+
+            batch_args = []
+            for _ in range(batch_size):
+                T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(arch, rng_mismatch)
+                if arch in ("superconducting", "trapped_ion"):
+                    dw_max = inv.BackendProfile.from_true_params(
+                        arch, T1_t, T2_t).dw_max_rad_s
+                else:
+                    dw_max = arch_default_dw_max
+                dw_t = sample_dw(dw_max, rng_mismatch)
+                extra_seed = int(rng_mismatch.integers(1, 2**31 - 1))
+                attempt_counter += 1
+                batch_args.append((arch, T1_t, T2_t, dw_t, eps_t,
+                                   attempt_counter, extra_seed))
+
+            fit_attempts[arch] += len(batch_args)
+
+            with mp.Pool(n_workers) as pool:
+                results = pool.map(_worker_fig3, batch_args)
+
+            for _, T1_t, T2_t, dw_t, eps_t, r in results:
+                if r is None:
+                    fit_failures[arch] += 1
+                    continue
+                if success >= N_INSTANCES:
+                    continue
+                rec["arch"].append(arch)
+                rec["T1_true"].append(T1_t);   rec["T1_rec"].append(r.T1_s);        rec["T1_sig"].append(r.T1_sigma_s)
+                rec["T2_true"].append(T2_t);   rec["T2_rec"].append(r.T2_s);        rec["T2_sig"].append(r.T2_sigma_s)
+                rec["T2_ramsey_rec"].append(r.T2_ramsey_s); rec["T2_ramsey_sig"].append(r.T2_ramsey_sigma_s)
+                rec["T2_echo_rec"].append(r.T2_echo_s);     rec["T2_echo_sig"].append(r.T2_echo_sigma_s)
+                rec["dw_true"].append(abs(dw_t)); rec["dw_rec"].append(abs(r.delta_omega)); rec["dw_sig"].append(r.delta_omega_sigma)
+                rec["eps_true"].append(eps_t); rec["eps_rec"].append(r.epsilon_sx); rec["eps_sig"].append(r.epsilon_sx_sigma)
+                rec["t1_chi2"].append(r.t1_chi2_dof)
+                rec["ramsey_chi2"].append(r.ramsey_chi2_dof)
+                rec["gate_chi2"].append(r.gate_chi2_dof)
+                rec["echo_chi2"].append(r.echo_chi2_dof)
+                success += 1
+
+            print(f"  [{arch}] {success}/{N_INSTANCES} complete", flush=True)
 
     fit_failure_rate = {
         arch: fit_failures[arch] / fit_attempts[arch] if fit_attempts[arch] else 0.0
@@ -604,8 +526,9 @@ def make_mismatch_figure(rec):
     budget = shot_budget(ARCHITECTURES[0])
     fig.suptitle(
         f"Fig. 3 — Realistic Hardware Performance\n"
-        f"(Per-arch operating mode: SC/TI live cal ±15%, NA arch-default, "
-        f"$N={N_INSTANCES}$/arch, seed={SEED+1}, {budget:,} shots/qubit)",
+        f"(N={N_INSTANCES}/arch, AerSimulator noise model, per-arch prior "
+        f"mode: SC/TI live cal ±15%, NA arch-default, seed={SEED+1}, "
+        f"{budget:,} shots/qubit)",
         fontsize=8.5, y=0.98)
 
     out = FIGURES_DIR / "fig3_mismatch.pdf"
@@ -616,6 +539,7 @@ def make_mismatch_figure(rec):
 
 
 if __name__ == "__main__":
+    N_WORKERS = int(os.environ.get("N_WORKERS", max(1, mp.cpu_count() - 1)))
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"[{ts}] Fig. 2 — Parity Experiment")
     print(f"  Protocol : 3-time XY Ramsey (Shnaiderov+) + 3-point T1 + adaptive gate-rep N")
@@ -642,7 +566,7 @@ if __name__ == "__main__":
               f"Ramsey={[f'{d:.3g}s' for d in p_real.ramsey_delays_s]}")
     print()
 
-    rec, fit_failure_rate = run_experiment(use_true_prior=True)
+    rec, fit_failure_rate = run_experiment(use_true_prior=True, n_workers=N_WORKERS)
     csv_path = save_csv(rec)
     fig_path = make_figure(rec)
 
@@ -683,7 +607,7 @@ if __name__ == "__main__":
 
     print()
     print("Fig. 3 — Per-arch real operating mode (SC/TI live cal +/-15%, NA arch-default)")
-    mismatch_rec, mismatch_fail_rate = run_realistic_mismatch_experiment()
+    mismatch_rec, mismatch_fail_rate = run_realistic_mismatch_experiment(n_workers=N_WORKERS)
     mismatch_csv = save_mismatch_csv(mismatch_rec)
     mismatch_fig = make_mismatch_figure(mismatch_rec)
 

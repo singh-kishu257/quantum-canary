@@ -6,12 +6,16 @@ from typing import Optional
 import numpy as np
 from scipy.optimize import curve_fit
 
+# Lazy imports for AerSimulator — only loaded when run_probe_circuits_aer() is called
+# so that 1_inversion.py remains importable without qiskit-aer installed.
+
 __all__ = [
     "ARCH_DEFAULTS", "build_custom_arch", "BackendProfile",
     "CalibrationSource", "InversionResult", "forward_t1", "forward_ramsey_xy",
     "forward_gate", "forward_echo",
-    "build_probe_circuits", "lindblad_inversion", "get_live_profile",
-    "fetch_live_spam",
+    "build_probe_circuits", "run_probe_circuits_aer", "lindblad_inversion",
+    "get_live_profile", "fetch_live_spam",
+    "_sqrtx_native_inverse_pair", "_build_gate_rep_circuit",
 ]
 # NOTE: GATE_REP_N_DT is intentionally excluded — it is a deprecated alias,
 # see BackendProfile.gate_rep_n.
@@ -644,6 +648,114 @@ def _snap(delay_s: float, dt_ns: Optional[float]) -> tuple[float, str]:
     return delay_s, "s"
 
 
+def _delay_seconds(inst, dt_ns: Optional[float]) -> float:
+    dur = inst.operation.params[0]
+    unit = getattr(inst.operation, "unit", "dt")
+    if unit == "s":
+        return float(dur)
+    elif unit == "ns":
+        return float(dur) * 1e-9
+    elif unit == "us":
+        return float(dur) * 1e-6
+    elif unit == "ms":
+        return float(dur) * 1e-3
+    elif unit == "dt":
+        return float(dur) * (dt_ns if dt_ns is not None else 0.2222) * 1e-9
+    return float(dur)
+
+
+def _make_aer_backend_for_circuit(qc, T1_s: float, T2_s: float,
+                                   eps_sx: float, p0g1: float, p1g0: float,
+                                   gate_time_ns: float, dt_ns: Optional[float]):
+    from qiskit_aer import AerSimulator
+    from qiskit_aer.noise import (NoiseModel, thermal_relaxation_error,
+                                   depolarizing_error, ReadoutError)
+
+    nm = NoiseModel()
+
+    gate_time_s = gate_time_ns * 1e-9
+    gate_err = (thermal_relaxation_error(T1_s, T2_s, gate_time_s)
+                .compose(depolarizing_error(2.0 * eps_sx, 1)))
+    nm.add_quantum_error(gate_err,
+        ["sx", "sxdg", "x", "h", "s", "sdg", "id",
+         "rx", "ry", "r", "u", "u1", "u2", "u3", "p"], [0])
+
+    seen: set = set()
+    for inst in qc.data:
+        if inst.operation.name == "delay":
+            ds = _delay_seconds(inst, dt_ns)
+            key = round(ds, 15)
+            if key not in seen and ds > 1e-12:
+                seen.add(key)
+                nm.add_quantum_error(
+                    thermal_relaxation_error(T1_s, T2_s, ds), ["delay"], [0])
+
+    nm.add_readout_error(
+        ReadoutError([[1.0 - p0g1, p0g1], [p1g0, 1.0 - p1g0]]), [0])
+
+    return AerSimulator(noise_model=nm)
+
+
+def _inject_ramsey_detuning(qc, dw_s: float, dt_ns: Optional[float]):
+    from qiskit import QuantumCircuit
+    qc_new = QuantumCircuit(qc.num_qubits, qc.num_clbits, name=qc.name)
+    for inst in qc.data:
+        qc_new.append(inst.operation, inst.qubits, inst.clbits)
+        if inst.operation.name == "delay":
+            ds = _delay_seconds(inst, dt_ns)
+            qc_new.rz(dw_s * ds, 0)
+    return qc_new
+
+
+def run_probe_circuits_aer(
+    circuits: list,
+    meta: dict,
+    T1_s: float,
+    T2_s: float,
+    eps_sx: float,
+    p0g1: float,
+    p1g0: float,
+    dt_ns: Optional[float],
+    shots_t1: int,
+    shots_ramsey: int,
+    shots_gate: int,
+    shots_echo: int,
+    dw_s: float = 0.0,
+) -> list:
+    from qiskit import transpile
+
+    arch_name = meta.get("architecture", "superconducting")
+    arch = ARCH_DEFAULTS.get(arch_name, ARCH_DEFAULTS["superconducting"])
+    gate_time_ns = arch.get("gate_time_ns", 50.0)
+
+    n_t1     = meta["n_t1"]
+    n_ramsey = meta["n_ramsey"]
+    n_gate   = meta["n_gate"]
+
+    shots_per_circuit = (
+        [shots_t1]     * n_t1 +
+        [shots_ramsey] * n_ramsey +
+        [shots_gate]   * n_gate +
+        [shots_echo]   * (len(circuits) - n_t1 - n_ramsey - n_gate)
+    )
+
+    counts_list = []
+    for qc, sh in zip(circuits, shots_per_circuit):
+        run_qc = (_inject_ramsey_detuning(qc, dw_s, dt_ns)
+                  if "ramsey" in qc.name else qc)
+        backend = _make_aer_backend_for_circuit(
+            run_qc, T1_s, T2_s, eps_sx, p0g1, p1g0, gate_time_ns, dt_ns)
+        tqc = transpile(run_qc, backend, optimization_level=0)
+        raw = backend.run(tqc, shots=sh).result().get_counts()
+        norm: dict = {}
+        for bitstring, cnt in raw.items():
+            b = bitstring.replace(" ", "")[-1]
+            norm[b] = norm.get(b, 0) + cnt
+        counts_list.append(norm)
+
+    return counts_list
+
+
 def _build_t1_circuit(delay_s: float, dt_ns: Optional[float], idx: int):
     from qiskit import QuantumCircuit
     dur, unit = _snap(delay_s, dt_ns)
@@ -695,12 +807,35 @@ def _build_echo_circuit(delay_s: float, dt_ns: Optional[float], idx: int):
     return qc
 
 
-def _build_gate_rep_circuit(N: int):
+def _sqrtx_native_inverse_pair(qc, q, architecture: str):
+    """
+    Applies one native (G, G^-1) pair on qubit q, where G is the
+    architecture's physical sqrt-X-equivalent single-qubit gate:
+      - trapped_ion: GPI2(0), GPI2(0.5)  (native IonQ pulses; GPI2(0.5) is
+        verified equal to GPI2(0)^dagger, so the pair nets to identity
+        exactly as sx/sxdg does)
+      - all other architectures: sx, sxdg (Qiskit standard gate, native on
+        IBM superconducting hardware; used as the generic stand-in for
+        neutral_atom/unknown, matching pre-existing behaviour)
+    """
+    if architecture == "trapped_ion":
+        try:
+            from qiskit_ionq.ionq_gates import GPI2Gate
+            qc.append(GPI2Gate(0.0), [q])
+            qc.append(GPI2Gate(0.5), [q])
+        except ImportError:
+            qc.r(np.pi / 2, 0.0, q)
+            qc.r(np.pi / 2, np.pi, q)
+    else:
+        qc.sx(q)
+        qc.sxdg(q)
+
+
+def _build_gate_rep_circuit(N: int, architecture: str = "superconducting"):
     from qiskit import QuantumCircuit
     qc = QuantumCircuit(1, 1, name=f"gate_rep_N{N}")
     for _ in range(N):
-        qc.sx(0)
-        qc.sxdg(0)
+        _sqrtx_native_inverse_pair(qc, 0, architecture)
     qc.measure(0, 0)
     return qc
 
@@ -720,7 +855,7 @@ def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
 
     gate_rep_n = profile.gate_rep_n
     for N in gate_rep_n:
-        circuits.append(_build_gate_rep_circuit(N))
+        circuits.append(_build_gate_rep_circuit(N, profile.architecture))
 
     for i, t in enumerate(echo_delays):
         circuits.append(_build_echo_circuit(t, profile.dt_ns, i))
