@@ -24,6 +24,14 @@ SHOTS_GATE    = 500
 SHOTS_ECHO    = 500
 SEED          = 43
 ARCHITECTURES = ["superconducting", "trapped_ion", "neutral_atom"]
+
+_arch_env = os.environ.get("ARCH", "").strip()
+if _arch_env in ARCHITECTURES:
+    ARCHITECTURES = [_arch_env]
+
+_n_env = os.environ.get("N_INSTANCES", "").strip()
+if _n_env.isdigit():
+    N_INSTANCES = int(_n_env)
 rng = np.random.default_rng(SEED)
 
 COLORS  = {"superconducting": "#1f77b4", "trapped_ion": "#ff7f0e", "neutral_atom": "#2ca02c"}
@@ -35,23 +43,46 @@ def shot_budget(arch_name: str) -> int:
     return 3*SHOTS_T1 + 6*SHOTS_RAMSEY + 3*SHOTS_GATE + 3*SHOTS_ECHO
 
 
-# Realistic current-hardware sampling ranges (not just ±40% of the arch
-# default prior) — used for both Fig. 2 and Fig. 3 true-parameter draws.
 TRUE_PARAM_RANGES = {
     "superconducting": {
-        "T1_s": (80e-6, 400e-6),      # IBM Eagle/Heron, Jurcevic et al. (2021)
+        "T1_s": (80e-6, 400e-6),
         "T2_s": (40e-6, 200e-6),
-        "eps":  (1e-4, 2e-3),         # IBM published gate errors
+        "eps":  (1e-4, 2e-3),
     },
     "trapped_ion": {
-        "T1_s": (100.0, 10000.0),     # IonQ Forte / Quantinuum H2
-        "T2_s": (0.1, 3.0),           # T2* Ramsey, B-field limited
-        "eps":  (1e-4, 2e-3),         # IonQ published gate errors
+        "T1_s": (100.0, 10000.0),
+        "T2_s": (0.1, 3.0),
+        "eps":  (1e-4, 2e-3),
     },
     "neutral_atom": {
-        "T1_s": (1.0, 100.0),         # QuEra/Rydberg cloud systems
-        "T2_s": (0.3, 3.0),           # current cloud-accessible T2* (10x range)
-        "eps":  (1e-3, 1e-2),         # neutral atom gate errors
+        "T1_s": (1.0, 100.0),
+        "T2_s": (0.3, 3.0),
+        "eps":  (1e-3, 1e-2),
+    },
+}
+
+
+REALISTIC_NOISE = {
+    "superconducting": {
+        "sigma_T1_lognormal":  0.15,
+        "T2_reduction_max":    0.12,
+        "sigma_coherent_rad":  0.010,
+        "sigma_SPAM_frac":     0.05,
+        "sigma_dw_rad_s":      50.0,
+    },
+    "trapped_ion": {
+        "sigma_T1_lognormal":  0.00,
+        "T2_reduction_max":    0.10,
+        "sigma_coherent_rad":  0.005,
+        "sigma_SPAM_frac":     0.03,
+        "sigma_dw_rad_s":      200.0,
+    },
+    "neutral_atom": {
+        "sigma_T1_lognormal":  0.03,
+        "T2_reduction_max":    0.15,
+        "sigma_coherent_rad":  0.015,
+        "sigma_SPAM_frac":     0.08,
+        "sigma_dw_rad_s":      500.0,
     },
 }
 
@@ -317,27 +348,69 @@ def sample_true_params_realistic(arch_name: str, dw_max: float, rng_obj):
 
 def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
                                  instance_id, extra_seed):
-    arch = inv.ARCH_DEFAULTS[arch_name]
+    """Fig. 3 simulation: genuine model-mismatch experiment.
 
-    arch_idx   = ARCHITECTURES.index(arch_name)
-    rng_param, = _spawn_probe_rngs(SEED + 1, arch_idx, instance_id, extra_seed, n_streams=1)
+    The AerSimulator runs with EFFECTIVE hardware parameters that include
+    unmodeled physical noise (TLS drift, 1/f dephasing, coherent over-
+    rotation, quasi-static detuning offsets, SPAM calibration drift).
+    Canary's inversion is blind to all of these — it uses a ±15% prior
+    jitter around T1_true/T2_true and the device's nominal calibrated SPAM.
 
-    # Fig. 3 per-architecture real operating mode:
-    #   superconducting / trapped_ion: live calibration is always available
-    #     (IBM backend.properties() / IonQ characterization API) -> prior =
-    #     truth +/- calibration uncertainty, Strategy A linear delays.
-    #   neutral_atom: QuEra exposes no live calibration -> arch-default
-    #     prior, Strategy B log-spaced delays. T2 may degrade honestly.
-    # In all cases the noise model below is driven by the TRUE parameters —
-    # AerSimulator simulates what real hardware would actually produce,
-    # regardless of what Canary's prior believes.
+    The mismatch has two independent layers:
+      Layer 1 — prior error: Canary's delay grid is centred on T1_prior ≠
+                T1_eff (already present in the original code).
+      Layer 2 — physics mismatch (NEW): the simulator runs physics outside
+                Canary's Lindblad forward models. This breaks the Lindblad-
+                vs-Lindblad tautology and tests genuine robustness.
+
+    Returns (result, T1_eff, T2_eff, abs(dw_eff), eps_eff) so that R² in
+    Fig. 3 is computed against the effective parameters — i.e., what the
+    hardware actually had during this measurement window — not T1_true,
+    which the hardware drifted away from.
+    """
+    arch     = inv.ARCH_DEFAULTS[arch_name]
+    arch_idx = ARCHITECTURES.index(arch_name)
+    noise_cfg = REALISTIC_NOISE[arch_name]
+
+    rng_param, rng_noise = _spawn_probe_rngs(
+        SEED + 1, arch_idx, instance_id, extra_seed, n_streams=2)
+
+
+    if noise_cfg["sigma_T1_lognormal"] > 0.0:
+        T1_eff = float(np.clip(
+            T1_true * np.exp(rng_noise.normal(0.0, noise_cfg["sigma_T1_lognormal"])),
+            arch["T1_min_s"], arch["T1_max_s"]))
+    else:
+        T1_eff = T1_true
+
+    T2_reduction = rng_noise.uniform(0.0, noise_cfg["T2_reduction_max"])
+    T2_eff = float(np.clip(
+        T2_true * (1.0 - T2_reduction),
+        arch["T2_min_s"], min(2.0 * T1_eff, arch["T1_max_s"])))
+
+    delta_coh  = rng_noise.normal(0.0, noise_cfg["sigma_coherent_rad"])
+    eps_eff    = float(np.clip(
+        eps_true + delta_coh ** 2 / 4.0,
+        0.0, arch["eps_max"]))
+
+    dw_eff = dw_true + rng_noise.normal(0.0, noise_cfg["sigma_dw_rad_s"])
+
+    p0g1_nom = arch["p0_given_1"]
+    p1g0_nom = arch["p1_given_0"]
+    p0g1_eff = float(np.clip(
+        p0g1_nom * (1.0 + rng_noise.normal(0.0, noise_cfg["sigma_SPAM_frac"])),
+        0.0, 0.30))
+    p1g0_eff = float(np.clip(
+        p1g0_nom * (1.0 + rng_noise.normal(0.0, noise_cfg["sigma_SPAM_frac"])),
+        0.0, 0.30))
+
     if arch_name in ("superconducting", "trapped_ion"):
         T1_prior = float(np.clip(
             T1_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
             arch["T1_min_s"], arch["T1_max_s"]))
         T2_prior = float(np.clip(
             T2_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
-            arch["T2_min_s"], min(2.0*T1_prior, arch["T1_max_s"])))
+            arch["T2_min_s"], min(2.0 * T1_prior, arch["T1_max_s"])))
         profile = inv.BackendProfile.from_true_params(arch_name, T1_prior, T2_prior)
         eps_prior = float(np.clip(
             eps_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
@@ -345,38 +418,40 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
         custom_arch = dict(arch)
         custom_arch["eps_typical"] = eps_prior
         profile.custom_arch = custom_arch
-    else:  # neutral_atom
+    else:
         profile = inv.BackendProfile.from_architecture(arch_name)
 
     circuits, meta = inv.build_probe_circuits(profile)
 
     counts_list = inv.run_probe_circuits_aer(
         circuits, meta,
-        T1_true, T2_true, eps_true,
-        arch["p0_given_1"], arch["p1_given_0"],
+        T1_eff, T2_eff, eps_eff,
+        p0g1_eff, p1g0_eff,
         profile.dt_ns,
         SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO,
-        dw_s=dw_true,
+        dw_s=dw_eff,
     )
 
-    return inv.lindblad_inversion(
+    result = inv.lindblad_inversion(
         counts_list, meta, profile,
         shots_t1=SHOTS_T1, shots_ramsey=SHOTS_RAMSEY,
         shots_gate=SHOTS_GATE, shots_echo=SHOTS_ECHO,
         qubit_id=0,
         timestamp=datetime.now(timezone.utc).isoformat())
 
+    return result, T1_eff, T2_eff, abs(dw_eff), eps_eff
+
 
 def _worker_fig3(args):
     arch, T1_t, T2_t, dw_t, eps_t, instance_id, extra_seed = args
     try:
-        r = simulate_realistic_inversion(arch, T1_t, T2_t, dw_t, eps_t,
-                                         instance_id, extra_seed)
+        r, T1_eff, T2_eff, dw_eff, eps_eff = simulate_realistic_inversion(
+            arch, T1_t, T2_t, dw_t, eps_t, instance_id, extra_seed)
     except (RuntimeError, ValueError):
-        return (arch, T1_t, T2_t, dw_t, eps_t, None)
+        return (arch, T1_t, T2_t, abs(dw_t), eps_t, None, None, None, None, None)
     if not (np.isfinite(r.T1_s) and np.isfinite(r.T2_s)):
-        return (arch, T1_t, T2_t, dw_t, eps_t, None)
-    return (arch, T1_t, T2_t, dw_t, eps_t, r)
+        return (arch, T1_t, T2_t, abs(dw_t), eps_t, None, None, None, None, None)
+    return (arch, T1_t, T2_t, abs(dw_t), eps_t, r, T1_eff, T2_eff, dw_eff, eps_eff)
 
 
 def run_realistic_mismatch_experiment(n_workers: int = None):
@@ -425,19 +500,19 @@ def run_realistic_mismatch_experiment(n_workers: int = None):
             with mp.Pool(n_workers) as pool:
                 results = pool.map(_worker_fig3, batch_args)
 
-            for _, T1_t, T2_t, dw_t, eps_t, r in results:
+            for _, T1_t, T2_t, dw_t, eps_t, r, T1_eff, T2_eff, dw_eff, eps_eff in results:
                 if r is None:
                     fit_failures[arch] += 1
                     continue
                 if success >= N_INSTANCES:
                     continue
                 rec["arch"].append(arch)
-                rec["T1_true"].append(T1_t);   rec["T1_rec"].append(r.T1_s);        rec["T1_sig"].append(r.T1_sigma_s)
-                rec["T2_true"].append(T2_t);   rec["T2_rec"].append(r.T2_s);        rec["T2_sig"].append(r.T2_sigma_s)
+                rec["T1_true"].append(T1_eff);  rec["T1_rec"].append(r.T1_s);       rec["T1_sig"].append(r.T1_sigma_s)
+                rec["T2_true"].append(T2_eff);  rec["T2_rec"].append(r.T2_s);       rec["T2_sig"].append(r.T2_sigma_s)
                 rec["T2_ramsey_rec"].append(r.T2_ramsey_s); rec["T2_ramsey_sig"].append(r.T2_ramsey_sigma_s)
                 rec["T2_echo_rec"].append(r.T2_echo_s);     rec["T2_echo_sig"].append(r.T2_echo_sigma_s)
-                rec["dw_true"].append(abs(dw_t)); rec["dw_rec"].append(abs(r.delta_omega)); rec["dw_sig"].append(r.delta_omega_sigma)
-                rec["eps_true"].append(eps_t); rec["eps_rec"].append(r.epsilon_sx); rec["eps_sig"].append(r.epsilon_sx_sigma)
+                rec["dw_true"].append(dw_eff);  rec["dw_rec"].append(abs(r.delta_omega)); rec["dw_sig"].append(r.delta_omega_sigma)
+                rec["eps_true"].append(eps_eff); rec["eps_rec"].append(r.epsilon_sx); rec["eps_sig"].append(r.epsilon_sx_sigma)
                 rec["t1_chi2"].append(r.t1_chi2_dof)
                 rec["ramsey_chi2"].append(r.ramsey_chi2_dof)
                 rec["gate_chi2"].append(r.gate_chi2_dof)
