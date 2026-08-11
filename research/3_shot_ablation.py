@@ -124,6 +124,7 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true,
         arch["p0_given_1"], arch["p1_given_0"],
         profile.dt_ns,
         shots_t1, shots_ramsey, shots_gate, shots_echo,
+        dw_s=dw_true,
     )
 
     with warnings.catch_warnings():

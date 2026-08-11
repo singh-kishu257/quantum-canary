@@ -240,7 +240,34 @@ def _perturb_instance(arch_name, T1, T2, eps, p0g1_nom, p1g0_nom, rng):
     return T1_eff, T2_eff, eps_eff, p0g1_eff, p1g0_eff
 
 
-def _make_backend(qc, T1, T2, eps, p0g1, p1g0, gate_time_ns, dt_ns):
+def _convert_native_to_unitary(qc, native_gate_names):
+    # AerSimulator's C++ backend does not recognise third-party gate names
+    # (verified directly: "gpi"/"gpi2" are absent from
+    # AerSimulator().configuration().basis_gates, and attempting to run
+    # them raises AerError: unknown instruction). Transpiling onto a
+    # native Target correctly produces real gpi/gpi2 sequences, but Aer
+    # still cannot execute them by name. The fix verified end-to-end
+    # before this was written: convert each named native gate instance to
+    # a generic UnitaryGate carrying the SAME matrix (native_gate.to_matrix()),
+    # which Aer natively supports ("unitary" IS in Aer's basis_gates). This
+    # preserves the exact physical operation (same unitary each native
+    # pulse implements) while making it something Aer can simulate; it
+    # does not change the gate COUNT or PHYSICS, only how Aer labels the
+    # instruction internally.
+    from qiskit.circuit.library import UnitaryGate
+    new_qc = qc.copy_empty_like()
+    for inst in qc.data:
+        op = inst.operation
+        if op.name in native_gate_names:
+            new_qc.append(UnitaryGate(op.to_matrix(), label=op.name),
+                          inst.qubits, inst.clbits)
+        else:
+            new_qc.append(inst)
+    return new_qc
+
+
+def _make_backend(qc, T1, T2, eps, p0g1, p1g0, gate_time_ns, dt_ns,
+                  noise_gate_names=None):
     from qiskit_aer import AerSimulator
     from qiskit_aer.noise import (NoiseModel, thermal_relaxation_error,
                                    depolarizing_error, ReadoutError)
@@ -250,7 +277,15 @@ def _make_backend(qc, T1, T2, eps, p0g1, p1g0, gate_time_ns, dt_ns):
             .compose(depolarizing_error(2.0 * eps, 1)))
     # rz excluded: virtual Z rotation, zero physical pulse, zero noise on
     # every real hardware platform (same convention as 1_inversion.py).
-    nm.add_quantum_error(sx_e, ["sx", "x", "id", "rx", "u1", "p"], [0])
+    # noise_gate_names defaults to the superconducting-basis instruction
+    # names; callers targeting a native non-superconducting gate set (see
+    # run_qe()'s trapped_ion path) pass the correct names instead (e.g.
+    # ["unitary"] after native gates are converted via
+    # _convert_native_to_unitary), so the SAME physical noise channel is
+    # attached to whichever instruction actually represents the noisy
+    # native single-qubit operation for that architecture.
+    names = noise_gate_names or ["sx", "x", "id", "rx", "u1", "p"]
+    nm.add_quantum_error(sx_e, names, [0])
     seen = set()
     for inst in qc.data:
         if inst.operation.name == "delay":
@@ -266,7 +301,8 @@ def _make_backend(qc, T1, T2, eps, p0g1, p1g0, gate_time_ns, dt_ns):
 
 
 def _run_exp(exp_obj, T1, T2, eps, p0g1, p1g0, shots, gate_time_ns, dt_ns,
-            dw_true=0.0, inject_detuning=False):
+            dw_true=0.0, inject_detuning=False, native_target=None,
+            native_gate_names=None):
     from qiskit import transpile
     exp_obj.set_run_options(shots=shots)
     circuits = exp_obj.circuits()
@@ -274,8 +310,21 @@ def _run_exp(exp_obj, T1, T2, eps, p0g1, p1g0, shots, gate_time_ns, dt_ns,
     for qc in circuits:
         run_qc = (inv._inject_ramsey_detuning(qc, dw_true, dt_ns)
                   if inject_detuning else qc)
-        b    = _make_backend(run_qc, T1, T2, eps, p0g1, p1g0, gate_time_ns, dt_ns)
-        tqc  = transpile(run_qc, b, optimization_level=0)
+        noise_gate_names = None
+        if native_target is not None:
+            # Transpile the abstract sx/x/rz circuit onto the real native
+            # gate Target (verified working: real GPI/GPI2 sequences,
+            # correct delay/measure passthrough). Then convert those named
+            # native gates to AerSimulator-executable UnitaryGate instances
+            # (same physical operation, different internal label -- see
+            # _convert_native_to_unitary docstring for why this step is
+            # required rather than optional).
+            run_qc = transpile(run_qc, target=native_target, optimization_level=1)
+            run_qc = _convert_native_to_unitary(run_qc, native_gate_names)
+            noise_gate_names = ["unitary"]
+        b    = _make_backend(run_qc, T1, T2, eps, p0g1, p1g0, gate_time_ns,
+                             dt_ns, noise_gate_names=noise_gate_names)
+        tqc  = run_qc if native_target is not None else transpile(run_qc, b, optimization_level=0)
         cnts = b.run(tqc, shots=shots).result().get_counts()
         meta = {**dict(qc.metadata), "count_ops": [(((0,), g), c) for g, c in tqc.count_ops().items()]}
         exp_data.add_data({"counts": cnts, "shots": shots, "metadata": meta})
@@ -515,6 +564,27 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     # always the same value.
     dt_ns = (backend.dt * 1e9) if getattr(backend, "dt", None) else 0.2222
 
+    # Native execution: for trapped_ion, transpile every experiment's
+    # circuits onto a verified real IonQ-native Target (GPI/GPI2, via
+    # qiskit_ionq's own gate classes and equivalence library -- see
+    # _ionq_native_target()) instead of executing the abstract sx/x/rz
+    # proxy circuit. Tested end-to-end before being wired in here:
+    # abstract circuit -> native transpile -> GPI/GPI2 -> converted to
+    # AerSimulator-executable UnitaryGate (same physical operation,
+    # required because Aer's C++ backend does not recognise "gpi"/"gpi2"
+    # as instruction names) -> noise tagged onto "unitary" -> executed.
+    # superconducting keeps its existing (already correct) abstract-basis
+    # path unchanged. neutral_atom has no verified native-gate provider to
+    # build a Target from (no standard digital qiskit-experiments workflow
+    # exists for that hardware family -- see _qe_backend() docstring) and
+    # remains on the disclosed abstract-basis proxy.
+    native_target     = None
+    native_gate_names = None
+    if arch_name == "trapped_ion":
+        native_target = _ionq_native_target(gate_time_ns)
+        if native_target is not None:
+            native_gate_names = ["gpi", "gpi2"]
+
     T1_qe   = float("nan");  T1_std  = float("nan")
     T2r_qe  = float("nan");  T2r_std = float("nan")
     T2h_qe  = float("nan");  T2h_std = float("nan")
@@ -538,7 +608,9 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     try:
         data          = _run_exp(QE_T1([0], delays=delays_t1, backend=backend),
                                  T1_true, T2_true, eps_true, p0g1, p1g0, shots_t1,
-                                 gate_time_ns, dt_ns)
+                                 gate_time_ns, dt_ns,
+                                 native_target=native_target,
+                                 native_gate_names=native_gate_names)
         T1_candidate, T1_std = _extract(data, "T1")
         if np.isfinite(T1_candidate):
             plausible = (0.0 < T1_candidate <= T1_guard_threshold)
@@ -554,7 +626,8 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
             T2Ramsey([0], delays=delays_t2, osc_freq=osc_freq_hz, backend=backend),
             T1_true, T2_true, eps_true, p0g1, p1g0, shots_t2r,
             gate_time_ns, dt_ns,
-            dw_true=dw_true, inject_detuning=True)
+            dw_true=dw_true, inject_detuning=True,
+            native_target=native_target, native_gate_names=native_gate_names)
         T2r_qe, T2r_std  = _extract(data, "T2star")
         freq_hz, _        = _extract(data, "Frequency")
         if np.isfinite(freq_hz):
@@ -574,7 +647,8 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
         data             = _run_exp(
             T2Hahn([0], delays=delays_t2, backend=backend),
             T1_true, T2e_true, eps_true, p0g1, p1g0, shots_t2h,
-            gate_time_ns, dt_ns)
+            gate_time_ns, dt_ns,
+            native_target=native_target, native_gate_names=native_gate_names)
         T2h_qe, T2h_std  = _extract(data, "T2")
     except Exception:
         pass
@@ -612,7 +686,9 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
                             seed=int(seed), backend=backend)
         exp_rb.analysis.set_options(gate_error_ratio=False)
         data       = _run_exp(exp_rb, T1_true, T2_true, eps_true,
-                              p0g1, p1g0, shots_rb, gate_time_ns, dt_ns)
+                              p0g1, p1g0, shots_rb, gate_time_ns, dt_ns,
+                              native_target=native_target,
+                              native_gate_names=native_gate_names)
         epc, _     = _extract(data, "EPC")
         if np.isfinite(epc) and epc > 0:
             # gates_per_clifford converts EPC (error per Clifford) into
