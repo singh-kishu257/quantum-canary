@@ -42,18 +42,38 @@ QE_N_DELAYS        = 15
 QE_RB_LENGTHS      = [1, 2, 4, 8, 16, 32, 64, 128]
 QE_RB_SAMPLES      = 5
 QE_SX_PER_CLIFFORD = 1.875
-# A recovered |dw_qe| beyond this multiple of the architecture's own
-# dw_max_rad_s (BackendProfile.dw_max_rad_s — the same physical bound
-# Canary's optimizer enforces as a hard constraint) is not a real,
-# usably-off estimate; it indicates the T2Ramsey frequency fit diverged.
-# Canary's own inversion fails safely to NaN on divergence (see
-# run_canary's except-clause below); QE's ad hoc frequency-difference
-# calculation previously had no equivalent guard, so a diverging fit could
-# silently produce a physically impossible value (observed: |dw_qe| up to
-# ~1e7 rad/s against a true range of ~1e2-1e5 rad/s) that then dominated
-# R^2/NRMSE instead of being counted as a fit failure. This bound makes
-# both methods fail to NaN under the same standard.
-QE_DW_PLAUSIBILITY_MULT = 10.0
+# Plausibility guards on QE's raw curve-fit outputs.
+#
+# Canary's own optimizer enforces hard physical bounds (T2<=2*T1, dw within
+# BackendProfile.dw_max_rad_s, etc.) and fails safely to NaN on divergence.
+# QE's ad hoc extraction (T1/T2Ramsey/T2Hahn curve_fit + a manual
+# frequency-difference calculation for dw) has no equivalent bound, so a
+# diverging fit can silently produce a physically impossible value that then
+# dominates R^2/NRMSE instead of being counted as a fit failure. These
+# multipliers convert an implausible QE output into NaN, under the same
+# standard Canary is already held to.
+#
+# The dw multiplier was previously 10.0 and confirmed NOT to catch the
+# observed trapped_ion/neutral_atom divergence (R^2 in the -1e5 to -1e7
+# range persisted unchanged after that guard was added -- see the debug
+# counters below, added specifically to catch this class of problem again
+# if it recurs). The true dw sampling range is only 0.2-1.0x dw_max, so
+# anything beyond ~2x dw_max is already far outside anything physically
+# sampled and is treated as a failed fit.
+QE_DW_PLAUSIBILITY_MULT = 2.0
+# T1/T2 fits are bounded against the architecture's own T1_max_s (the same
+# ceiling Canary's optimizer bounds against). A curve_fit that returns a
+# T1 many times the architecture's physical maximum, zero, or negative is a
+# diverged fit, not real hardware.
+QE_T1_PLAUSIBILITY_MULT = 5.0
+
+# Counts, per architecture, how often each QE parameter's raw fit output
+# was rejected by its plausibility guard. Printed at the end of run_sweep()
+# so a still-broken guard (implausible values that keep slipping through)
+# or a guard that is rejecting nearly everything (too strict) is visible in
+# the job log rather than only discoverable after downloading the CSV.
+QE_GUARD_REJECTS = defaultdict(lambda: defaultdict(int))
+QE_GUARD_TOTAL   = defaultdict(lambda: defaultdict(int))
 
 import os as _os
 _ALL_BUDGETS = [1_000, 2_500, 5_000, 9_900, 15_000, 25_000, 50_000]
@@ -470,11 +490,29 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     dw_qe   = float("nan")
     eps_qe  = float("nan")
 
+    # guard_flags: (had_candidate, was_rejected) per parameter. Returned to
+    # the caller (run_sweep, in the main process) for aggregation, since a
+    # plain module-level counter would not aggregate correctly across
+    # multiprocessing worker processes.
+    guard_flags = {"T1": (False, False), "T2": (False, False), "dw": (False, False)}
+
     try:
         data          = _run_exp(QE_T1([0], delays=delays_t1, backend=backend),
                                  T1_true, T2_true, eps_true, p0g1, p1g0, shots_t1,
                                  gate_time_ns, dt_ns)
-        T1_qe, T1_std = _extract(data, "T1")
+        T1_candidate, T1_std = _extract(data, "T1")
+        if np.isfinite(T1_candidate):
+            # A T1 fit that returns non-positive, or many times the
+            # architecture's own physical T1_max_s, is a diverged fit
+            # (e.g. curve_fit landing on a degenerate/flat region at low
+            # shot counts), not a real measurement. Canary's optimizer is
+            # bounded the same way; this makes QE fail to NaN under the
+            # same standard instead of letting an unbounded value dominate
+            # R^2/NRMSE.
+            plausible = (0.0 < T1_candidate <= QE_T1_PLAUSIBILITY_MULT * arch["T1_max_s"])
+            guard_flags["T1"] = (True, not plausible)
+            if plausible:
+                T1_qe = T1_candidate
     except Exception:
         pass
 
@@ -495,8 +533,12 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
             # the frequency fit diverged. Treat it as a failed fit (NaN),
             # consistent with how run_canary() fails safely on divergence,
             # rather than letting an unbounded numeric artifact dominate
-            # this parameter's R^2/NRMSE.
-            if dw_candidate <= QE_DW_PLAUSIBILITY_MULT * dw_max:
+            # this parameter's R^2/NRMSE. The true dw sampling range is
+            # only 0.2-1.0x dw_max, so the multiplier is tight (2.0), not
+            # the previous 10.0 which was confirmed insufficient.
+            plausible = dw_candidate <= QE_DW_PLAUSIBILITY_MULT * dw_max
+            guard_flags["dw"] = (True, not plausible)
+            if plausible:
                 dw_qe = dw_candidate
     except Exception:
         pass
@@ -516,15 +558,25 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     if len(valid) == 2:
         w0 = 1.0 / valid[0][1] ** 2
         w1 = 1.0 / valid[1][1] ** 2
-        T2_combined = (w0 * valid[0][0] + w1 * valid[1][0]) / (w0 + w1)
+        T2_candidate = (w0 * valid[0][0] + w1 * valid[1][0]) / (w0 + w1)
     elif len(valid) == 1:
-        T2_combined = valid[0][0]
+        T2_candidate = valid[0][0]
     elif np.isfinite(T2r_qe):
-        T2_combined = T2r_qe
+        T2_candidate = T2r_qe
     elif np.isfinite(T2h_qe):
-        T2_combined = T2h_qe
+        T2_candidate = T2h_qe
     else:
-        T2_combined = float("nan")
+        T2_candidate = float("nan")
+
+    T2_combined = float("nan")
+    if np.isfinite(T2_candidate):
+        # Same principle as the T1 guard: a T2 many times the
+        # architecture's physical T1_max_s (T2 <= 2*T1 always) is a
+        # diverged curve_fit, not real hardware.
+        plausible = (0.0 < T2_candidate <= QE_T1_PLAUSIBILITY_MULT * arch["T1_max_s"])
+        guard_flags["T2"] = (True, not plausible)
+        if plausible:
+            T2_combined = T2_candidate
 
     if np.isfinite(T1_qe) and np.isfinite(T2_combined):
         T2_combined = min(T2_combined, 2.0 * T1_qe)
@@ -566,7 +618,7 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     except Exception:
         pass
 
-    return float(T1_qe), float(T2_combined), float(dw_qe), float(eps_qe)
+    return float(T1_qe), float(T2_combined), float(dw_qe), float(eps_qe), guard_flags
 
 
 def _r2_point(true_arr, rec_arr):
@@ -685,6 +737,13 @@ def run_sweep(n_workers):
             for idx, res, t in pool.imap_unordered(_worker_qe, q_args, chunksize=4):
                 q_res[idx]  = res;  q_time[idx] = t
 
+        for res in q_res:
+            gf = res[4]
+            for pname, (had_candidate, rejected) in gf.items():
+                if had_candidate:
+                    QE_GUARD_TOTAL[ARCH][pname]   += 1
+                    QE_GUARD_REJECTS[ARCH][pname] += int(rejected)
+
         true = {
             "T1":          [perturbed[i][0] for i in range(N_INSTANCES)],
             "T2":          [perturbed[i][1] for i in range(N_INSTANCES)],
@@ -726,6 +785,16 @@ def run_sweep(n_workers):
         save_benchmark_csv(rows)
         print(f"  [checkpoint] saved after budget={budget:,} "
               f"({bi+1}/{len(SHOT_BUDGETS)} budgets complete)", flush=True)
+
+    print(f"\n  QE plausibility-guard summary for {ARCH} "
+          f"(rejected/had-candidate, across all budgets):", flush=True)
+    for pname in ("T1", "T2", "dw"):
+        total    = QE_GUARD_TOTAL[ARCH].get(pname, 0)
+        rejected = QE_GUARD_REJECTS[ARCH].get(pname, 0)
+        pct      = (100.0 * rejected / total) if total else 0.0
+        flag     = "  <-- check this" if pct > 50.0 else ""
+        print(f"    {pname:4s}: {rejected:5d}/{total:5d} rejected "
+              f"({pct:5.1f}%){flag}", flush=True)
 
     return rows
 
