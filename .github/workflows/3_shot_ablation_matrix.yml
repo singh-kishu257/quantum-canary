@@ -7,7 +7,7 @@ jobs:
   ablation:
     name: "${{ matrix.arch }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 100
 
     strategy:
       fail-fast: false

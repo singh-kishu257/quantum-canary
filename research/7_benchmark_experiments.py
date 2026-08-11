@@ -42,18 +42,41 @@ QE_N_DELAYS        = 15
 QE_RB_LENGTHS      = [1, 2, 4, 8, 16, 32, 64, 128]
 QE_RB_SAMPLES      = 5
 QE_SX_PER_CLIFFORD = 1.875
-# A recovered |dw_qe| beyond this multiple of the architecture's own
-# dw_max_rad_s (BackendProfile.dw_max_rad_s — the same physical bound
-# Canary's optimizer enforces as a hard constraint) is not a real,
-# usably-off estimate; it indicates the T2Ramsey frequency fit diverged.
-# Canary's own inversion fails safely to NaN on divergence (see
-# run_canary's except-clause below); QE's ad hoc frequency-difference
-# calculation previously had no equivalent guard, so a diverging fit could
-# silently produce a physically impossible value (observed: |dw_qe| up to
-# ~1e7 rad/s against a true range of ~1e2-1e5 rad/s) that then dominated
-# R^2/NRMSE instead of being counted as a fit failure. This bound makes
-# both methods fail to NaN under the same standard.
-QE_DW_PLAUSIBILITY_MULT = 10.0
+# Plausibility guards on QE's raw curve-fit outputs.
+#
+# Canary's own optimizer enforces hard physical bounds and fails safely to
+# NaN on divergence. QE's ad hoc extraction (T1/T2Ramsey/T2Hahn curve_fit +
+# a manual frequency-difference calculation for dw, + RB's EPC/gates-per-
+# Clifford for eps) has no equivalent bound, so a diverging fit can
+# silently produce a physically impossible value that then dominates
+# R^2/NRMSE instead of being counted as a fit failure.
+#
+# CRITICAL: every guard below is anchored to TRUE_PARAM_RANGES (the actual
+# distribution sample_instance() draws true values from in THIS benchmark)
+# or to the same dynamic BackendProfile quantity that generated the true
+# dw values -- never to ARCH_DEFAULTS' full architectural physical bound
+# (T1_max_s, eps_max, the static dw_max_rad_s constant). Those ARCH_DEFAULTS
+# bounds describe the full plausible range of real hardware in general, not
+# the much narrower range actually sampled in this specific benchmark, and
+# are commonly 50-8900x larger than the true sampling range. A guard
+# anchored to the wrong (larger) reference is mathematically incapable of
+# rejecting anything: earlier versions of this file made exactly this
+# mistake for dw (static ARCH_DEFAULTS dw_max_rad_s, off by ~4400x for
+# trapped_ion) and, separately, for T1/T2/eps (ARCH_DEFAULTS T1_max_s /
+# eps_max, off by 50-5000x) -- both confirmed by 0% guard-rejection rates
+# coexisting with R^2 in the -1e5 to -1e7 range, which is only possible if
+# the guard threshold is far above anything a diverged fit could produce.
+QE_DW_PLAUSIBILITY_MULT  = 2.0
+QE_T1_PLAUSIBILITY_MULT  = 5.0
+QE_EPS_PLAUSIBILITY_MULT = 5.0
+
+# Counts, per architecture, how often each QE parameter's raw fit output
+# was rejected by its plausibility guard. Printed at the end of run_sweep()
+# so a still-broken guard (implausible values that keep slipping through)
+# or a guard that is rejecting nearly everything (too strict) is visible in
+# the job log rather than only discoverable after downloading the CSV.
+QE_GUARD_REJECTS = defaultdict(lambda: defaultdict(int))
+QE_GUARD_TOTAL   = defaultdict(lambda: defaultdict(int))
 
 import os as _os
 _ALL_BUDGETS = [1_000, 2_500, 5_000, 9_900, 15_000, 25_000, 50_000]
@@ -498,11 +521,30 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     dw_qe   = float("nan")
     eps_qe  = float("nan")
 
+    # guard_flags: (had_candidate, was_rejected) per parameter, returned to
+    # the caller (run_sweep, in the main process) for aggregation -- a
+    # plain module-level counter would not aggregate correctly across
+    # multiprocessing worker processes.
+    guard_flags = {"T1": (False, False), "T2": (False, False),
+                   "dw": (False, False), "eps": (False, False)}
+
+    # T1/T2 plausibility reference: the TRUE sampling range for this
+    # architecture in THIS benchmark (TRUE_PARAM_RANGES), not
+    # ARCH_DEFAULTS["T1_max_s"] (the full physical hardware range, which
+    # can be 50-5000x larger -- see constants block comment above).
+    T1_true_max = TRUE_PARAM_RANGES[arch_name]["T1_s"][1]
+    T1_guard_threshold = QE_T1_PLAUSIBILITY_MULT * T1_true_max
+
     try:
         data          = _run_exp(QE_T1([0], delays=delays_t1, backend=backend),
                                  T1_true, T2_true, eps_true, p0g1, p1g0, shots_t1,
                                  gate_time_ns, dt_ns)
-        T1_qe, T1_std = _extract(data, "T1")
+        T1_candidate, T1_std = _extract(data, "T1")
+        if np.isfinite(T1_candidate):
+            plausible = (0.0 < T1_candidate <= T1_guard_threshold)
+            guard_flags["T1"] = (True, not plausible)
+            if plausible:
+                T1_qe = T1_candidate
     except Exception:
         pass
 
@@ -517,14 +559,12 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
         freq_hz, _        = _extract(data, "Frequency")
         if np.isfinite(freq_hz):
             dw_candidate = abs(freq_hz - osc_freq_hz) * 2.0 * np.pi
-            # A recovered detuning many multiples beyond the architecture's
-            # own physical bound (dw_max_rad_s — the same bound Canary's
-            # optimizer hard-enforces) is not a usable estimate; it means
-            # the frequency fit diverged. Treat it as a failed fit (NaN),
-            # consistent with how run_canary() fails safely on divergence,
-            # rather than letting an unbounded numeric artifact dominate
-            # this parameter's R^2/NRMSE.
-            if dw_candidate <= QE_DW_PLAUSIBILITY_MULT * dw_max:
+            # dw_max here is the SAME dynamic BackendProfile quantity that
+            # generated the true dw values (see docstring above run_qe),
+            # not the static ARCH_DEFAULTS constant.
+            plausible = dw_candidate <= QE_DW_PLAUSIBILITY_MULT * dw_max
+            guard_flags["dw"] = (True, not plausible)
+            if plausible:
                 dw_qe = dw_candidate
     except Exception:
         pass
@@ -544,15 +584,24 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     if len(valid) == 2:
         w0 = 1.0 / valid[0][1] ** 2
         w1 = 1.0 / valid[1][1] ** 2
-        T2_combined = (w0 * valid[0][0] + w1 * valid[1][0]) / (w0 + w1)
+        T2_candidate = (w0 * valid[0][0] + w1 * valid[1][0]) / (w0 + w1)
     elif len(valid) == 1:
-        T2_combined = valid[0][0]
+        T2_candidate = valid[0][0]
     elif np.isfinite(T2r_qe):
-        T2_combined = T2r_qe
+        T2_candidate = T2r_qe
     elif np.isfinite(T2h_qe):
-        T2_combined = T2h_qe
+        T2_candidate = T2h_qe
     else:
-        T2_combined = float("nan")
+        T2_candidate = float("nan")
+
+    T2_combined = float("nan")
+    if np.isfinite(T2_candidate):
+        # T2 <= 2*T1 always; T1_true_max (TRUE_PARAM_RANGES-anchored, see
+        # above) is therefore also the correct reference scale for T2.
+        plausible = (0.0 < T2_candidate <= T1_guard_threshold)
+        guard_flags["T2"] = (True, not plausible)
+        if plausible:
+            T2_combined = T2_candidate
 
     if np.isfinite(T1_qe) and np.isfinite(T2_combined):
         T2_combined = min(T2_combined, 2.0 * T1_qe)
@@ -590,11 +639,21 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
             # neutral_atom: no verified native-gate provider exists (see
             # _qe_backend() docstring) -> stays on QE_SX_PER_CLIFFORD as a
             # disclosed, uncorrected proxy.
-            eps_qe = float(np.clip(epc / gates_per_clifford, 0.0, eps_max))
+            eps_candidate = epc / gates_per_clifford
+            # eps_max (ARCH_DEFAULTS' full physical bound, ~0.5) is far
+            # looser than TRUE_PARAM_RANGES' actual sampled max (as little
+            # as 0.002-0.01 depending on architecture) -- anchor the guard
+            # to the true sampling range, same principle as T1/T2/dw above.
+            eps_true_max = TRUE_PARAM_RANGES[arch_name]["eps"][1]
+            eps_guard_threshold = QE_EPS_PLAUSIBILITY_MULT * eps_true_max
+            plausible = (0.0 <= eps_candidate <= eps_guard_threshold)
+            guard_flags["eps"] = (True, not plausible)
+            if plausible:
+                eps_qe = float(np.clip(eps_candidate, 0.0, eps_max))
     except Exception:
         pass
 
-    return float(T1_qe), float(T2_combined), float(dw_qe), float(eps_qe)
+    return float(T1_qe), float(T2_combined), float(dw_qe), float(eps_qe), guard_flags
 
 
 def _r2_point(true_arr, rec_arr):
@@ -724,6 +783,13 @@ def run_sweep(n_workers):
             for idx, res, t in pool.imap_unordered(_worker_qe, q_args, chunksize=4):
                 q_res[idx]  = res;  q_time[idx] = t
 
+        for res in q_res:
+            gf = res[4]
+            for pname, (had_candidate, rejected) in gf.items():
+                if had_candidate:
+                    QE_GUARD_TOTAL[ARCH][pname]   += 1
+                    QE_GUARD_REJECTS[ARCH][pname] += int(rejected)
+
         true = {
             "T1":          [perturbed[i][0] for i in range(N_INSTANCES)],
             "T2":          [perturbed[i][1] for i in range(N_INSTANCES)],
@@ -765,6 +831,16 @@ def run_sweep(n_workers):
         save_benchmark_csv(rows)
         print(f"  [checkpoint] saved after budget={budget:,} "
               f"({bi+1}/{len(SHOT_BUDGETS)} budgets complete)", flush=True)
+
+    print(f"\n  QE plausibility-guard summary for {ARCH} "
+          f"(rejected/had-candidate, across all budgets):", flush=True)
+    for pname in ("T1", "T2", "dw", "eps"):
+        total    = QE_GUARD_TOTAL[ARCH].get(pname, 0)
+        rejected = QE_GUARD_REJECTS[ARCH].get(pname, 0)
+        pct      = (100.0 * rejected / total) if total else 0.0
+        flag     = "  <-- check this" if pct > 50.0 else ""
+        print(f"    {pname:4s}: {rejected:5d}/{total:5d} rejected "
+              f"({pct:5.1f}%){flag}", flush=True)
 
     return rows
 
