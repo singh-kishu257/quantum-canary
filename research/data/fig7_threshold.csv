@@ -1,9 +1,25 @@
-parameter,method,shots_to_R2_095,shots_to_R2_099
-T1,Canary,15000,"> 50,000"
-T1,QiskitExperiments,15000,"> 50,000"
-T2,Canary,"> 50,000","> 50,000"
-T2,QiskitExperiments,50000,"> 50,000"
-delta_omega,Canary,1000,5000
-delta_omega,QiskitExperiments,"> 50,000","> 50,000"
-epsilon_sx,Canary,"> 50,000","> 50,000"
-epsilon_sx,QiskitExperiments,"> 50,000","> 50,000"
+architecture,parameter,method,shots_to_R2_095,shots_to_R2_099
+neutral_atom,T1,Canary,9900,25000
+neutral_atom,T1,QiskitExperiments,"> 50,000","> 50,000"
+neutral_atom,T2,Canary,50000,"> 50,000"
+neutral_atom,T2,QiskitExperiments,50000,"> 50,000"
+neutral_atom,delta_omega,Canary,1000,5000
+neutral_atom,delta_omega,QiskitExperiments,"> 50,000","> 50,000"
+neutral_atom,epsilon_sx,Canary,5000,50000
+neutral_atom,epsilon_sx,QiskitExperiments,"> 50,000","> 50,000"
+superconducting,T1,Canary,15000,"> 50,000"
+superconducting,T1,QiskitExperiments,25000,"> 50,000"
+superconducting,T2,Canary,"> 50,000","> 50,000"
+superconducting,T2,QiskitExperiments,50000,"> 50,000"
+superconducting,delta_omega,Canary,1000,5000
+superconducting,delta_omega,QiskitExperiments,"> 50,000","> 50,000"
+superconducting,epsilon_sx,Canary,"> 50,000","> 50,000"
+superconducting,epsilon_sx,QiskitExperiments,"> 50,000","> 50,000"
+trapped_ion,T1,Canary,5000,15000
+trapped_ion,T1,QiskitExperiments,"> 50,000","> 50,000"
+trapped_ion,T2,Canary,9900,50000
+trapped_ion,T2,QiskitExperiments,50000,"> 50,000"
+trapped_ion,delta_omega,Canary,1000,5000
+trapped_ion,delta_omega,QiskitExperiments,"> 50,000","> 50,000"
+trapped_ion,epsilon_sx,Canary,5000,"> 50,000"
+trapped_ion,epsilon_sx,QiskitExperiments,"> 50,000","> 50,000"
