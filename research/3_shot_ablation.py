@@ -294,13 +294,13 @@ def run_sweep():
             rng_noise = np.random.default_rng(
                 SEED + 2 + level_idx * 17 + ARCHITECTURES.index(arch) * 11)
 
-            arch_default_dw_max = (
-                inv.BackendProfile.from_true_params(
-                    arch,
-                    inv.ARCH_DEFAULTS[arch]["T1_s"],
-                    inv.ARCH_DEFAULTS[arch]["T2_s"]).dw_max_rad_s
-                if arch in ("superconducting", "trapped_ion")
-                else inv.BackendProfile.from_architecture(arch).dw_max_rad_s)
+            # Use arch-default dw_max for ALL architectures — identical to
+            # what 7_benchmark_experiments.py does.  This guarantees
+            # dw_true ≤ dw_max_prior for every instance regardless of the
+            # ±15% prior jitter, eliminating arctan2 aliasing / sign-flips
+            # that caused catastrophic negative R² in earlier runs.
+            arch_default_dw_max = inv.BackendProfile.from_architecture(
+                arch).dw_max_rad_s
 
             batch_args = []
             attempt_id = 0
@@ -308,12 +308,11 @@ def run_sweep():
                 attempt_id += 1
                 T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(
                     arch, rng_inst)
-                dw_max = (inv.BackendProfile.from_true_params(
-                              arch, T1_t, T2_t).dw_max_rad_s
-                          if arch in ("superconducting", "trapped_ion")
-                          else arch_default_dw_max)
+                # dw_max is arch-default (same as benchmark) — no per-instance
+                # true-params call here, which was the root cause of aliasing.
                 dw_t = (rng_inst.choice([-1, 1]) *
-                        rng_inst.uniform(0.2 * dw_max, dw_max))
+                        rng_inst.uniform(0.2 * arch_default_dw_max,
+                                         arch_default_dw_max))
 
                 # Perturb in the main process so RNG state is deterministic
                 # and reproducible regardless of worker scheduling order.
