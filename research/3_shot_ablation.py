@@ -1,6 +1,8 @@
 import importlib.util, pathlib, sys, csv, warnings
+import multiprocessing as mp
 import numpy as np
 from datetime import datetime, timezone
+import os as _os
 
 _spec = importlib.util.spec_from_file_location(
     "inversion", pathlib.Path(__file__).parent / "1_inversion.py")
@@ -16,6 +18,13 @@ SEED          = 45
 N_INSTANCES   = 300
 ARCHITECTURES = ["superconducting", "trapped_ion", "neutral_atom"]
 
+_arch_env = _os.environ.get("ARCH", "").strip()
+if _arch_env in ARCHITECTURES:
+    ARCHITECTURES = [_arch_env]
+
+N_WORKERS = int(_os.environ.get("N_WORKERS",
+                                max(1, mp.cpu_count() - 1)))
+
 DEFAULT_SHOTS_T1     = 300
 DEFAULT_SHOTS_RAMSEY = 1000
 DEFAULT_SHOTS_GATE   = 500
@@ -25,7 +34,7 @@ DEFAULT_TOTAL        = (3*DEFAULT_SHOTS_T1 + 6*DEFAULT_SHOTS_RAMSEY +
 
 MIN_SHOTS_PER_CIRCUIT = 10
 
-BUDGET_LEVELS = list(range(1000, 15100, 100))
+BUDGET_LEVELS = list(range(1000, 15500, 500))
 
 TRUE_PARAM_RANGES = {
     "superconducting": {
@@ -135,89 +144,115 @@ def compute_r2(true_vals, rec_vals):
     return float(1.0 - ss_res/ss_tot) if ss_tot > 0 else 0.0
 
 
+def _worker(args):
+    warnings.filterwarnings("ignore")
+    arch, T1_t, T2_t, dw_t, eps_t, attempt_id, st1, sram, sg, se = args
+    try:
+        rng_dummy = np.random.default_rng(0)
+        r = simulate_realistic_inversion(
+            arch, T1_t, T2_t, dw_t, eps_t,
+            attempt_id, rng_dummy,
+            st1, sram, sg, se)
+        if not (np.isfinite(r.T1_s) and np.isfinite(r.T2_s)):
+            return None
+        return (r.T1_s, r.T2_s, abs(r.delta_omega), r.epsilon_sx)
+    except Exception:
+        return None
+
+
 def run_sweep():
     rows = []
     n_levels = len(BUDGET_LEVELS)
+
+    tag  = ARCHITECTURES[0] if len(ARCHITECTURES) == 1 else "all"
+    ckpt = DATA_DIR / f"fig4_shot_ablation_{tag}.csv"
+
+    already_done = set()
+    if ckpt.exists():
+        existing = list(csv.DictReader(open(ckpt)))
+        rows = existing
+        for r in existing:
+            already_done.add((int(r["shots"]), r["architecture"]))
+        print(f"Resuming from checkpoint: {len(rows)} rows already saved, "
+              f"{len(already_done)} (budget,arch) pairs complete.")
 
     for level_idx, budget in enumerate(BUDGET_LEVELS):
         st1, sram, sg, se = shots_from_budget(budget)
         actual = 3*st1 + 6*sram + 3*sg + 3*se
 
-        print(f"[{level_idx+1:3d}/{n_levels}] budget={budget:6d} "
-              f"actual={actual:6d} | "
-              f"T1={st1} Ramsey={sram} Gate={sg} Echo={se}")
-
         for arch in ARCHITECTURES:
-            rng_mismatch = np.random.default_rng(SEED + 1 + level_idx * 13 +
-                                                  ARCHITECTURES.index(arch) * 7)
+            if (budget, arch) in already_done:
+                continue
+
+            print(f"[{level_idx+1:3d}/{n_levels}] budget={budget:6d} "
+                  f"actual={actual:6d} arch={arch}", flush=True)
+
+            rng_inst = np.random.default_rng(
+                SEED + 1 + level_idx * 13 + ARCHITECTURES.index(arch) * 7)
 
             arch_default_dw_max = (
-                inv.BackendProfile.from_true_params(arch,
+                inv.BackendProfile.from_true_params(
+                    arch,
                     inv.ARCH_DEFAULTS[arch]["T1_s"],
                     inv.ARCH_DEFAULTS[arch]["T2_s"]).dw_max_rad_s
                 if arch in ("superconducting", "trapped_ion")
                 else inv.BackendProfile.from_architecture(arch).dw_max_rad_s)
 
-            rec = {k: [] for k in [
-                "T1_true","T1_rec","T2_true","T2_rec",
-                "dw_true","dw_rec","eps_true","eps_rec"]}
+            batch_args = []
+            attempt_id = 0
+            while len(batch_args) < int(N_INSTANCES * 1.2):
+                attempt_id += 1
+                T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(
+                    arch, rng_inst)
+                dw_max = (inv.BackendProfile.from_true_params(
+                              arch, T1_t, T2_t).dw_max_rad_s
+                          if arch in ("superconducting", "trapped_ion")
+                          else arch_default_dw_max)
+                dw_t = (rng_inst.choice([-1, 1]) *
+                        rng_inst.uniform(0.2 * dw_max, dw_max))
+                batch_args.append((arch, T1_t, T2_t, dw_t, eps_t,
+                                   attempt_id, st1, sram, sg, se))
 
-            success  = 0
-            attempts = 0
-            while success < N_INSTANCES:
-                attempts += 1
-                try:
-                    T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(
-                        arch, rng_mismatch)
+            rec = {"T1_true":[],"T1_rec":[],"T2_true":[],"T2_rec":[],
+                   "dw_true":[],"dw_rec":[],"eps_true":[],"eps_rec":[]}
 
-                    if arch in ("superconducting", "trapped_ion"):
-                        dw_max = inv.BackendProfile.from_true_params(
-                            arch, T1_t, T2_t).dw_max_rad_s
-                    else:
-                        dw_max = arch_default_dw_max
-
-                    dw_t = rng_mismatch.choice([-1, 1]) * \
-                           rng_mismatch.uniform(0.2*dw_max, dw_max)
-
-                    r = simulate_realistic_inversion(
-                        arch, T1_t, T2_t, dw_t, eps_t,
-                        attempts, rng_mismatch,
-                        st1, sram, sg, se)
-
-                    if not (np.isfinite(r.T1_s) and np.isfinite(r.T2_s)):
+            with mp.Pool(N_WORKERS) as pool:
+                for res, args in zip(
+                        pool.imap(_worker, batch_args), batch_args):
+                    if res is None or len(rec["T1_true"]) >= N_INSTANCES:
                         continue
-
-                    rec["T1_true"].append(T1_t);   rec["T1_rec"].append(r.T1_s)
-                    rec["T2_true"].append(T2_t);   rec["T2_rec"].append(r.T2_s)
-                    rec["dw_true"].append(abs(dw_t)); rec["dw_rec"].append(abs(r.delta_omega))
-                    rec["eps_true"].append(eps_t); rec["eps_rec"].append(r.epsilon_sx)
-                    success += 1
-                except Exception:
-                    continue
+                    _, T1_t, T2_t, dw_t, eps_t = args[:5]
+                    rec["T1_true"].append(T1_t);  rec["T1_rec"].append(res[0])
+                    rec["T2_true"].append(T2_t);  rec["T2_rec"].append(res[1])
+                    rec["dw_true"].append(abs(dw_t)); rec["dw_rec"].append(res[2])
+                    rec["eps_true"].append(eps_t);rec["eps_rec"].append(res[3])
 
             r2_T1  = compute_r2(rec["T1_true"],  rec["T1_rec"])
             r2_T2  = compute_r2(rec["T2_true"],  rec["T2_rec"])
             r2_dw  = compute_r2(rec["dw_true"],  rec["dw_rec"])
             r2_eps = compute_r2(rec["eps_true"],  rec["eps_rec"])
+            n      = len(rec["T1_true"])
 
-            print(f"         {arch:18s} | "
-                  f"T1={r2_T1:.4f} T2={r2_T2:.4f} "
-                  f"dw={r2_dw:.4f} eps={r2_eps:.4f}")
+            print(f"         n={n} | T1={r2_T1:.4f} T2={r2_T2:.4f} "
+                  f"dw={r2_dw:.4f} eps={r2_eps:.4f}", flush=True)
 
             for param, r2 in [("T1", r2_T1), ("T2", r2_T2),
                                ("delta_omega", r2_dw), ("epsilon_sx", r2_eps)]:
-                rows.append({
-                    "shots":        budget,
-                    "architecture": arch,
-                    "parameter":    param,
-                    "r2":           f"{r2:.6f}",
-                })
+                rows.append({"shots": budget, "architecture": arch,
+                              "parameter": param, "r2": f"{r2:.6f}"})
+
+            with open(ckpt, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=["shots","architecture",
+                                                   "parameter","r2"])
+                w.writeheader()
+                w.writerows(rows)
 
     return rows
 
 
 def save_csv(rows):
-    path = DATA_DIR / "fig4_shot_ablation.csv"
+    tag  = ARCHITECTURES[0] if len(ARCHITECTURES) == 1 else "all"
+    path = DATA_DIR / f"fig4_shot_ablation_{tag}.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["shots", "architecture",
                                           "parameter", "r2"])
