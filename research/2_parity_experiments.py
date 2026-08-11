@@ -68,21 +68,21 @@ REALISTIC_NOISE = {
         "T2_reduction_max":    0.12,
         "sigma_coherent_rad":  0.010,
         "sigma_SPAM_frac":     0.05,
-        "sigma_dw_rad_s":      50.0,
+        "sigma_dw_rad_s":      0.0,
     },
     "trapped_ion": {
         "sigma_T1_lognormal":  0.00,
         "T2_reduction_max":    0.10,
         "sigma_coherent_rad":  0.005,
         "sigma_SPAM_frac":     0.03,
-        "sigma_dw_rad_s":      200.0,
+        "sigma_dw_rad_s":      0.0,
     },
     "neutral_atom": {
         "sigma_T1_lognormal":  0.03,
         "T2_reduction_max":    0.15,
         "sigma_coherent_rad":  0.015,
         "sigma_SPAM_frac":     0.08,
-        "sigma_dw_rad_s":      500.0,
+        "sigma_dw_rad_s":      0.0,
     },
 }
 
