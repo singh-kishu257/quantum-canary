@@ -141,6 +141,82 @@ def sample_instance(rng, arch_name):
     return T1, T2, dw, eps
 
 
+REALISTIC_NOISE = {
+    "superconducting": {
+        "sigma_T1_lognormal": 0.15,
+        "T2_reduction_max":   0.12,
+        "sigma_coherent_rad": 0.010,
+        "sigma_SPAM_frac":    0.05,
+    },
+    "trapped_ion": {
+        "sigma_T1_lognormal": 0.00,
+        "T2_reduction_max":   0.10,
+        "sigma_coherent_rad": 0.005,
+        "sigma_SPAM_frac":    0.03,
+    },
+    "neutral_atom": {
+        "sigma_T1_lognormal": 0.03,
+        "T2_reduction_max":   0.15,
+        "sigma_coherent_rad": 0.015,
+        "sigma_SPAM_frac":    0.08,
+    },
+}
+
+
+def _perturb_instance(arch_name, T1, T2, eps, p0g1_nom, p1g0_nom, rng):
+    """Apply architecture-specific unmodeled hardware physics to one instance.
+
+    Returns effective (T1_eff, T2_eff, eps_eff, p0g1_eff, p1g0_eff) that
+    are passed to BOTH run_canary and run_qe, so both methods see identical
+    simulated hardware and neither is advantaged or disadvantaged.
+
+    Neither method knows the effective values — Canary uses
+    BackendProfile.from_architecture() (arch-typical prior) and QE uses
+    arch-typical delay grids. Both are equally blind to the drift.
+
+    Perturbations:
+      T1  : log-normal TLS fluctuator (Klimov et al. PRL 2018;
+                                        Carroll et al. npj QI 2022)
+      T2  : uniform fractional reduction from quasi-static 1/f dephasing
+            (same references; also micromotion for trapped-ion,
+             laser phase noise for neutral-atom)
+      eps : coherent over-rotation delta ~ N(0, sigma_coh), adds
+            eps_coh = delta^2/4 to depolarising (Rol et al. PRL 2019,
+            first-order Magnus)
+      SPAM: calibration drift, multiplicative fractional noise
+            (Bultink et al. PRApplied 2018)
+
+    No dw perturbation: sigma_dw interacts with Canary's hard arctan2
+    bounds in a way that depends on the per-instance profile dw_max,
+    which varies with T2_prior and cannot be safely bounded by a fixed
+    sigma. Omitting it is the correct choice — dw recovery is already
+    characterised in the ideal Markovian scenario.
+    """
+    arch = inv.ARCH_DEFAULTS[arch_name]
+    cfg  = REALISTIC_NOISE[arch_name]
+
+    if cfg["sigma_T1_lognormal"] > 0.0:
+        T1_eff = float(np.clip(
+            T1 * np.exp(rng.normal(0.0, cfg["sigma_T1_lognormal"])),
+            arch["T1_min_s"], arch["T1_max_s"]))
+    else:
+        T1_eff = T1
+
+    T2_eff = float(np.clip(
+        T2 * (1.0 - rng.uniform(0.0, cfg["T2_reduction_max"])),
+        arch["T2_min_s"], min(2.0 * T1_eff, arch["T1_max_s"])))
+
+    delta_coh = rng.normal(0.0, cfg["sigma_coherent_rad"])
+    eps_eff   = float(np.clip(eps + delta_coh ** 2 / 4.0, 0.0, arch["eps_max"]))
+
+    p0g1_eff = float(np.clip(
+        p0g1_nom * (1.0 + rng.normal(0.0, cfg["sigma_SPAM_frac"])), 0.0, 0.30))
+    p1g0_eff = float(np.clip(
+        p1g0_nom * (1.0 + rng.normal(0.0, cfg["sigma_SPAM_frac"])), 0.0, 0.30))
+
+    return T1_eff, T2_eff, eps_eff, p0g1_eff, p1g0_eff
+
+
 def _make_backend(qc, T1, T2, eps, p0g1, p1g0, gate_time_ns, dt_ns):
     from qiskit_aer import AerSimulator
     from qiskit_aer.noise import (NoiseModel, thermal_relaxation_error,
@@ -308,11 +384,12 @@ def _qe_backend(arch_name: str = "superconducting"):
         return FakeNairobiV2()
 
 
-def run_canary(T1_true, T2_true, dw_true, eps_true, seed, budget, arch_name):
+def run_canary(T1_true, T2_true, dw_true, eps_true, seed, budget, arch_name,
+               p0g1_eff=None, p1g0_eff=None):
     arch    = inv.ARCH_DEFAULTS[arch_name]
     profile = inv.BackendProfile.from_architecture(arch_name)
-    p0g1    = arch["p0_given_1"]
-    p1g0    = arch["p1_given_0"]
+    p0g1    = p0g1_eff if p0g1_eff is not None else arch["p0_given_1"]
+    p1g0    = p1g0_eff if p1g0_eff is not None else arch["p1_given_0"]
 
     circuits, meta = inv.build_probe_circuits(profile)
 
@@ -343,25 +420,13 @@ def run_canary(T1_true, T2_true, dw_true, eps_true, seed, budget, arch_name):
         return float("nan"), float("nan"), float("nan"), float("nan")
 
 
-def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name):
-    # Δω interpretation, by architecture:
-    #  - superconducting: the reference backend's basis gates and native
-    #    timescale match the target architecture, so a Δω failure here is
-    #    attributable to the fixed 15-point delay grid's Nyquist limit
-    #    versus the realistic detuning range — a genuine estimator/schedule
-    #    limitation of the reference protocol.
-    #  - trapped_ion / neutral_atom: the reference backend is still a
-    #    superconducting-style device (see _qe_backend() docstring) — the
-    #    comparison carries a disclosed basis-gate mismatch on top of
-    #    whatever the delay-grid/Nyquist behavior would otherwise be, so a
-    #    Δω failure for these two architectures should be reported as a
-    #    reference-protocol methodology limitation, not attributed to the
-    #    same Nyquist mechanism claimed for superconducting.
+def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
+           p0g1_eff=None, p1g0_eff=None):
     from qiskit_experiments.library import (T1 as QE_T1, T2Ramsey,
                                             T2Hahn, StandardRB)
     arch         = inv.ARCH_DEFAULTS[arch_name]
-    p0g1         = arch["p0_given_1"]
-    p1g0         = arch["p1_given_0"]
+    p0g1         = p0g1_eff if p0g1_eff is not None else arch["p0_given_1"]
+    p1g0         = p1g0_eff if p1g0_eff is not None else arch["p1_given_0"]
     T1_pr        = arch["T1_s"]
     T2_pr        = arch["T2_s"]
     eps_max      = arch["eps_max"]
@@ -552,27 +617,41 @@ def nrmse(true_vals, rec_vals):
 
 def _worker_canary(args):
     warnings.filterwarnings("ignore")
-    idx, (T1, T2, dw, eps), seed, budget, arch_name = args
+    idx, (T1, T2, dw, eps), seed, budget, arch_name, p0g1_eff, p1g0_eff = args
     t0  = time.perf_counter()
-    res = run_canary(T1, T2, dw, eps, seed, budget, arch_name)
+    res = run_canary(T1, T2, dw, eps, seed, budget, arch_name, p0g1_eff, p1g0_eff)
     return idx, res, time.perf_counter() - t0
 
 
 def _worker_qe(args):
     warnings.filterwarnings("ignore")
-    idx, (T1, T2, dw, eps), budget, seed, arch_name = args
+    idx, (T1, T2, dw, eps), budget, seed, arch_name, p0g1_eff, p1g0_eff = args
     t0  = time.perf_counter()
-    res = run_qe(T1, T2, dw, eps, budget, seed, arch_name)
+    res = run_qe(T1, T2, dw, eps, budget, seed, arch_name, p0g1_eff, p1g0_eff)
     return idx, res, time.perf_counter() - t0
 
 
 def run_sweep(n_workers):
-    rng_master = np.random.default_rng(SEED)
-    instances  = [sample_instance(rng_master, ARCH) for _ in range(N_INSTANCES)]
-    rows       = []
+    rng_master  = np.random.default_rng(SEED)
+    instances   = [sample_instance(rng_master, ARCH) for _ in range(N_INSTANCES)]
+
+    rng_perturb = np.random.default_rng(SEED + 999)
+    arch_def    = inv.ARCH_DEFAULTS[ARCH]
+    perturbed   = [
+        _perturb_instance(
+            ARCH,
+            inst[0], inst[1], inst[3],
+            arch_def["p0_given_1"], arch_def["p1_given_0"],
+            rng_perturb)
+        for inst in instances
+    ]
+
+    rows = []
 
     print(f"  ARCH={ARCH}  N={N_INSTANCES}  budgets={SHOT_BUDGETS}  workers={n_workers}", flush=True)
     print(f"  Canary={CANARY_TOTAL} shots | QE=budget/4 per exp | osc_freq=arch-typical | RB lengths={QE_RB_LENGTHS}", flush=True)
+    print(f"  Realistic noise: TLS T1 drift, 1/f T2 reduction, coherent over-rotation, SPAM drift", flush=True)
+    print(f"  Perturbations applied once per instance; identical effective params fed to both methods.", flush=True)
 
     for bi, budget in enumerate(SHOT_BUDGETS):
         print(f"\n[{bi+1}/{len(SHOT_BUDGETS)}] budget={budget:,}  arch={ARCH}", flush=True)
@@ -580,10 +659,20 @@ def run_sweep(n_workers):
         c_seed_base = SEED * 10_000 + bi * 1_000
         q_seed_base = c_seed_base + 500
 
-        c_args = [(i, inst, c_seed_base + i, budget, ARCH)
-                  for i, inst in enumerate(instances)]
-        q_args = [(i, inst, budget, q_seed_base + i, ARCH)
-                  for i, inst in enumerate(instances)]
+        c_args = [
+            (i,
+             (perturbed[i][0], perturbed[i][1], instances[i][2], perturbed[i][2]),
+             c_seed_base + i, budget, ARCH,
+             perturbed[i][3], perturbed[i][4])
+            for i in range(N_INSTANCES)
+        ]
+        q_args = [
+            (i,
+             (perturbed[i][0], perturbed[i][1], instances[i][2], perturbed[i][2]),
+             budget, q_seed_base + i, ARCH,
+             perturbed[i][3], perturbed[i][4])
+            for i in range(N_INSTANCES)
+        ]
 
         c_res  = [None] * N_INSTANCES;  c_time = [float("nan")] * N_INSTANCES
         q_res  = [None] * N_INSTANCES;  q_time = [float("nan")] * N_INSTANCES
@@ -597,10 +686,10 @@ def run_sweep(n_workers):
                 q_res[idx]  = res;  q_time[idx] = t
 
         true = {
-            "T1":          [abs(inst[0]) for inst in instances],
-            "T2":          [abs(inst[1]) for inst in instances],
-            "delta_omega": [abs(inst[2]) for inst in instances],
-            "epsilon_sx":  [abs(inst[3]) for inst in instances],
+            "T1":          [perturbed[i][0] for i in range(N_INSTANCES)],
+            "T2":          [perturbed[i][1] for i in range(N_INSTANCES)],
+            "delta_omega": [abs(instances[i][2]) for i in range(N_INSTANCES)],
+            "epsilon_sx":  [perturbed[i][2] for i in range(N_INSTANCES)],
         }
 
         for pname, pidx in PARAMS:

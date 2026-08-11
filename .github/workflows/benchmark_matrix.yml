@@ -67,7 +67,7 @@ jobs:
           merge-multiple: true
 
       - name: Merge into single CSV, threshold table, and figure
-        run: 
+        run: |
           cd research
           python 7b_merge_results.py
 
