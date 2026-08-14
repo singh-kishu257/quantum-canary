@@ -1,37 +1,60 @@
-name: Canary Noise-Class Detection AUC Study
+name: Canary Null Calibration and Non-Markovian Gradient Study
+
+# Runs 3_null_nonm.py as a parallel matrix over (architecture x phase),
+# then merges every job's CSV output and produces the final two-panel
+# figure in a combine job.
+#
+# Place this file at: .github/workflows/canary_null_nonm.yml
+# Assumes 1_inversion.py and 3_null_nonm.py live at: quantum-canary/research/
 
 on:
   workflow_dispatch:
     inputs:
-      n_instances:
-        description: "Instances per (noise class, amplitude) cell"
+      n_null:
+        description: "Null instances for Phase 1 (false-positive audit)"
         required: false
-        default: "30"
+        default: "500"
+      n_grad:
+        description: "Instances per gradient amplitude point (Phase 2)"
+        required: false
+        default: "20"
       n_bootstrap:
-        description: "Bootstrap resamples for AUC confidence intervals"
+        description: "Bootstrap resamples for gradient CI"
         required: false
-        default: "2000"
+        default: "1000"
       detection_budget:
         description: "Total shots per Canary run (native protocol = 9900)"
         required: false
         default: "9900"
+      fp_threshold:
+        description: "chi2/dof threshold for the false-positive-rate report"
+        required: false
+        default: "3.0"
   push:
     paths:
-      - "research/3_canary_detection.py"
+      - "research/3_null_nonm.py"
       - "research/1_inversion.py"
-      - ".github/workflows/canary_detection.yml"
+      - ".github/workflows/canary_null_nonm.yml"
 
 permissions:
   contents: read
 
 env:
-  N_INSTANCES: ${{ github.event.inputs.n_instances || '30' }}
-  N_BOOTSTRAP: ${{ github.event.inputs.n_bootstrap || '2000' }}
+  N_NULL: ${{ github.event.inputs.n_null || '500' }}
+  N_GRAD: ${{ github.event.inputs.n_grad || '20' }}
+  N_BOOTSTRAP: ${{ github.event.inputs.n_bootstrap || '1000' }}
   DETECTION_BUDGET: ${{ github.event.inputs.detection_budget || '9900' }}
+  FP_THRESHOLD: ${{ github.event.inputs.fp_threshold || '3.0' }}
 
 jobs:
-  detect:
-    name: detect (${{ matrix.arch }} / ${{ matrix.noise_class }})
+  # ---------------------------------------------------------------------
+  # One parallel job per (architecture, phase) pair -- 3 x 2 = 6 jobs.
+  # Phase 1 (null) is the larger job per-architecture (N_NULL=500 single-
+  # circuit-batch instances); Phase 2 (gradient) sweeps 3 noise classes x
+  # 9 amplitude points x N_GRAD instances internally within its own job.
+  # ---------------------------------------------------------------------
+  run:
+    name: run (${{ matrix.arch }} / ${{ matrix.phase }})
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -40,12 +63,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [superconducting, trapped_ion, neutral_atom]
-        noise_class:
-          - t1_telegraph
-          - quasistatic_dephasing
-          - coherent_gate
-          - spam_drift
-          - combined
+        phase: [null, gradient]
 
     steps:
       - name: Check out repository
@@ -60,34 +78,41 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-canary-${{ hashFiles('**/requirements*.txt') }}
+          key: ${{ runner.os }}-pip-canary-nullnonm-${{ hashFiles('**/requirements*.txt') }}
           restore-keys: |
-            ${{ runner.os }}-pip-canary-
+            ${{ runner.os }}-pip-canary-nullnonm-
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install numpy scipy matplotlib qiskit qiskit-aer
 
-      - name: Run detection sweep
+      - name: Run
         env:
           ARCH: ${{ matrix.arch }}
-          NOISE_CLASS: ${{ matrix.noise_class }}
+          PHASE: ${{ matrix.phase }}
           N_WORKERS: 4
-          JOB_TAG: detect_${{ matrix.arch }}_${{ matrix.noise_class }}
-        run: python 3_canary_detection.py
+          JOB_TAG: nonm_${{ matrix.arch }}_${{ matrix.phase }}
+        run: python 3_null_nonm.py
 
       - name: Upload per-job CSV artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: detect-data-${{ matrix.arch }}-${{ matrix.noise_class }}
-          path: research/data/detect_*_detect_${{ matrix.arch }}_${{ matrix.noise_class }}.csv
+          name: nullnonm-data-${{ matrix.arch }}-${{ matrix.phase }}
+          path: |
+            research/data/nullraw_nonm_${{ matrix.arch }}_${{ matrix.phase }}.csv
+            research/data/nullsummary_nonm_${{ matrix.arch }}_${{ matrix.phase }}.csv
+            research/data/gradraw_nonm_${{ matrix.arch }}_${{ matrix.phase }}.csv
+            research/data/gradsummary_nonm_${{ matrix.arch }}_${{ matrix.phase }}.csv
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: ignore
+          # ignore (not error): a "null"-phase job never produces gradraw/
+          # gradsummary files and vice versa -- each job only writes the
+          # pair of CSVs relevant to its own PHASE.
 
   combine:
     name: combine + plot
-    needs: detect
+    needs: run
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -111,33 +136,37 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: research/data_incoming
-          pattern: detect-data-*
+          pattern: nullnonm-data-*
           merge-multiple: false
 
       - name: Flatten downloaded artifacts into research/data/
         run: |
           mkdir -p data
-          find data_incoming -type f -name "detect_*.csv" -exec cp {} data/ \;
+          find data_incoming -type f \( -name "nullraw_*.csv" -o \
+            -name "nullsummary_*.csv" -o -name "gradraw_*.csv" -o \
+            -name "gradsummary_*.csv" \) -exec cp {} data/ \;
           echo "Collected CSVs:"
           ls -la data/
 
       - name: Merge CSVs and produce figures
         env:
           COMBINE: "1"
-          N_INSTANCES: ${{ env.N_INSTANCES }}
+          N_NULL: ${{ env.N_NULL }}
+          N_GRAD: ${{ env.N_GRAD }}
           DETECTION_BUDGET: ${{ env.DETECTION_BUDGET }}
-        run: python 3_canary_detection.py
+        run: python 3_null_nonm.py
 
       - name: Upload merged data + figures
         uses: actions/upload-artifact@v4
         with:
-          name: detect-final-results
+          name: nullnonm-final-results
           path: |
-            research/data/detect_raw_ALL.csv
-            research/data/detect_auc_ALL.csv
-            research/figures/fig_detection_roc_grid.pdf
-            research/figures/fig_detection_roc_grid.png
-            research/figures/fig_detection_auc_summary.pdf
-            research/figures/fig_detection_auc_summary.png
+            research/data/nullraw_ALL.csv
+            research/data/nullsummary_ALL.csv
+            research/data/gradraw_ALL.csv
+            research/data/gradsummary_ALL.csv
+            research/figures/fig_null_gradient.pdf
+            research/figures/fig_null_gradient.png
+            research/figures/null_calibration_summary.txt
           retention-days: 90
           if-no-files-found: error
