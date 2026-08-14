@@ -1,118 +1,116 @@
-"""
-Reads : research/data/fig4_shot_ablation.csv
-Output: research/figures/fig4_efficiency.pdf
-
-Single panel. Mean R² across all three architectures vs total shot budget,
-for all four parameters. Rolling average applied to suppress finite-N
-sampling noise. Deployed 9,900-shot budget marked.
-"""
-
-import pathlib, sys
-import numpy as np
-import pandas as pd
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import numpy as np
+import csv
+from collections import defaultdict
+import pathlib
 
-SCRIPT_DIR  = pathlib.Path(__file__).resolve().parent
-CSV_PATH    = SCRIPT_DIR / "data" / "fig4_shot_ablation.csv"
-FIGURES_DIR = SCRIPT_DIR / "figures"
-FIGURES_DIR.mkdir(exist_ok=True)
+BASE = pathlib.Path(__file__).parent
+data = defaultdict(lambda: defaultdict(dict))
+with open(BASE / 'data' / 'fig7_benchmark.csv') as f:
+    for row in csv.DictReader(f):
+        if row['method'] != 'Canary':
+            continue
+        data[row['architecture']][row['parameter']][int(row['budget'])] = {
+            'r2': float(row['r2']),
+            'lo': float(row['r2_lo']),
+            'hi': float(row['r2_hi']),
+        }
 
-PARAMETERS = ["T1", "T2", "delta_omega", "epsilon_sx"]
+ARCHS        = ['superconducting', 'trapped_ion', 'neutral_atom']
+ARCH_LABELS  = ['Superconducting', 'Trapped-ion', 'Neutral atom']
+PARAMS       = ['T1', 'T2', 'delta_omega', 'epsilon_sx']
+PARAM_LABELS = [r'$T_1$', r'$T_2$', r'$\Delta\omega$', r'$\varepsilon_{sx}$']
+NATIVE       = 9900
 
-PARAM_LABEL  = {"T1":          r"$T_1$",
-                "T2":          r"$T_2$",
-                "delta_omega": r"$|\Delta\omega|$",
-                "epsilon_sx":  r"$\varepsilon_{sx}$"}
-PARAM_COLOR  = {"T1":          "#1f77b4",
-                "T2":          "#d62728",
-                "delta_omega": "#2ca02c",
-                "epsilon_sx":  "#ff7f0e"}
-PARAM_MARKER = {"T1":          "o",
-                "T2":          "s",
-                "delta_omega": "^",
-                "epsilon_sx":  "D"}
+COLORS  = {'T1':'#3A6B9E', 'T2':'#4A8A60',
+           'delta_omega':'#7050A0', 'epsilon_sx':'#A05030'}
+MARKERS = {'T1':'o', 'T2':'s', 'delta_omega':'^', 'epsilon_sx':'D'}
 
-SMOOTH_WINDOW = 7   # rolling-average window (budget steps = 700 shots)
-DEPLOYED      = 9_900
+YMIN, YMAX = -0.10, 1.010
 
+FW, FH = 7.16, 2.90
+fig, axes = plt.subplots(1, 3, figsize=(FW, FH), sharey=True)
+fig.patch.set_facecolor('white')
 
-def load():
-    if not CSV_PATH.exists():
-        sys.exit(f"ERROR: {CSV_PATH} not found.")
-    df = pd.read_csv(CSV_PATH)
-    df["shots"] = df["shots"].astype(int)
-    df["r2"]    = df["r2"].astype(float)
-    return df
+for col, (arch, arch_label) in enumerate(zip(ARCHS, ARCH_LABELS)):
+    ax = axes[col]
+    ax.set_facecolor('#F8F9FA')
+    ax.set_xscale('log')
 
+    for param, plabel in zip(PARAMS, PARAM_LABELS):
+        d = data[arch][param]
+        budgets = sorted(d.keys())
+        r2s = [max(d[b]['r2'], YMIN) for b in budgets]   # clip for display
+        raw = [d[b]['r2'] for b in budgets]
+        los = [max(d[b]['lo'], YMIN) for b in budgets]
+        his = [min(d[b]['hi'], YMAX) for b in budgets]
 
-def make_figure(df):
-    fig, ax = plt.subplots(figsize=(7.16, 3.80))
-    fig.subplots_adjust(left=0.10, right=0.97, top=0.88, bottom=0.14)
+        ax.plot(budgets, r2s, color=COLORS[param], lw=1.4,
+                marker=MARKERS[param], ms=4.0, mfc=COLORS[param],
+                mec=COLORS[param], label=plabel, zorder=4, clip_on=True)
+        ax.fill_between(budgets, los, his,
+                        color=COLORS[param], alpha=0.13, zorder=3)
 
-    budgets = sorted(df["shots"].unique())
+        # Annotate clipped points (negative R²)
+        for b, v in zip(budgets, raw):
+            if v < YMIN:
+                ax.text(b, YMIN + 0.005, f'{v:.0f}↓',
+                        ha='center', va='bottom', fontsize=4.2,
+                        color=COLORS[param], zorder=5,
+                        bbox=dict(fc='white', ec='none', pad=0.5, alpha=0.7))
 
-    for param in PARAMETERS:
-        sub  = df[df["parameter"] == param]
-        mean = sub.groupby("shots")["r2"].mean().reindex(budgets).values
+    # R²=0.95 line
+    ax.axhline(0.95, color='#999999', lw=0.7, ls='--', zorder=2)
+    # Native budget line
+    ax.axvline(NATIVE, color='#3A4A5A', lw=0.8, ls=':', zorder=2, alpha=0.7)
 
-        # smoothed line
-        smoothed = pd.Series(mean).rolling(
-            SMOOTH_WINDOW, center=True, min_periods=1).mean().values
+    ax.set_title(arch_label, fontsize=8.5, fontweight='bold',
+                 color='#1A2535', pad=3)
+    ax.set_xlabel('Shot budget', fontsize=7.5, labelpad=3)
+    if col == 0:
+        ax.set_ylabel(r'$R^2$', fontsize=8.0)
 
-        # faint raw line
-        ax.plot(budgets, mean,
-                color=PARAM_COLOR[param],
-                linestyle="-", linewidth=0.5,
-                alpha=0.20, zorder=2)
+    ax.set_ylim(YMIN, YMAX)
+    ax.set_xlim(800, 62000)
+    ax.tick_params(labelsize=6.5)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(
+        lambda x, _: f'{int(x/1000):d}k' if x >= 1000 else str(int(x))))
 
-        # smooth line with markers
-        ax.plot(budgets, smoothed,
-                color=PARAM_COLOR[param],
-                linestyle="-", linewidth=1.6,
-                marker=PARAM_MARKER[param],
-                markersize=3.5, markevery=10,
-                alpha=0.95, zorder=3,
-                label=PARAM_LABEL[param])
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(0.2))
+    ax.yaxis.set_minor_locator(mticker.MultipleLocator(0.1))
+    ax.grid(axis='y', which='major', color='#CCCCCC', lw=0.5, zorder=1)
+    ax.grid(axis='y', which='minor', color='#EEEEEE', lw=0.3, zorder=1)
+    ax.grid(axis='x', which='major', color='#DDDDDD', lw=0.4, zorder=1)
 
-    # R²=0.95 reference
-    ax.axhline(0.95, color="#666666", linestyle="--", linewidth=0.9, zorder=1)
-    ax.text(1000, 0.952, r"$R^2=0.95$",
-            fontsize=7.0, color="#666666", va="bottom")
+    # 0.95 label on first panel only
+    if col == 0:
+        ax.text(870, 0.957, r'$R^2\!=\!0.95$',
+                ha='left', va='bottom', fontsize=5.0, color='#888888')
+    # Native budget label
+    ax.text(NATIVE*1.06, 0.02, '9,900\nshots', ha='left', va='bottom',
+            fontsize=4.8, color='#3A4A5A', linespacing=1.2)
 
-    # deployed budget
-    ax.axvline(DEPLOYED, color="#333333", linestyle="--",
-               linewidth=1.1, zorder=4, alpha=0.7)
-    ax.text(DEPLOYED + 200, 0.705,
-            f"{DEPLOYED:,} shots\n(deployed)",
-            fontsize=6.5, color="#333333", va="bottom", rotation=90)
+    for spine in ax.spines.values():
+        spine.set_edgecolor('#BBBBBB')
+        spine.set_linewidth(0.6)
 
-    ax.set_xlim(800, 15_500)
-    ax.set_ylim(0.68, 1.005)
-    ax.set_xlabel("Total shot budget", fontsize=8.5)
-    ax.set_ylabel(r"$R^2$ (mean across SC / TI / NA, realistic noise)",
-                  fontsize=8.5)
-    ax.tick_params(labelsize=7.5)
-    ax.grid(True, which="major", linewidth=0.35, alpha=0.45)
+# Legend
+handles, labels = axes[1].get_legend_handles_labels()
+fig.legend(handles, labels, loc='lower center', ncol=4,
+           fontsize=7.2, framealpha=0.95, edgecolor='#AAAAAA',
+           fancybox=False, bbox_to_anchor=(0.5, 0.0),
+           handlelength=1.6, handletextpad=0.4, columnspacing=1.0)
 
-    ax.legend(fontsize=8.5, frameon=True, loc="lower right",
-              framealpha=0.9, edgecolor="#cccccc",
-              handlelength=2.0, handletextpad=0.5,
-              ncol=2, columnspacing=1.0)
+plt.subplots_adjust(left=0.07, right=0.99, top=0.92, bottom=0.20,
+                    wspace=0.10)
+fig.suptitle('Shot-budget efficiency  ·  Canary  ·  all parameters & architectures',
+             fontsize=8.0, fontweight='bold', color='#1A2535', y=0.99)
 
-    ax.set_title(
-        r"Fig. 4 — Shot-Budget Efficiency  "
-        r"($N=300$/arch, realistic noise, seed=45)  "
-        r"[smoothed: 7-point rolling mean]",
-        fontsize=7.5, pad=5)
-
-    out = FIGURES_DIR / "fig4_efficiency.pdf"
-    fig.savefig(out, dpi=300, bbox_inches="tight")
-    fig.savefig(str(out).replace(".pdf", ".png"), dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved: {out}")
-
-
-if __name__ == "__main__":
-    make_figure(load())
+plt.savefig(BASE / 'figures' / 'fig4_efficiency.png', dpi=300,
+            bbox_inches='tight', facecolor='white', pad_inches=0.03)
+plt.savefig(BASE / 'figures' / 'fig4_efficiency.pdf', dpi=300,
+            bbox_inches='tight', facecolor='white', pad_inches=0.03)
+print("Done.")

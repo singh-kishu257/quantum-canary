@@ -1,0 +1,161 @@
+name: Canary Noise-Class Detection AUC Study
+
+# Runs 3_canary_detection.py as a parallel matrix over
+# (architecture x noise_class), then merges every job's CSV output and
+# produces the final ROC-grid and AUC-summary figures in a combine job.
+#
+# Place this file at: .github/workflows/canary_detection.yml
+# Place 1_inversion.py and 3_canary_detection.py at the repo root (or
+# adjust `working-directory` / SCRIPT_DIR below to match your layout).
+
+on:
+  workflow_dispatch:
+    inputs:
+      n_instances:
+        description: "Instances per (noise class, amplitude) cell"
+        required: false
+        default: "30"
+      n_bootstrap:
+        description: "Bootstrap resamples for AUC confidence intervals"
+        required: false
+        default: "2000"
+      detection_budget:
+        description: "Total shots per Canary run (native protocol = 9900)"
+        required: false
+        default: "9900"
+  push:
+    paths:
+      - "3_canary_detection.py"
+      - "1_inversion.py"
+      - ".github/workflows/canary_detection.yml"
+
+permissions:
+  contents: read
+
+env:
+  N_INSTANCES: ${{ github.event.inputs.n_instances || '30' }}
+  N_BOOTSTRAP: ${{ github.event.inputs.n_bootstrap || '2000' }}
+  DETECTION_BUDGET: ${{ github.event.inputs.detection_budget || '9900' }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # One parallel job per (architecture, noise_class) pair -- 3 x 5 = 15
+  # jobs, plus each job independently regenerates the shared null pool for
+  # its own architecture (cheap relative to the injected-noise sweep, and
+  # keeps every job fully self-contained / re-runnable in isolation).
+  # ---------------------------------------------------------------------
+  detect:
+    name: detect (${{ matrix.arch }} / ${{ matrix.noise_class }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [superconducting, trapped_ion, neutral_atom]
+        noise_class:
+          - t1_telegraph
+          - quasistatic_dephasing
+          - coherent_gate
+          - spam_drift
+          - combined
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-canary-detection-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-canary-detection-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy scipy matplotlib qiskit qiskit-aer
+
+      - name: Run detection sweep
+        env:
+          ARCH: ${{ matrix.arch }}
+          NOISE_CLASS: ${{ matrix.noise_class }}
+          N_WORKERS: 4
+          JOB_TAG: detect_${{ matrix.arch }}_${{ matrix.noise_class }}
+        run: |
+          python 3_canary_detection.py
+
+      - name: Upload per-job CSV artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: detect-data-${{ matrix.arch }}-${{ matrix.noise_class }}
+          path: data/detect_*_detect_${{ matrix.arch }}_${{ matrix.noise_class }}.csv
+          retention-days: 30
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # NULL pool is architecture-only (no noise_class axis), so it is
+  # generated once per architecture rather than duplicated 5x inside every
+  # matrix cell above -- run_sweep() inside 3_canary_detection.py already
+  # regenerates it deterministically (same SEED) per job, so the merge
+  # step below simply keeps the first null pool it sees per architecture
+  # and discards duplicates; nothing further is needed here. This job
+  # exists only to make that behaviour explicit in the workflow graph.
+  # ---------------------------------------------------------------------
+
+  combine:
+    name: combine + plot
+    needs: detect
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy scipy matplotlib qiskit qiskit-aer
+
+      - name: Download all per-job CSV artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: data_incoming
+          pattern: detect-data-*
+          merge-multiple: false
+
+      - name: Flatten downloaded artifacts into data/
+        run: |
+          mkdir -p data
+          find data_incoming -type f -name "detect_*.csv" -exec cp {} data/ \;
+          echo "Collected CSVs:"
+          ls -la data/
+
+      - name: Merge CSVs and produce figures
+        env:
+          COMBINE: "1"
+          N_INSTANCES: ${{ env.N_INSTANCES }}
+          DETECTION_BUDGET: ${{ env.DETECTION_BUDGET }}
+        run: |
+          python 3_canary_detection.py
+
+      - name: Upload merged data + figures
+        uses: actions/upload-artifact@v4
+        with:
+          name: detect-final-results
+          path: |
+            data/detect_raw_ALL.csv
+            data/detect_auc_ALL.csv
+            figures/fig_detection_roc_grid.pdf
+            figures/fig_detection_roc_grid.png
+            figures/fig_detection_auc_summary.pdf
+            figures/fig_detection_auc_summary.png
+          retention-days: 90
+          if-no-files-found: error
