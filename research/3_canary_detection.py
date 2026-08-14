@@ -283,10 +283,16 @@ def is_positive(noise_class, amplitude):
 # T1 per-circuit.
 # ---------------------------------------------------------------------------
 def _execute_circuit(qc, shots, T1_s, T2_s, eps_sx, p0g1, p1g0, dw_s,
-                      gate_time_ns, dt_ns):
+                      gate_time_ns, dt_ns, inject_echo_dw=False):
     from qiskit import transpile
-    run_qc = (inv._inject_ramsey_detuning(qc, dw_s, dt_ns)
-              if "ramsey" in qc.name else qc)
+    # Ramsey circuits: always inject the detuning offset (nominal dw + any quasi-static
+    # offset) via inv._inject_ramsey_detuning -- unmodified.
+    # Echo circuits: inject ONLY when inject_echo_dw=True (quasi-static dephasing
+    # class), so the Hahn-echo's X gate can physically refocus the injected phase
+    # (Rz(theta)·X·Rz(theta) = X, verified by algebra in module docstring). This is
+    # more rigorous than not injecting at all, though both give echo chi2 ≈ 1.
+    should_inject = ("ramsey" in qc.name) or (inject_echo_dw and "echo" in qc.name)
+    run_qc = (inv._inject_ramsey_detuning(qc, dw_s, dt_ns) if should_inject else qc)
     backend = inv._make_aer_backend_for_circuit(
         run_qc, T1_s, T2_s, eps_sx, p0g1, p1g0, gate_time_ns, dt_ns)
     tqc = transpile(run_qc, backend, optimization_level=0)
@@ -348,8 +354,12 @@ def run_t1_telegraph(T1_center, T2, dw, eps, swing_frac, seed, arch_name,
         if rng.random() < switch_prob:
             state = 1 - state
         T1_active = T1_hi if state == 1 else T1_lo
+        # Physical bound: T2 ≤ 2*T1 (Lindblad decomposition 1/T2=1/(2T1)+1/T_phi).
+        # AerSimulator raises hard error when T2 > 2*T1_active. Clip here so that
+        # a TLS-driven T1 drop never produces an unphysical (T1,T2) pair.
+        T2_active = min(T2, 2.0 * T1_active)
         counts_list.append(_execute_circuit(
-            qc, sh, T1_active, T2, eps, p0g1, p1g0, dw, gate_time_ns, profile.dt_ns))
+            qc, sh, T1_active, T2_active, eps, p0g1, p1g0, dw, gate_time_ns, profile.dt_ns))
 
     return inv.lindblad_inversion(
         counts_list, meta, profile,
@@ -398,7 +408,8 @@ def run_quasistatic_dephasing(T1, T2, dw, eps, sigma_dw_T2, seed, arch_name,
             offset = float(rng.normal(0.0, sigma_dw))
             local_dw = (dw + offset) if is_ramsey else offset
             sub_counts = _execute_circuit(
-                qc, ns, T1, T2, eps, p0g1, p1g0, local_dw, gate_time_ns, profile.dt_ns)
+                qc, ns, T1, T2, eps, p0g1, p1g0, local_dw, gate_time_ns, profile.dt_ns,
+                inject_echo_dw=is_echo)  # True for echo: Hahn-echo X gate refocuses it
             for b, c in sub_counts.items():
                 merged[b] = merged.get(b, 0) + c
         counts_list.append(merged)
@@ -532,8 +543,10 @@ def run_combined(T1_center, T2, dw, eps, swing_frac, seed, arch_name,
         if rng.random() < switch_prob:
             state = 1 - state
         T1_active = T1_hi if state == 1 else T1_lo
+        # Same physical clipping as run_t1_telegraph.
+        T2_active = min(T2, 2.0 * T1_active)
         counts_list.append(_execute_circuit(
-            qc, sh, T1_active, T2, eps, p0g1, p1g0, dw, gate_time_ns, profile.dt_ns))
+            qc, sh, T1_active, T2_active, eps, p0g1, p1g0, dw, gate_time_ns, profile.dt_ns))
 
     return inv.lindblad_inversion(
         counts_list, meta, profile,
