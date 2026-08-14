@@ -63,7 +63,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [superconducting, trapped_ion, neutral_atom]
-        phase: [null, gradient]
+        phase: ["null", "gradient"]
 
     steps:
       - name: Check out repository
