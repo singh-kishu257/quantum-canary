@@ -1,13 +1,5 @@
 name: Canary Noise-Class Detection AUC Study
 
-# Runs 3_canary_detection.py as a parallel matrix over
-# (architecture x noise_class), then merges every job's CSV output and
-# produces the final ROC-grid and AUC-summary figures in a combine job.
-#
-# Place this file at: .github/workflows/canary_detection.yml
-# Place 1_inversion.py and 3_canary_detection.py at the repo root (or
-# adjust `working-directory` / SCRIPT_DIR below to match your layout).
-
 on:
   workflow_dispatch:
     inputs:
@@ -25,8 +17,8 @@ on:
         default: "9900"
   push:
     paths:
-      - "3_canary_detection.py"
-      - "1_inversion.py"
+      - "research/3_canary_detection.py"
+      - "research/1_inversion.py"
       - ".github/workflows/canary_detection.yml"
 
 permissions:
@@ -38,15 +30,12 @@ env:
   DETECTION_BUDGET: ${{ github.event.inputs.detection_budget || '9900' }}
 
 jobs:
-  # ---------------------------------------------------------------------
-  # One parallel job per (architecture, noise_class) pair -- 3 x 5 = 15
-  # jobs, plus each job independently regenerates the shared null pool for
-  # its own architecture (cheap relative to the injected-noise sweep, and
-  # keeps every job fully self-contained / re-runnable in isolation).
-  # ---------------------------------------------------------------------
   detect:
     name: detect (${{ matrix.arch }} / ${{ matrix.noise_class }})
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: research
     strategy:
       fail-fast: false
       matrix:
@@ -57,6 +46,7 @@ jobs:
           - coherent_gate
           - spam_drift
           - combined
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -70,9 +60,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-canary-detection-${{ hashFiles('**/requirements*.txt') }}
+          key: ${{ runner.os }}-pip-canary-${{ hashFiles('**/requirements*.txt') }}
           restore-keys: |
-            ${{ runner.os }}-pip-canary-detection-
+            ${{ runner.os }}-pip-canary-
 
       - name: Install dependencies
         run: |
@@ -85,31 +75,24 @@ jobs:
           NOISE_CLASS: ${{ matrix.noise_class }}
           N_WORKERS: 4
           JOB_TAG: detect_${{ matrix.arch }}_${{ matrix.noise_class }}
-        run: |
-          python 3_canary_detection.py
+        run: python 3_canary_detection.py
 
       - name: Upload per-job CSV artifacts
         uses: actions/upload-artifact@v4
         with:
           name: detect-data-${{ matrix.arch }}-${{ matrix.noise_class }}
-          path: data/detect_*_detect_${{ matrix.arch }}_${{ matrix.noise_class }}.csv
+          path: research/data/detect_*_detect_${{ matrix.arch }}_${{ matrix.noise_class }}.csv
           retention-days: 30
           if-no-files-found: error
-
-  # ---------------------------------------------------------------------
-  # NULL pool is architecture-only (no noise_class axis), so it is
-  # generated once per architecture rather than duplicated 5x inside every
-  # matrix cell above -- run_sweep() inside 3_canary_detection.py already
-  # regenerates it deterministically (same SEED) per job, so the merge
-  # step below simply keeps the first null pool it sees per architecture
-  # and discards duplicates; nothing further is needed here. This job
-  # exists only to make that behaviour explicit in the workflow graph.
-  # ---------------------------------------------------------------------
 
   combine:
     name: combine + plot
     needs: detect
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: research
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -127,11 +110,11 @@ jobs:
       - name: Download all per-job CSV artifacts
         uses: actions/download-artifact@v4
         with:
-          path: data_incoming
+          path: research/data_incoming
           pattern: detect-data-*
           merge-multiple: false
 
-      - name: Flatten downloaded artifacts into data/
+      - name: Flatten downloaded artifacts into research/data/
         run: |
           mkdir -p data
           find data_incoming -type f -name "detect_*.csv" -exec cp {} data/ \;
@@ -143,19 +126,18 @@ jobs:
           COMBINE: "1"
           N_INSTANCES: ${{ env.N_INSTANCES }}
           DETECTION_BUDGET: ${{ env.DETECTION_BUDGET }}
-        run: |
-          python 3_canary_detection.py
+        run: python 3_canary_detection.py
 
       - name: Upload merged data + figures
         uses: actions/upload-artifact@v4
         with:
           name: detect-final-results
           path: |
-            data/detect_raw_ALL.csv
-            data/detect_auc_ALL.csv
-            figures/fig_detection_roc_grid.pdf
-            figures/fig_detection_roc_grid.png
-            figures/fig_detection_auc_summary.pdf
-            figures/fig_detection_auc_summary.png
+            research/data/detect_raw_ALL.csv
+            research/data/detect_auc_ALL.csv
+            research/figures/fig_detection_roc_grid.pdf
+            research/figures/fig_detection_roc_grid.png
+            research/figures/fig_detection_auc_summary.pdf
+            research/figures/fig_detection_auc_summary.png
           retention-days: 90
           if-no-files-found: error
