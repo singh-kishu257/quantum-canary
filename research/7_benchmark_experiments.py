@@ -59,6 +59,7 @@ if ARCH not in ALL_ARCHITECTURES:
     sys.exit(f"ARCH env var must be one of {ALL_ARCHITECTURES}, got {ARCH!r}")
 
 JOB_TAG = _os.environ.get("JOB_TAG", f"full{ARCH}")
+COMBINE = _os.environ.get("COMBINE", "0") == "1"
 
 TRUE_PARAM_RANGES = {
     "superconducting": {
@@ -658,7 +659,7 @@ def run_sweep(n_workers):
 
 
 def save_benchmark_csv(rows):
-    path = DATA_DIR / "qe_benchmark.csv"
+    path = DATA_DIR / f"qe_benchmark_{JOB_TAG}.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=BENCH_COLS)
         w.writeheader()
@@ -704,9 +705,78 @@ def save_threshold_csv(rows):
     return path
 
 
+def _load_benchmark_rows(path):
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = []
+        for r in reader:
+            r["budget"]      = int(r["budget"])
+            r["r2"]          = float(r["r2"])
+            r["r2_lo"]       = float(r["r2_lo"])
+            r["r2_hi"]       = float(r["r2_hi"])
+            r["nrmse"]       = float(r["nrmse"])
+            r["n_valid"]     = int(r["n_valid"])
+            r["n_total"]     = int(r["n_total"])
+            r["mean_time_s"] = float(r["mean_time_s"])
+            rows.append(r)
+    return rows
+
+
+def combine_data():
+    """Merge all per-job qe_benchmark_{JOB_TAG}.csv files (downloaded job
+    artifacts) into the final qe_benchmark.csv, then recompute
+    qe_threshold.csv from the complete dataset. Triggered by COMBINE=1
+    in the merge job of benchmark_matrix.yml."""
+    paths = sorted(DATA_DIR.glob("qe_benchmark_*.csv"))
+    if not paths:
+        sys.exit(f"ERROR: no qe_benchmark_*.csv files found in {DATA_DIR}.  "
+                 f"Download and extract all job artifacts first.")
+
+    print(f"Merging {len(paths)} file(s):")
+    all_rows = []
+    seen = set()
+    for path in paths:
+        rows = _load_benchmark_rows(path)
+        combos_here = sorted(set((r["architecture"], r["budget"]) for r in rows))
+        overlap = seen.intersection(combos_here)
+        if overlap:
+            print(f"  WARNING: (arch,budget) combos {overlap} already seen — "
+                  f"duplicate rows will be kept, check for overlapping jobs.")
+        seen.update(combos_here)
+        print(f"  {path.name}: {combos_here}  ({len(rows)} rows)")
+        all_rows.extend(rows)
+
+    all_rows.sort(key=lambda r: (r["architecture"], r["budget"], r["parameter"], r["method"]))
+    print(f"\nTotal merged rows: {len(all_rows)}")
+    expected = {(a, b) for a in ALL_ARCHITECTURES for b in _ALL_BUDGETS}
+    missing_combos = expected - seen
+    print(f"Architectures present: {sorted(set(a for a, b in seen))}")
+    print(f"Budgets present: {sorted(set(b for a, b in seen))}")
+    if missing_combos:
+        print(f"WARNING: missing (architecture, budget) combinations: "
+              f"{sorted(missing_combos)}")
+    else:
+        print("All expected (architecture, budget) combinations present: OK")
+
+    merged_path = DATA_DIR / "qe_benchmark.csv"
+    with open(merged_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=BENCH_COLS)
+        w.writeheader()
+        w.writerows(all_rows)
+    print(f"\nSaved merged CSV: {merged_path}")
+
+    save_threshold_csv(all_rows)
+
+    print("\nDone. qe_benchmark.csv and qe_threshold.csv are now the final, "
+          "complete outputs.", flush=True)
+
+
 if __name__ == "__main__":
     import os
     warnings.filterwarnings("ignore")
+    if COMBINE:
+        combine_data()
+        sys.exit(0)
     if sys.platform != "win32":
         mp.set_start_method("fork", force=True)
     n_workers = int(os.environ.get("N_WORKERS", max(1, mp.cpu_count() - 1)))
@@ -715,5 +785,6 @@ if __name__ == "__main__":
     print(f"  Architecture={ARCH}  Seed={SEED}  N={N_INSTANCES}  bootstrap={N_BOOTSTRAP}  workers={n_workers}", flush=True)
     rows = run_sweep(n_workers)
     save_benchmark_csv(rows)
-    save_threshold_csv(rows)
-    print(f"\n[job JOB_TAG={JOB_TAG}] done. Outputs: data/qe_benchmark.csv, data/qe_threshold.csv", flush=True)
+    print(f"\n[job JOB_TAG={JOB_TAG}] done. Run with COMBINE=1 after all "
+          f"matrix jobs complete to produce the final merged outputs.",
+          flush=True)

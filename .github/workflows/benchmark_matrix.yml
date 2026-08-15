@@ -1,4 +1,4 @@
-name: Benchmark - Parallel Matrix [all architectures]
+name: QE Benchmark - Parallel Matrix [all architectures]
 
 on:
   workflow_dispatch:
@@ -32,15 +32,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results-${{ matrix.budget }}-${{ matrix.architecture }}
-          path: research/data/qe_benchmark.csv
+          name: qe-results-${{ matrix.budget }}-${{ matrix.architecture }}
+          path: research/data/qe_benchmark_${{ matrix.budget }}_${{ matrix.architecture }}.csv
           if-no-files-found: warn
 
   merge:
-    name: "Merge into final CSVs"
-    runs-on: ubuntu-latest
     needs: run
     if: always()
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -54,17 +53,18 @@ jobs:
       - name: Download all split results
         uses: actions/download-artifact@v4
         with:
-          pattern: benchmark-results-*
+          pattern: qe-results-*
           path: research/data
-      - name: Merge into qe_benchmark.csv + qe_threshold.csv
+          merge-multiple: true
+      - name: Merge into single CSV and threshold table
         run: |
           cd research
           COMBINE=1 python 7_benchmark_experiments.py
-      - name: Upload final merged results
+      - name: Upload final merged results (single artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qe-benchmark-FINAL
+          name: qe-FINAL-merged
           path: |
             research/data/qe_benchmark.csv
             research/data/qe_threshold.csv
