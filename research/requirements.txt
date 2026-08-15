@@ -1,25 +1,20 @@
-# Quantum Canary v2 — Research Pipeline Dependencies
-# =====================================================
-# Install: pip install -r requirements.txt
-#
-# Core (required for all simulators and architectures):
+# Quantum Canary  — Research Pipeline Dependencies
+
 numpy>=1.24
 scipy>=1.11
 pandas>=2.0
 matplotlib>=3.7
 tqdm>=4.65
 
-# Qiskit stack (required for Aer simulation and circuit construction):
+
 qiskit>=1.0
 qiskit-aer>=0.13
 
-# IBM hardware noise models (simulator option 3) and real-hardware
-# runs via 2_monitor.py:
+
 qiskit-ibm-runtime>=0.20
 
-# IonQ cloud simulators (Forte/Aria noisy) and IonQ hardware:
+
 qiskit-ionq>=0.5
 
-# Notebooks (optional — for notebook/demo.ipynb):
 jupyter>=1.0
 ipykernel>=6.0

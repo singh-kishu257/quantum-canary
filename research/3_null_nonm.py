@@ -1,87 +1,3 @@
-"""
-3_null_nonm.py
-================
-Two-phase, publication-grade validation of Quantum Canary's per-probe
-chi2/dof as a Markovianity diagnostic. Establishes the logical chain
-required for the claim "elevated chi2/dof implies physical
-non-Markovianity, not model or optimizer failure":
-
-  PHASE 1 -- NULL CALIBRATION (zero-tolerance false-positive audit)
-    Under pure, correctly-specified Markovian hardware, does chi2/dof
-    follow its theoretical chi-squared(nu)/nu distribution, with no
-    optimizer-trap or model-misspecification tail? This is a
-    goodness-of-fit claim, not an empirical guess -- it is testable via
-    a Kolmogorov-Smirnov test against the known theoretical distribution
-    (Bevington & Robinson, "Data Reduction and Error Analysis for the
-    Physical Sciences", 3rd ed., 2003). N_NULL instances (default 500) at
-    the native 9,900-shot budget are run through the UNMODIFIED
-    lindblad_inversion() pipeline; every returned chi2/dof value across
-    all four probes is pooled via the probability integral transform
-    (PIT) -- because T1/Gate/Echo probes have 2 degrees of freedom while
-    the Ramsey probe has 5 (see DOF dict below, derived directly from
-    1_inversion.py's own _chi2_per_dof() calls), a naive pooled histogram
-    of raw chi2/dof values would be statistically wrong. Converting each
-    probe's chi2/dof to a p-value via its own chi-squared(nu) CDF makes
-    every probe's null value Uniform(0,1) under a correctly specified
-    model, regardless of its individual degrees of freedom -- this is
-    what allows every probe, on every instance, to be pooled into one
-    honest histogram and one global KS test.
-
-  PHASE 2 -- CONTINUOUS NON-MARKOVIAN GRADIENT (monotonicity proof)
-    As a physical noise amplitude alpha increases continuously from 0
-    (Markovian) toward strongly non-Markovian, does mean chi2/dof rise
-    smoothly and monotonically on the probe(s) sensitive to that specific
-    noise channel? This uses the SAME three injection mechanisms already
-    validated in 3_canary_detection.py (TLS-style T1 telegraph, 1/f
-    quasi-static ensemble dephasing, coherent gate over-rotation), swept
-    over a finer amplitude grid than the AUC study, with alpha=0 anchored
-    to the Phase 1 null result (mean chi2/dof = 1 by construction).
-
-FAIRNESS / NO-CHEATING NOTES
------------------------------
-  - 1_inversion.py is imported via importlib.util.spec_from_file_location,
-    exactly as in 7_benchmark_experiments.py and 3_canary_detection.py.
-    It is never edited, patched, or monkeypatched.
-  - The injection functions in this file (_execute_circuit,
-    run_t1_telegraph, run_quasistatic_dephasing, run_coherent_gate, and
-    the coherent-error gate-rep circuit builder) are byte-identical
-    copies of the versions validated and bug-fixed in
-    3_canary_detection.py (T2 <= 2*T1 physical clipping on telegraph
-    noise; genuine Hahn-echo refocusing via inject_echo_dw on the
-    quasi-static class). They are copied rather than imported as a
-    module to avoid 3_canary_detection.py's own top-level environment-
-    variable validation (which calls sys.exit on an unrecognized
-    NOISE_CLASS) firing as a side effect of import in this script's own
-    environment. Anyone auditing this file can diff these functions
-    directly against 3_canary_detection.py to confirm they are identical.
-  - The degrees of freedom used for the theoretical chi-squared reference
-    (T1=2, Ramsey=5, Gate=2, Echo=2) are not assumed -- they are read
-    directly off 1_inversion.py's own lindblad_inversion() body, where
-    each _chi2_per_dof(...) call is made with the exact number of data
-    points per probe (3, 6, 3, 3) and n_params=1, giving dof =
-    max(n_points - n_params, 1).
-  - Ground truth for Phase 1 is "no noise injected" -- inv.run_probe_circuits_aer()
-    is called unmodified with true parameters equal to what the inversion
-    is told, exactly as run_null() does in 3_canary_detection.py.
-
-USAGE
------
-  ARCH=superconducting PHASE=null      python3 3_null_nonm.py
-  ARCH=superconducting PHASE=gradient  python3 3_null_nonm.py
-  COMBINE=1 python3 3_null_nonm.py     # merge all per-job CSVs + plot
-
-Environment variables:
-  ARCH            one of superconducting | trapped_ion | neutral_atom
-  PHASE           one of null | gradient | all
-  N_NULL          null instances for Phase 1                [default 500]
-  N_GRAD          instances per gradient amplitude point     [default 20]
-  N_BOOTSTRAP     bootstrap resamples for gradient CI        [default 1000]
-  DETECTION_BUDGET total shots per Canary run                [default 9900]
-  FP_THRESHOLD    chi2/dof threshold for false-positive rate [default 3.0]
-  N_WORKERS       multiprocessing pool size            [default cpu_count-1]
-  JOB_TAG         output filename label      [default nonm_{ARCH}_{PHASE}]
-  COMBINE         if "1", skip the sweep and merge+plot existing CSVs
-"""
 from __future__ import annotations
 
 import importlib.util
@@ -99,15 +15,7 @@ import numpy as np
 from scipy.stats import chi2 as chi2_dist
 from scipy.stats import kstest
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
-# ---------------------------------------------------------------------------
-# Import 1_inversion.py EXACTLY as 7_benchmark_experiments.py and
-# 3_canary_detection.py do: by file location, never edited, never
-# monkeypatched.
-# ---------------------------------------------------------------------------
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("inversion", SCRIPT_DIR / "1_inversion.py")
 inv = importlib.util.module_from_spec(_spec)
@@ -115,13 +23,8 @@ sys.modules["inversion"] = inv
 _spec.loader.exec_module(inv)
 
 DATA_DIR = SCRIPT_DIR / "data"
-FIG_DIR = SCRIPT_DIR / "figures"
 DATA_DIR.mkdir(exist_ok=True)
-FIG_DIR.mkdir(exist_ok=True)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 SEED = 73
 N_NULL = int(os.environ.get("N_NULL", "500"))
 N_GRAD = int(os.environ.get("N_GRAD", "20"))
@@ -154,7 +57,13 @@ if PHASE not in ALL_PHASES + ["all"]:
     sys.exit(f"PHASE env var must be one of {ALL_PHASES + ['all']}, got {PHASE!r}")
 PHASES_TO_RUN = ALL_PHASES if PHASE == "all" else [PHASE]
 
-JOB_TAG = os.environ.get("JOB_TAG", f"nonm_{ARCH}_{PHASE}")
+PRIOR_MODE = os.environ.get("PRIOR_MODE", "arch").strip().lower()
+if PRIOR_MODE not in ("arch", "live"):
+    sys.exit(f"PRIOR_MODE env var must be 'arch' or 'live', got {PRIOR_MODE!r}")
+if PRIOR_MODE == "live" and "gradient" in PHASES_TO_RUN:
+    sys.exit("PRIOR_MODE=live applies to the null phase only; run the gradient phase with PRIOR_MODE=arch.")
+
+JOB_TAG = os.environ.get("JOB_TAG", f"nonm_{ARCH}_{PHASE}" + ("_live" if PRIOR_MODE == "live" else ""))
 COMBINE = os.environ.get("COMBINE", "0") == "1"
 
 PROBES = ["t1", "ramsey", "echo", "gate"]
@@ -165,20 +74,10 @@ CHI2_FIELD = {
     "gate": "gate_chi2_dof",
 }
 
-# Degrees of freedom per probe, read directly off 1_inversion.py's own
-# lindblad_inversion() body (see module docstring). These are protocol
-# constants (fixed circuit counts: 3 T1, 6 Ramsey=2x3 delays, 3 gate-rep,
-# 3 echo), invariant across architecture and shot budget.
-#   T1:     dof = max(3 - 1, 1) = 2
-#   Ramsey: dof = max(6 - 1, 1) = 5   (only T2 counted as a fitted param;
-#                                       Δω is estimated in closed form)
-#   Gate:   dof = max(3 - 1, 1) = 2
-#   Echo:   dof = max(3 - 1, 1) = 2
+
 DOF = {"t1": 2, "ramsey": 5, "gate": 2, "echo": 2}
 
-# Reused verbatim from 7_benchmark_experiments.py / 3_canary_detection.py
-# TRUE_PARAM_RANGES, for consistency across the whole synthetic-experiment
-# suite.
+
 TRUE_PARAM_RANGES = {
     "superconducting": {
         "T1_s": (80e-6, 400e-6),
@@ -199,7 +98,6 @@ TRUE_PARAM_RANGES = {
 
 
 def sample_instance(rng, arch_name):
-    """Verbatim copy of 7_benchmark_experiments.py's sample_instance()."""
     ranges = TRUE_PARAM_RANGES[arch_name]
     T1_lo, T1_hi = ranges["T1_s"]
     T2_lo, T2_hi = ranges["T2_s"]
@@ -217,11 +115,6 @@ def sample_instance(rng, arch_name):
     return T1, T2, dw, eps
 
 
-# ---------------------------------------------------------------------------
-# Byte-identical copies of the validated, bug-fixed injection primitives
-# from 3_canary_detection.py. See module docstring for why these are
-# copied rather than imported.
-# ---------------------------------------------------------------------------
 def _execute_circuit(qc, shots, T1_s, T2_s, eps_sx, p0g1, p1g0, dw_s,
                       gate_time_ns, dt_ns, inject_echo_dw=False):
     from qiskit import transpile
@@ -246,7 +139,13 @@ def _shots_per_circuit(meta):
 
 
 def run_null(T1, T2, dw, eps, seed, arch_name):
-    profile = inv.BackendProfile.from_architecture(arch_name)
+    if PRIOR_MODE == "live":
+        profile = inv.BackendProfile.from_true_params(arch_name, T1, T2)
+        custom_arch = dict(inv.ARCH_DEFAULTS[arch_name])
+        custom_arch["eps_typical"] = eps
+        profile.custom_arch = custom_arch
+    else:
+        profile = inv.BackendProfile.from_architecture(arch_name)
     arch = inv.ARCH_DEFAULTS[arch_name]
     circuits, meta = inv.build_probe_circuits(profile)
     counts_list = inv.run_probe_circuits_aer(
@@ -278,9 +177,6 @@ def run_t1_telegraph(T1_center, T2, dw, eps, swing_frac, seed, arch_name,
         if rng.random() < switch_prob:
             state = 1 - state
         T1_active = T1_hi if state == 1 else T1_lo
-        # Physical bound: T2 <= 2*T1 (Lindblad decomposition). AerSimulator
-        # raises hard error on T2 > 2*T1; clip so a TLS-driven T1 drop never
-        # produces an unphysical (T1,T2) pair.
         T2_active = min(T2, 2.0 * T1_active)
         counts_list.append(_execute_circuit(
             qc, sh, T1_active, T2_active, eps, p0g1, p1g0, dw, gate_time_ns, profile.dt_ns))
@@ -322,7 +218,7 @@ def run_quasistatic_dephasing(T1, T2, dw, eps, sigma_dw_T2, seed, arch_name,
             local_dw = (dw + offset) if is_ramsey else offset
             sub_counts = _execute_circuit(
                 qc, ns, T1, T2, eps, p0g1, p1g0, local_dw, gate_time_ns, profile.dt_ns,
-                inject_echo_dw=is_echo)  # True for echo: Hahn-echo X gate refocuses it
+                inject_echo_dw=is_echo)
             for b, c in sub_counts.items():
                 merged[b] = merged.get(b, 0) + c
         counts_list.append(merged)
@@ -398,10 +294,6 @@ GRADIENT_RUNNER = {
     "quasistatic_dephasing": run_quasistatic_dephasing,
     "coherent_gate": run_coherent_gate,
 }
-# Finer amplitude grid than the AUC study (3_canary_detection.py), since
-# Phase 2 needs a smooth curve rather than a single max-amplitude estimate.
-# alpha=0.0 (Markovian limit) is included explicitly; its expected mean
-# chi2/dof is 1.0, anchoring continuity with the Phase 1 null result.
 GRADIENT_GRIDS = {
     "t1_telegraph": [0.0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.80],
     "quasistatic_dephasing": [0.0, 0.05, 0.10, 0.20, 0.35, 0.50, 0.70, 0.95, 1.20],
@@ -414,9 +306,6 @@ GRADIENT_PRIMARY_PROBE = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Worker dispatch
-# ---------------------------------------------------------------------------
 def _worker_null(args):
     warnings.filterwarnings("ignore")
     idx, params, seed, arch_name = args
@@ -450,9 +339,6 @@ def _worker_gradient(args):
     return idx, out
 
 
-# ---------------------------------------------------------------------------
-# PHASE 1: null calibration
-# ---------------------------------------------------------------------------
 NULL_RAW_COLS = ["architecture", "instance_idx", "seed",
                   "t1", "ramsey", "echo", "gate",
                   "T1_rec", "T2_rec", "dw_rec", "eps_rec"]
@@ -468,7 +354,7 @@ def run_null_phase(n_workers):
     seed_base = SEED * 1_000_000
     args = [(i, instances[i], seed_base + i, ARCH) for i in range(N_NULL)]
 
-    print(f"[null phase] ARCH={ARCH} N={N_NULL} budget={BUDGET} "
+    print(f"[null phase] ARCH={ARCH} PRIOR={PRIOR_MODE} N={N_NULL} budget={BUDGET} "
           f"workers={n_workers}", flush=True)
     out_list = [None] * N_NULL
     with mp.Pool(n_workers) as pool:
@@ -489,8 +375,6 @@ def run_null_phase(n_workers):
         w.writerows(raw_rows)
     print(f"Saved: {raw_path}  ({len(raw_rows)} rows)", flush=True)
 
-    # Per-probe KS test against theoretical chi-squared(dof) and empirical
-    # vs theoretical false-positive rate at FP_THRESHOLD.
     summary_rows = []
     for p in PROBES:
         vals = np.array([out[p] for out in out_list], dtype=float)
@@ -520,9 +404,7 @@ def run_null_phase(n_workers):
     return raw_rows, summary_rows
 
 
-# ---------------------------------------------------------------------------
-# PHASE 2: continuous non-Markovian gradient
-# ---------------------------------------------------------------------------
+
 GRAD_RAW_COLS = ["architecture", "noise_class", "amplitude", "instance_idx",
                    "seed", "t1", "ramsey", "echo", "gate"]
 GRAD_SUMMARY_COLS = ["architecture", "noise_class", "amplitude", "probe",
@@ -585,7 +467,7 @@ def run_gradient_phase(n_workers):
                   f"{match['mean_chi2_dof']:.3f}  CI=[{match['ci_lo']:.3f}, "
                   f"{match['ci_hi']:.3f}]", flush=True)
 
-        # Checkpoint after each noise class.
+        
         _save_grad_csvs(raw_rows, summary_rows)
 
     return raw_rows, summary_rows
@@ -606,52 +488,42 @@ def _save_grad_csvs(raw_rows, summary_rows):
           f"{summary_path} ({len(summary_rows)} rows)", flush=True)
 
 
-# ---------------------------------------------------------------------------
-# COMBINE mode
-# ---------------------------------------------------------------------------
-def _load_all_csvs(pattern):
+
+def _load_all_csvs(pattern, want_live=False):
     rows = []
     for path in sorted(DATA_DIR.glob(pattern)):
+        if ("_live" in path.name) != want_live:
+            continue
         with open(path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 rows.append(row)
     return rows
 
 
-PROBE_LABEL = {"t1": "T1", "ramsey": "Ramsey", "echo": "Echo", "gate": "Gate"}
-CLASS_LABEL = {
-    "t1_telegraph": "TLS / T1 telegraph",
-    "quasistatic_dephasing": "1/f quasi-static dephasing",
-    "coherent_gate": "Coherent gate over-rotation",
-}
-CLASS_COLOR = {
-    "t1_telegraph": "#1f77b4",
-    "quasistatic_dephasing": "#ff7f0e",
-    "coherent_gate": "#9467bd",
-}
-ARCH_LABEL = {
-    "superconducting": "Superconducting",
-    "trapped_ion": "Trapped-ion",
-    "neutral_atom": "Neutral-atom",
-}
-HEADLINE_ARCH = "superconducting"
-
-
-def combine_and_plot():
-    null_raw = _load_all_csvs("nullraw_nonm_*.csv")
-    null_summary = _load_all_csvs("nullsummary_nonm_*.csv")
+def combine_data():
+    null_raw = _load_all_csvs("nullraw_nonm_*.csv", want_live=False)
+    null_summary = _load_all_csvs("nullsummary_nonm_*.csv", want_live=False)
+    null_raw_live = _load_all_csvs("nullraw_nonm_*.csv", want_live=True)
+    null_summary_live = _load_all_csvs("nullsummary_nonm_*.csv", want_live=True)
     grad_raw = _load_all_csvs("gradraw_nonm_*.csv")
     grad_summary = _load_all_csvs("gradsummary_nonm_*.csv")
 
     if not null_raw or not grad_raw:
         sys.exit("COMBINE=1: missing per-job CSVs in data/ -- run both phases first.")
 
-    for name, rows, cols in [
+    merges = [
         ("nullraw_ALL.csv", null_raw, NULL_RAW_COLS),
         ("nullsummary_ALL.csv", null_summary, NULL_SUMMARY_COLS),
         ("gradraw_ALL.csv", grad_raw, GRAD_RAW_COLS),
         ("gradsummary_ALL.csv", grad_summary, GRAD_SUMMARY_COLS),
-    ]:
+    ]
+    if null_raw_live:
+        merges.extend([
+            ("nullraw_live_ALL.csv", null_raw_live, NULL_RAW_COLS),
+            ("nullsummary_live_ALL.csv", null_summary_live, NULL_SUMMARY_COLS),
+        ])
+
+    for name, rows, cols in merges:
         path = DATA_DIR / name
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=cols)
@@ -659,139 +531,23 @@ def combine_and_plot():
             w.writerows(rows)
         print(f"Merged: {path} ({len(rows)} rows)", flush=True)
 
-    # -------------------------------------------------------------------
-    # Build the two-panel headline figure using the superconducting arch
-    # (cleanest null pool / clearest gradient signal; see paper discussion
-    # of trapped-ion T1-telegraph detection limits under arch-default
-    # priors). Other architectures are included in the merged CSVs for a
-    # supplementary multi-architecture table/figure.
-    # -------------------------------------------------------------------
-    # --- Left panel: PIT p-value histogram, all 4 probes pooled ---
-    pvals = []
-    for row in null_raw:
-        if row["architecture"] != HEADLINE_ARCH:
-            continue
-        for p in PROBES:
-            try:
-                val = float(row[p])
-            except (TypeError, ValueError):
-                continue
-            if not np.isfinite(val):
-                continue
-            dof = DOF[p]
-            raw_chi2 = val * dof
-            pv = 1.0 - chi2_dist.cdf(raw_chi2, df=dof)
-            pvals.append(pv)
-    pvals = np.array(pvals)
-    ks_stat, ks_p = (kstest(pvals, "uniform") if len(pvals) else (float("nan"), float("nan")))
-
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    ax1 = axes[0]
-    ax1.hist(pvals, bins=25, range=(0, 1), density=True, color="#4C72B0",
-              alpha=0.75, edgecolor="white", linewidth=0.5,
-              label=f"Empirical (N={len(pvals)} pooled probe values)")
-    ax1.axhline(1.0, color="black", linestyle="--", linewidth=1.3,
-                label="Theoretical Uniform(0,1)\n(Bevington & Robinson, 2003)")
-    ax1.set_xlabel(r"$p$-value $= 1-F_{\chi^2}(\nu\cdot\chi^2/\nu;\ \nu)$", fontsize=10)
-    ax1.set_ylabel("Density", fontsize=10)
-    ax1.set_title(
-        f"Phase 1 -- Null calibration ({ARCH_LABEL[HEADLINE_ARCH]}, N={N_NULL})\n"
-        f"KS test vs. Uniform(0,1): D={ks_stat:.3f}, p={ks_p:.3f}",
-        fontsize=10)
-    ax1.set_ylim(0, 1.8)
-    ax1.legend(fontsize=8, loc="upper right")
-    ax1.grid(alpha=0.2)
-
-    # --- Right panel: monotonicity gradient, 3 classes, primary probe each ---
-    ax2 = axes[1]
-    for noise_class in GRADIENT_RUNNER.keys():
-        primary = GRADIENT_PRIMARY_PROBE[noise_class]
-        pts = [r for r in grad_summary
-               if r["architecture"] == HEADLINE_ARCH
-               and r["noise_class"] == noise_class and r["probe"] == primary]
-        pts_by_amp = {}
-        for r in pts:
-            try:
-                amp = float(r["amplitude"])
-                mean_v = float(r["mean_chi2_dof"])
-                lo = float(r["ci_lo"])
-                hi = float(r["ci_hi"])
-            except (TypeError, ValueError):
-                continue
-            pts_by_amp[amp] = (mean_v, lo, hi)
-        amps = sorted(pts_by_amp.keys())
-        means = [pts_by_amp[a][0] for a in amps]
-        los = [max(pts_by_amp[a][1], 1e-2) for a in amps]  # floor for log-scale safety
-        his = [pts_by_amp[a][2] for a in amps]
-        if not amps:
-            continue
-        # Normalize x-axis to [0,1] fraction of that class's own max
-        # amplitude so all three curves share one axis meaningfully.
-        max_amp = max(GRADIENT_GRIDS[noise_class])
-        x_norm = [a / max_amp for a in amps]
-        color = CLASS_COLOR[noise_class]
-        ax2.plot(x_norm, means, "o-", color=color, linewidth=1.8, markersize=4,
-                 label=f"{CLASS_LABEL[noise_class]} ({PROBE_LABEL[primary]} probe)")
-        ax2.fill_between(x_norm, los, his, color=color, alpha=0.15)
-
-    ax2.axhline(1.0, color="black", linestyle="--", linewidth=1.3,
-                label=r"Markovian expectation $\chi^2/\nu=1$")
-    ax2.set_xlabel(r"Normalized injection amplitude $\alpha$ / $\alpha_{\max}$", fontsize=10)
-    ax2.set_ylabel(r"Mean $\chi^2/\nu$ on primary probe (95% bootstrap CI)", fontsize=10)
-    ax2.set_yscale("log")
-    ax2.set_title(
-        f"Phase 2 -- Continuous non-Markovian gradient ({ARCH_LABEL[HEADLINE_ARCH]}, "
-        f"N={N_GRAD}/point)",
-        fontsize=10)
-    ax2.legend(fontsize=7.5, loc="upper left")
-    ax2.grid(alpha=0.2)
-
-    fig.suptitle(
-        "Quantum Canary $\\chi^2/\\nu$: null calibration and non-Markovian "
-        "monotonicity",
-        fontsize=12, y=1.03)
-    plt.tight_layout()
-    for fmt in ("pdf", "png"):
-        path = FIG_DIR / f"fig_null_gradient.{fmt}"
-        fig.savefig(path, dpi=160, bbox_inches="tight")
-        print(f"Saved: {path}", flush=True)
-    plt.close(fig)
-
-    # -------------------------------------------------------------------
-    # Supplementary: per-architecture false-positive rate table (text
-    # summary written to a .txt file for easy inclusion in the paper).
-    # -------------------------------------------------------------------
-    summary_path = FIG_DIR / "null_calibration_summary.txt"
-    with open(summary_path, "w", encoding="utf-8") as f:
-        f.write("Phase 1 null calibration summary (per architecture, per probe)\n")
-        f.write("=" * 70 + "\n")
-        for row in null_summary:
-            f.write(
-                f"{row['architecture']:>16s}  {row['probe']:>7s}  "
-                f"dof={row['dof']:>2s}  n={row['n']:>5s}  "
-                f"mean(chi2/dof)={float(row['mean_chi2_dof']):.4f}  "
-                f"KS p={float(row['ks_pvalue']):.4f}  "
-                f"FP@{row['fp_threshold']}: emp={float(row['empirical_fp_rate']):.4f} "
-                f"theo={float(row['theoretical_fp_rate']):.4f}\n"
-            )
-    print(f"Saved: {summary_path}", flush=True)
-    print("\nCombine + plot complete.", flush=True)
+    print("\nCombine complete.", flush=True)
 
 
-# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     warnings.filterwarnings("ignore")
     if sys.platform != "win32":
         mp.set_start_method("fork", force=True)
 
     if COMBINE:
-        combine_and_plot()
+        combine_data()
         sys.exit(0)
 
     n_workers = int(os.environ.get("N_WORKERS", max(1, mp.cpu_count() - 1)))
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"[{ts}] 3_null_nonm.py -- null calibration + non-Markovian gradient", flush=True)
-    print(f"  Architecture={ARCH}  Phase={PHASE}  Seed={SEED}  "
+    print(f"  Architecture={ARCH}  Phase={PHASE}  PriorMode={PRIOR_MODE}  Seed={SEED}  "
           f"N_NULL={N_NULL}  N_GRAD={N_GRAD}  budget={BUDGET}  "
           f"workers={n_workers}", flush=True)
 
@@ -801,4 +557,4 @@ if __name__ == "__main__":
         run_gradient_phase(n_workers)
 
     print(f"\n[job JOB_TAG={JOB_TAG}] done. Run with COMBINE=1 after all "
-          f"matrix jobs complete to merge CSVs and produce figures.", flush=True)
+          f"matrix jobs complete to merge CSVs.", flush=True)

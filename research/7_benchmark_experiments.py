@@ -42,39 +42,11 @@ QE_N_DELAYS        = 15
 QE_RB_LENGTHS      = [1, 2, 4, 8, 16, 32, 64, 128]
 QE_RB_SAMPLES      = 5
 QE_SX_PER_CLIFFORD = 1.875
-# Plausibility guards on QE's raw curve-fit outputs.
-#
-# Canary's own optimizer enforces hard physical bounds and fails safely to
-# NaN on divergence. QE's ad hoc extraction (T1/T2Ramsey/T2Hahn curve_fit +
-# a manual frequency-difference calculation for dw, + RB's EPC/gates-per-
-# Clifford for eps) has no equivalent bound, so a diverging fit can
-# silently produce a physically impossible value that then dominates
-# R^2/NRMSE instead of being counted as a fit failure.
-#
-# CRITICAL: every guard below is anchored to TRUE_PARAM_RANGES (the actual
-# distribution sample_instance() draws true values from in THIS benchmark)
-# or to the same dynamic BackendProfile quantity that generated the true
-# dw values -- never to ARCH_DEFAULTS' full architectural physical bound
-# (T1_max_s, eps_max, the static dw_max_rad_s constant). Those ARCH_DEFAULTS
-# bounds describe the full plausible range of real hardware in general, not
-# the much narrower range actually sampled in this specific benchmark, and
-# are commonly 50-8900x larger than the true sampling range. A guard
-# anchored to the wrong (larger) reference is mathematically incapable of
-# rejecting anything: earlier versions of this file made exactly this
-# mistake for dw (static ARCH_DEFAULTS dw_max_rad_s, off by ~4400x for
-# trapped_ion) and, separately, for T1/T2/eps (ARCH_DEFAULTS T1_max_s /
-# eps_max, off by 50-5000x) -- both confirmed by 0% guard-rejection rates
-# coexisting with R^2 in the -1e5 to -1e7 range, which is only possible if
-# the guard threshold is far above anything a diverged fit could produce.
 QE_DW_PLAUSIBILITY_MULT  = 2.0
 QE_T1_PLAUSIBILITY_MULT  = 5.0
 QE_EPS_PLAUSIBILITY_MULT = 5.0
 
-# Counts, per architecture, how often each QE parameter's raw fit output
-# was rejected by its plausibility guard. Printed at the end of run_sweep()
-# so a still-broken guard (implausible values that keep slipping through)
-# or a guard that is rejecting nearly everything (too strict) is visible in
-# the job log rather than only discoverable after downloading the CSV.
+
 QE_GUARD_REJECTS = defaultdict(lambda: defaultdict(int))
 QE_GUARD_TOTAL   = defaultdict(lambda: defaultdict(int))
 
@@ -93,9 +65,7 @@ if ARCH not in ALL_ARCHITECTURES:
 
 JOB_TAG = _os.environ.get("JOB_TAG", f"full_{ARCH}")
 
-# Real, physically-sampled current-hardware ranges per architecture — same
-# ranges used throughout the codebase (2_parity_experiments.py,
-# 3_shot_ablation.py) for consistency across all synthetic experiments.
+
 TRUE_PARAM_RANGES = {
     "superconducting": {
         "T1_s": (80e-6,  400e-6),
@@ -241,19 +211,6 @@ def _perturb_instance(arch_name, T1, T2, eps, p0g1_nom, p1g0_nom, rng):
 
 
 def _convert_native_to_unitary(qc, native_gate_names):
-    # AerSimulator's C++ backend does not recognise third-party gate names
-    # (verified directly: "gpi"/"gpi2" are absent from
-    # AerSimulator().configuration().basis_gates, and attempting to run
-    # them raises AerError: unknown instruction). Transpiling onto a
-    # native Target correctly produces real gpi/gpi2 sequences, but Aer
-    # still cannot execute them by name. The fix verified end-to-end
-    # before this was written: convert each named native gate instance to
-    # a generic UnitaryGate carrying the SAME matrix (native_gate.to_matrix()),
-    # which Aer natively supports ("unitary" IS in Aer's basis_gates). This
-    # preserves the exact physical operation (same unitary each native
-    # pulse implements) while making it something Aer can simulate; it
-    # does not change the gate COUNT or PHYSICS, only how Aer labels the
-    # instruction internally.
     from qiskit.circuit.library import UnitaryGate
     new_qc = qc.copy_empty_like()
     for inst in qc.data:
@@ -275,15 +232,7 @@ def _make_backend(qc, T1, T2, eps, p0g1, p1g0, gate_time_ns, dt_ns,
     gate_time_s = gate_time_ns * 1e-9
     sx_e = (thermal_relaxation_error(T1, T2, gate_time_s)
             .compose(depolarizing_error(2.0 * eps, 1)))
-    # rz excluded: virtual Z rotation, zero physical pulse, zero noise on
-    # every real hardware platform (same convention as 1_inversion.py).
-    # noise_gate_names defaults to the superconducting-basis instruction
-    # names; callers targeting a native non-superconducting gate set (see
-    # run_qe()'s trapped_ion path) pass the correct names instead (e.g.
-    # ["unitary"] after native gates are converted via
-    # _convert_native_to_unitary), so the SAME physical noise channel is
-    # attached to whichever instruction actually represents the noisy
-    # native single-qubit operation for that architecture.
+    
     names = noise_gate_names or ["sx", "x", "id", "rx", "u1", "p"]
     nm.add_quantum_error(sx_e, names, [0])
     seen = set()
@@ -312,13 +261,7 @@ def _run_exp(exp_obj, T1, T2, eps, p0g1, p1g0, shots, gate_time_ns, dt_ns,
                   if inject_detuning else qc)
         noise_gate_names = None
         if native_target is not None:
-            # Transpile the abstract sx/x/rz circuit onto the real native
-            # gate Target (verified working: real GPI/GPI2 sequences,
-            # correct delay/measure passthrough). Then convert those named
-            # native gates to AerSimulator-executable UnitaryGate instances
-            # (same physical operation, different internal label -- see
-            # _convert_native_to_unitary docstring for why this step is
-            # required rather than optional).
+            
             run_qc = transpile(run_qc, target=native_target, optimization_level=1)
             run_qc = _convert_native_to_unitary(run_qc, native_gate_names)
             noise_gate_names = ["unitary"]
@@ -348,23 +291,7 @@ def _extract(exp_data, name):
 
 
 def _ionq_native_target(gate_time_ns: float):
-    # Builds a local, 1-qubit Target using IonQ's real native gate classes
-    # (qiskit_ionq.GPIGate / GPI2Gate) and IonQ's own published gate
-    # equivalences (qiskit_ionq.add_equivalences()), which is exactly the
-    # mechanism qiskit-ionq itself relies on so that abstract circuits
-    # (built in sx/x/rz, as every qiskit-experiments class does) compile
-    # down to GPI/GPI2 exactly as they would when targeting a real IonQ
-    # backend (see qiskit-ionq docs: "The IonQ provider ... includes its
-    # own transpilation and compilation pipeline" from an abstract 'qis'
-    # basis down to native gates). We build this locally, rather than
-    # connecting to IonQProvider(), so no live API token/network access is
-    # required to determine the correct native-gate accounting — this
-    # script otherwise runs entirely against local AerSimulator, and stays
-    # that way; only the *gate-counting* below touches this Target, never
-    # the executed circuit (see run_qe()'s RB block).
-    # Returns None if qiskit_ionq is unavailable, so callers can fall back
-    # to the existing fixed-constant behavior rather than crash a whole
-    # matrix job over an optional dependency.
+    
     try:
         from qiskit.transpiler import Target, InstructionProperties
         from qiskit.circuit import Delay, Measure, Parameter
@@ -383,18 +310,7 @@ def _ionq_native_target(gate_time_ns: float):
 
 
 def _native_gates_per_clifford(rb_circuits, native_target):
-    # Empirically measures the average number of noisy, architecture-native
-    # single-qubit gates (GPI + GPI2) per Clifford in THIS run's actual RB
-    # circuit sample, by transpiling each circuit onto native_target and
-    # reading its true gate count — rather than assuming a fixed
-    # gates-per-Clifford ratio calibrated for a different basis. This is
-    # the standard, correct way to convert a measured error-per-Clifford
-    # into an error-per-native-gate for a specific device's real gate set
-    # (cf. QE_SX_PER_CLIFFORD, which is the superconducting-basis
-    # equivalent of exactly this quantity, historically hardcoded rather
-    # than measured). Returns NaN if nothing could be transpiled/measured,
-    # so the caller can fail safely to NaN instead of dividing by a bad
-    # ratio.
+    
     from qiskit import transpile
     from qiskit.transpiler.exceptions import TranspilerError
     weighted_gates = 0.0
@@ -417,34 +333,7 @@ def _native_gates_per_clifford(rb_circuits, native_target):
 
 
 def _qe_backend(arch_name: str = "superconducting"):
-    # DISCLOSED METHODOLOGICAL CONSTRAINT (not a bug, not silently fixable):
-    # qiskit-experiments' standard T1 / T2Ramsey / T2Hahn / StandardRB
-    # experiment classes generate circuits in an abstract sx/x/rz/delay
-    # basis; the *executed* circuit here is always built/simulated against
-    # that abstract basis via the backend this function returns, regardless
-    # of arch_name — changing that would mean changing _make_backend()'s
-    # noise-model gate tagging too, which is out of scope for this fix.
-    # arch_name is accepted so the caller can log/audit which architecture
-    # a given run was nominally targeting.
-    #
-    # This does NOT mean every downstream quantity is architecture-blind,
-    # though: for trapped_ion, run_qe() separately measures the real
-    # IonQ-native (GPI/GPI2) gate count per Clifford via a verified local
-    # Target built from qiskit_ionq's own gate/equivalence library (see
-    # _ionq_native_target / _native_gates_per_clifford below), and uses
-    # that — not this function's abstract backend — to convert RB's
-    # measured EPC into epsilon_sx correctly for that architecture's real
-    # native gate set. No equivalent standard, gate-based qiskit-experiments
-    # workflow exists for neutral_atom (Pasqal/QuEra neutral-atom hardware
-    # is accessed via analog abstractions — Pulser, Braket — not digital
-    # BackendV2 circuits), so neutral_atom has no correction available and
-    # remains fully on this abstract-basis proxy; any neutral_atom result
-    # should be reported as a best-effort adaptation, not as "the standard
-    # way practitioners run it," because no such standard exists today.
-    # Any trapped_ion/neutral_atom Δω result specifically should likewise
-    # be attributed to this basis-gate proxy rather than to the same
-    # Nyquist mechanism claimed for superconducting, where the backend's
-    # basis genuinely matches the target architecture.
+    
     try:
         from qiskit.providers.fake_provider import GenericBackendV2
         return GenericBackendV2(
@@ -503,33 +392,6 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     T2_pr        = arch["T2_s"]
     eps_max      = arch["eps_max"]
     gate_time_ns = arch["gate_time_ns"]
-    # BUG FIX: dw_max was previously arch["dw_max_rad_s"] — a fixed,
-    # architecture-wide constant from ARCH_DEFAULTS. sample_instance()
-    # (which generates the TRUE dw values this guard is meant to judge
-    # plausibility against) uses a completely different, DYNAMIC quantity:
-    # inv.BackendProfile.from_architecture(arch_name).dw_max_rad_s, a
-    # @property computed as 0.90*pi/ramsey_delays_s[0] from the actual
-    # arch_default log-spaced delay grid. For trapped_ion these two
-    # differ by ~4400x (dynamic ~14 rad/s vs static ~62,832 rad/s),
-    # because trapped_ion's huge T1 range [0.01s, 100000s] forces very
-    # long log-spaced delays, giving a tiny dynamic dw_max. Using the
-    # static constant meant the guard threshold was ~8,900x-44,000x larger
-    # than the largest true dw value ever sampled -- mathematically
-    # incapable of rejecting anything, regardless of how badly QE's fit
-    # diverged. This is why 0% were rejected while R^2 was still
-    # catastrophic (~-930,000): every QE prediction passed the guard
-    # trivially, no matter its actual magnitude relative to the true,
-    # much smaller signal.
-    #
-    # profile_dw_max is passed in from run_sweep(), computed ONCE per
-    # architecture rather than recomputed on every call: it is fully
-    # deterministic given arch_name (arch_default confidence, fixed
-    # log-spaced delay grid — no dependency on the instance's true
-    # parameters), and BackendProfile.from_architecture() internally
-    # calls fetch_live_spam(), which may attempt a live network call
-    # before falling back. Recomputing this thousands of times (once per
-    # instance x budget) would be both wasteful and a potential source of
-    # slow/blocking calls in a multiprocessing worker.
     dw_max = (profile_dw_max if profile_dw_max is not None
               else inv.BackendProfile.from_architecture(arch_name).dw_max_rad_s)
 
@@ -545,39 +407,10 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
 
     backend = _qe_backend(arch_name)
 
-    # FIX: dt_ns previously came from arch.get("dt_ns") — the target
-    # architecture's own native clock (None for trapped_ion / neutral_atom;
-    # 0.2222 ns for superconducting). That is NOT necessarily the clock
-    # `backend` (above) used to build/schedule these circuits — qiskit-
-    # experiments schedules against `backend`'s own timing, and
-    # _make_backend()'s noise model later re-interprets each Delay
-    # instruction's duration using whatever dt_ns is passed to it
-    # (inv._delay_seconds(inst, dt_ns)). Feeding it a different, unrelated
-    # clock than the one that built the circuit is a unit-consistency bug:
-    # for trapped_ion/neutral_atom, delays spanning up to 3x T2_pr (up to
-    # several seconds) would be built against the backend's own dt and then
-    # reinterpreted under dt_ns=None, i.e. as raw seconds — internally
-    # inconsistent regardless of what value dt_ns=None resolves to
-    # downstream. We now always resolve dt_ns from the backend that will
-    # actually schedule the circuits, so the clock used to build a circuit
-    # and the clock used to interpret its delays in the noise model are
-    # always the same value.
+    
     dt_ns = (backend.dt * 1e9) if getattr(backend, "dt", None) else 0.2222
 
-    # Native execution: for trapped_ion, transpile every experiment's
-    # circuits onto a verified real IonQ-native Target (GPI/GPI2, via
-    # qiskit_ionq's own gate classes and equivalence library -- see
-    # _ionq_native_target()) instead of executing the abstract sx/x/rz
-    # proxy circuit. Tested end-to-end before being wired in here:
-    # abstract circuit -> native transpile -> GPI/GPI2 -> converted to
-    # AerSimulator-executable UnitaryGate (same physical operation,
-    # required because Aer's C++ backend does not recognise "gpi"/"gpi2"
-    # as instruction names) -> noise tagged onto "unitary" -> executed.
-    # superconducting keeps its existing (already correct) abstract-basis
-    # path unchanged. neutral_atom has no verified native-gate provider to
-    # build a Target from (no standard digital qiskit-experiments workflow
-    # exists for that hardware family -- see _qe_backend() docstring) and
-    # remains on the disclosed abstract-basis proxy.
+    # Native Execution
     native_target     = None
     native_gate_names = None
     if arch_name == "trapped_ion":
@@ -591,17 +424,11 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     dw_qe   = float("nan")
     eps_qe  = float("nan")
 
-    # guard_flags: (had_candidate, was_rejected) per parameter, returned to
-    # the caller (run_sweep, in the main process) for aggregation -- a
-    # plain module-level counter would not aggregate correctly across
-    # multiprocessing worker processes.
+    
     guard_flags = {"T1": (False, False), "T2": (False, False),
                    "dw": (False, False), "eps": (False, False)}
 
-    # T1/T2 plausibility reference: the TRUE sampling range for this
-    # architecture in THIS benchmark (TRUE_PARAM_RANGES), not
-    # ARCH_DEFAULTS["T1_max_s"] (the full physical hardware range, which
-    # can be 50-5000x larger -- see constants block comment above).
+    
     T1_true_max = TRUE_PARAM_RANGES[arch_name]["T1_s"][1]
     T1_guard_threshold = QE_T1_PLAUSIBILITY_MULT * T1_true_max
 
@@ -632,9 +459,7 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
         freq_hz, _        = _extract(data, "Frequency")
         if np.isfinite(freq_hz):
             dw_candidate = abs(freq_hz - osc_freq_hz) * 2.0 * np.pi
-            # dw_max here is the SAME dynamic BackendProfile quantity that
-            # generated the true dw values (see docstring above run_qe),
-            # not the static ARCH_DEFAULTS constant.
+           
             plausible = dw_candidate <= QE_DW_PLAUSIBILITY_MULT * dw_max
             guard_flags["dw"] = (True, not plausible)
             if plausible:
@@ -670,8 +495,7 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
 
     T2_combined = float("nan")
     if np.isfinite(T2_candidate):
-        # T2 <= 2*T1 always; T1_true_max (TRUE_PARAM_RANGES-anchored, see
-        # above) is therefore also the correct reference scale for T2.
+       
         plausible = (0.0 < T2_candidate <= T1_guard_threshold)
         guard_flags["T2"] = (True, not plausible)
         if plausible:
@@ -691,35 +515,19 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
                               native_gate_names=native_gate_names)
         epc, _     = _extract(data, "EPC")
         if np.isfinite(epc) and epc > 0:
-            # gates_per_clifford converts EPC (error per Clifford) into
-            # epsilon_sx (error per native single-qubit gate). This ratio
-            # is basis-dependent, so it must reflect the architecture's
-            # real native gate set, not always the superconducting one.
+           
             gates_per_clifford = QE_SX_PER_CLIFFORD
             if arch_name == "trapped_ion":
                 native_target = _ionq_native_target(gate_time_ns)
                 if native_target is not None:
-                    # Re-generate this trial's exact RB circuit sample
-                    # (same StandardRB object, same seed -> deterministic,
-                    # identical circuits to what _run_exp already executed
-                    # above) purely to measure its true IonQ-native gate
-                    # count. This does not affect what was simulated.
+                   
                     measured = _native_gates_per_clifford(
                         exp_rb.circuits(), native_target)
                     if np.isfinite(measured) and measured > 0:
                         gates_per_clifford = measured
-                    # else: qiskit_ionq unavailable or measurement failed;
-                    # fall back to QE_SX_PER_CLIFFORD rather than crash the
-                    # job, but this fallback is then a known-wrong basis
-                    # for trapped_ion and should be flagged if it occurs.
-            # neutral_atom: no verified native-gate provider exists (see
-            # _qe_backend() docstring) -> stays on QE_SX_PER_CLIFFORD as a
-            # disclosed, uncorrected proxy.
+                   
             eps_candidate = epc / gates_per_clifford
-            # eps_max (ARCH_DEFAULTS' full physical bound, ~0.5) is far
-            # looser than TRUE_PARAM_RANGES' actual sampled max (as little
-            # as 0.002-0.01 depending on architecture) -- anchor the guard
-            # to the true sampling range, same principle as T1/T2/dw above.
+            
             eps_true_max = TRUE_PARAM_RANGES[arch_name]["eps"][1]
             eps_guard_threshold = QE_EPS_PLAUSIBILITY_MULT * eps_true_max
             plausible = (0.0 <= eps_candidate <= eps_guard_threshold)
@@ -809,13 +617,7 @@ def run_sweep(n_workers):
         for inst in instances
     ]
 
-    # Computed ONCE per architecture (deterministic given arch_default
-    # confidence's fixed log-spaced delay grid — no per-instance
-    # dependency) and threaded through to every run_qe() call, rather than
-    # recomputed per instance x budget. See run_qe()'s docstring comment
-    # for why this specific value matters: it is the SAME dynamic quantity
-    # sample_instance() used to generate the true dw values, so QE's
-    # plausibility guard is judged against the correct scale.
+   
     profile_dw_max = inv.BackendProfile.from_architecture(ARCH).dw_max_rad_s
     print(f"  profile_dw_max (dynamic, used for QE's dw guard) = "
           f"{profile_dw_max:.4f} rad/s", flush=True)

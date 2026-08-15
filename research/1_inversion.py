@@ -6,8 +6,7 @@ from typing import Optional
 import numpy as np
 from scipy.optimize import curve_fit
 
-# Lazy imports for AerSimulator — only loaded when run_probe_circuits_aer() is called
-# so that 1_inversion.py remains importable without qiskit-aer installed.
+
 
 __all__ = [
     "ARCH_DEFAULTS", "build_custom_arch", "BackendProfile",
@@ -18,60 +17,45 @@ __all__ = [
     "_sqrtx_native_inverse_pair", "_build_gate_rep_circuit",
     "split_qubits_for_op_limit",
 ]
-# NOTE: GATE_REP_N_DT is intentionally excluded — it is a deprecated alias,
-# see BackendProfile.gate_rep_n.
 
-# Mai et al. (2024) trapped-ion asymmetry, used to rescale IonQ's single
-# combined spam_error figure into an approximate (p0_given_1, p1_given_0) pair.
 _MAI_2024_P0_GIVEN_1 = 0.0005
 _MAI_2024_P1_GIVEN_0 = 0.0018
 
-# p0_given_1 / p1_given_0 are readout (SPAM) error rates: P(read 0 | true 1) and
-# P(read 1 | true 0). They are treated as known, architecture-typical constants that
-# are fixed during inversion (not fit) to avoid inflating the free-parameter count.
+
 ARCH_DEFAULTS: dict[str, dict] = {
     "superconducting": {
         "T1_s": 150e-6, "T2_s": 90e-6,
         "T1_min_s": 100e-9,
-        # T1_max_s: state-of-the-art transmon, Place et al. (2021) Nat. Commun.
-        # (>1ms coherence); general platform range per Krantz et al. (2019)
-        # Appl. Phys. Rev.
+        
         "T1_max_s": 1e-3, "T2_min_s": 100e-9,
         "dw_max_rad_s": 2*np.pi*500e3, "dw_typical_khz": 5.0,
         "eps_typical": 3.5e-4, "eps_max": 0.5,
         "dt_ns": 0.2222, "gate_time_ns": 50.0,
-        # Chen et al. (2023), "Transmon qubit readout fidelity at the threshold
-        # for fault-tolerant quantum computing"
+        
         "p0_given_1": 0.0092, "p1_given_0": 0.0009,
         "display_unit": "µs", "time_scale": 1e6,
     },
     "trapped_ion": {
         "T1_s": 1000.0, "T2_s": 1.0,
         "T1_min_s": 0.01,
-        # T1_max_s: >1 hour coherence demonstrated on Quantinuum H2; see also
-        # Bruzewicz et al. (2019) Appl. Phys. Rev., Wang et al. (2021) Nat.
-        # Photon.
+        
         "T1_max_s": 100000.0, "T2_min_s": 0.001,
         "dw_max_rad_s": 2*np.pi*10e3, "dw_typical_khz": 0.5,
         "eps_typical": 5e-4, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 135_000.0,
-        # Mai et al. (2024), "High-Fidelity Detection on 171Yb+ Qubit via
-        # 2D3/2 Shelving"
+        
         "p0_given_1": 0.0005, "p1_given_0": 0.0018,
         "display_unit": "ms", "time_scale": 1e3,
     },
     "neutral_atom": {
         "T1_s": 10.0, "T2_s": 1.0,
         "T1_min_s": 0.001,
-        # T1_max_s: ground-state hyperfine coherence, hours demonstrated in
-        # optical lattices — Evered et al. (2023) Nature; Bluvstein et al.
-        # (2022) Nature
+        
         "T1_max_s": 100000.0, "T2_min_s": 0.001,
         "dw_max_rad_s": 2*np.pi*100e3, "dw_typical_khz": 2.0,
         "eps_typical": np.sqrt(1e-3 * 1e-2), "eps_max": 0.5,  # ~3.16e-3
         "dt_ns": None, "gate_time_ns": 500.0,
-        # Evered et al. (2023), "High-fidelity parallel entangling gates on a
-        # neutral-atom quantum computer"
+        
         "p0_given_1": 0.0060, "p1_given_0": 0.0040,
         "display_unit": "ms", "time_scale": 1e3,
     },
@@ -127,10 +111,10 @@ def fetch_live_spam(
     ionq_backend_name: str = "forte-1",
 ) -> tuple[float, float, str, str]:
     """
-    Fetch live SPAM (readout) error rates from a provider where possible,
-    falling back to architecture-typical literature defaults otherwise.
+    This fetches the live SPAM error rates from a provider where possible,
+    otherwise falls back to default error rates from ARCH_DEFAULTS.
 
-    Returns (p0_given_1, p1_given_0, spam_source, spam_note). Never raises.
+    Returns (p0_given_1, p1_given_0, spam_source, spam_note). 
     """
     if architecture == "superconducting":
         try:
@@ -154,7 +138,7 @@ def fetch_live_spam(
             if ionq_api_token is None:
                 raise ValueError("no ionq_api_token provided")
             import requests
-            url = (f"https://api.ionq.co/v0.3/characterizations/backends/"
+            url = (f"https://api.ionq.co/v0.3/characterizations/backends/" 
                    f"qpu.{ionq_backend_name}/current")
             resp = requests.get(
                 url, headers={"Authorization": f"apiKey {ionq_api_token}"}, timeout=10)
@@ -212,16 +196,15 @@ def fetch_live_spam(
 
 @dataclass
 class CalibrationSource:
-    """Provenance record for BackendProfile priors — audits which values came
-    from a live provider calibration pull vs. an architecture default."""
-    T1_source:  str   # "live_calibration" | "arch_default"
+    """Provenance record for BackendProfile priors. This audits which values came
+    from a live provider calibration data or an architecture default."""
+    T1_source:  str   
     T2_source:  str
     eps_source: str
     dw_source:  str
-    timestamp:  str   # ISO timestamp of when calibration was pulled
-    backend:    str   # backend name
+    timestamp:  str   # 
+    backend:    str   
     spam_source: str = "literature_fallback"
-    # "live_asymmetric" | "live_scaled_from_combined" | "literature_fallback"
     spam_note:  str = ""
 
 
@@ -407,7 +390,7 @@ class BackendProfile:
         T1_prior,  T1_source  = arch["T1_s"], "arch_default"
         T2_prior,  T2_source  = arch["T2_s"], "arch_default"
         eps_prior, eps_source = arch["eps_typical"], "arch_default"
-        dw_source = "arch_default"  # IonQ does not expose detuning
+        dw_source = "arch_default"  
 
         try:
             try:
@@ -462,7 +445,7 @@ class BackendProfile:
                           f"{', '.join(diag_parts)}")
 
         except Exception:
-            print("[Canary] IonQ API unavailable — using arch defaults for trapped_ion")
+            print("[Canary] IonQ API unavailable - using arch defaults for trapped_ion")
             return cls.from_architecture("trapped_ion")
 
         T2_prior = min(T2_prior, 2.0*T1_prior)
@@ -498,7 +481,7 @@ class BackendProfile:
                    backend_name=f"ionq:{backend_name}", custom_arch=custom_arch,
                    calibration_source=calibration_source,
                    prior_confidence=prior_confidence)
-
+    #Theoretical proof-of-concept as experiment hasn't been tested on neutral atom processors
     @classmethod
     def from_braket_backend(cls,
                             device_arn: str = "arn:aws:braket:us-east-1::device/qpu/quera/Aquila",
@@ -569,10 +552,7 @@ class BackendProfile:
             backend=backend_name,
             spam_source=spam_source, spam_note=spam_note,
         )
-        # from_architecture() always uses literature/arch-typical priors, even
-        # when explicit T1_prior_s/T2_prior_s overrides are passed in, so it
-        # always sets prior_confidence="arch_default". Only a genuine live
-        # API read (from_ibm_backend / from_ionq_backend) sets "live".
+       
         return cls(architecture=architecture, T1_prior_s=T1, T2_prior_s=T2,
                    dt_ns=defaults["dt_ns"], backend_name=backend_name,
                    calibration_source=calibration_source,

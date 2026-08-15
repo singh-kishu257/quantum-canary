@@ -52,8 +52,7 @@ class OnlineInversionResult:
     qubit_results:  dict
     algo_indices:   list
     canary_indices: list
-    # 95th pctile chi2 for DOF=2 (3-point fits); 2.0 is too
-    # tight and flags ~14% of valid fits as YELLOW by sampling variance alone.
+    
     green_chi2_threshold:         float = 5.0
     yellow_t2_disagree_threshold: float = 0.20
 

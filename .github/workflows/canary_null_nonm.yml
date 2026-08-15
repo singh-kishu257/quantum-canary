@@ -1,172 +1,94 @@
-name: Canary Null Calibration and Non-Markovian Gradient Study
-
-# Runs 3_null_nonm.py as a parallel matrix over (architecture x phase),
-# then merges every job's CSV output and produces the final two-panel
-# figure in a combine job.
-#
-# Place this file at: .github/workflows/canary_null_nonm.yml
-# Assumes 1_inversion.py and 3_null_nonm.py live at: quantum-canary/research/
+name: Null Calibration + Non-Markovian Gradient - Parallel Matrix [all architectures]
 
 on:
   workflow_dispatch:
-    inputs:
-      n_null:
-        description: "Null instances for Phase 1 (false-positive audit)"
-        required: false
-        default: "500"
-      n_grad:
-        description: "Instances per gradient amplitude point (Phase 2)"
-        required: false
-        default: "20"
-      n_bootstrap:
-        description: "Bootstrap resamples for gradient CI"
-        required: false
-        default: "1000"
-      detection_budget:
-        description: "Total shots per Canary run (native protocol = 9900)"
-        required: false
-        default: "9900"
-      fp_threshold:
-        description: "chi2/dof threshold for the false-positive-rate report"
-        required: false
-        default: "3.0"
-  push:
-    paths:
-      - "research/3_null_nonm.py"
-      - "research/1_inversion.py"
-      - ".github/workflows/canary_null_nonm.yml"
-
-permissions:
-  contents: read
-
-env:
-  N_NULL: ${{ github.event.inputs.n_null || '500' }}
-  N_GRAD: ${{ github.event.inputs.n_grad || '20' }}
-  N_BOOTSTRAP: ${{ github.event.inputs.n_bootstrap || '1000' }}
-  DETECTION_BUDGET: ${{ github.event.inputs.detection_budget || '9900' }}
-  FP_THRESHOLD: ${{ github.event.inputs.fp_threshold || '3.0' }}
 
 jobs:
-  # ---------------------------------------------------------------------
-  # One parallel job per (architecture, phase) pair -- 3 x 2 = 6 jobs.
-  # Phase 1 (null) is the larger job per-architecture (N_NULL=500 single-
-  # circuit-batch instances); Phase 2 (gradient) sweeps 3 noise classes x
-  # 9 amplitude points x N_GRAD instances internally within its own job.
-  # ---------------------------------------------------------------------
   run:
-    name: run (${{ matrix.arch }} / ${{ matrix.phase }})
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: research
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         arch: [superconducting, trapped_ion, neutral_atom]
         phase: ["null", "gradient"]
-
+        prior_mode: ["arch", "live"]
+        exclude:
+          - phase: "gradient"
+            prior_mode: "live"
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-canary-nullnonm-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-canary-nullnonm-
+          python-version: '3.11'
 
       - name: Install dependencies
+        run: pip install numpy scipy qiskit==2.5.1 qiskit-aer==0.17.2
+
+      - name: Make output folders
+        run: mkdir -p research/data
+
+      - name: Run (arch=${{ matrix.arch }}, phase=${{ matrix.phase }}, prior=${{ matrix.prior_mode }})
         run: |
-          python -m pip install --upgrade pip
-          pip install numpy scipy matplotlib qiskit qiskit-aer
+          cd research
+          export ARCH="${{ matrix.arch }}"
+          export PHASE="${{ matrix.phase }}"
+          export PRIOR_MODE="${{ matrix.prior_mode }}"
+          N_WORKERS=4 python 3_null_nonm.py
 
-      - name: Run
-        env:
-          ARCH: ${{ matrix.arch }}
-          PHASE: ${{ matrix.phase }}
-          N_WORKERS: 4
-          JOB_TAG: nonm_${{ matrix.arch }}_${{ matrix.phase }}
-        run: python 3_null_nonm.py
-
-      - name: Upload per-job CSV artifacts
+      - name: Upload results (always, even on timeout/failure)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nullnonm-data-${{ matrix.arch }}-${{ matrix.phase }}
+          name: nullnonm-${{ matrix.arch }}-${{ matrix.phase }}-${{ matrix.prior_mode }}
           path: |
-            research/data/nullraw_nonm_${{ matrix.arch }}_${{ matrix.phase }}.csv
-            research/data/nullsummary_nonm_${{ matrix.arch }}_${{ matrix.phase }}.csv
-            research/data/gradraw_nonm_${{ matrix.arch }}_${{ matrix.phase }}.csv
-            research/data/gradsummary_nonm_${{ matrix.arch }}_${{ matrix.phase }}.csv
-          retention-days: 30
-          if-no-files-found: ignore
-          # ignore (not error): a "null"-phase job never produces gradraw/
-          # gradsummary files and vice versa -- each job only writes the
-          # pair of CSVs relevant to its own PHASE.
+            research/data/nullraw_nonm_${{ matrix.arch }}_${{ matrix.phase }}*.csv
+            research/data/nullsummary_nonm_${{ matrix.arch }}_${{ matrix.phase }}*.csv
+            research/data/gradraw_nonm_${{ matrix.arch }}_${{ matrix.phase }}*.csv
+            research/data/gradsummary_nonm_${{ matrix.arch }}_${{ matrix.phase }}*.csv
+          if-no-files-found: warn
 
   combine:
-    name: combine + plot
     needs: run
+    if: always()
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: research
-
+    timeout-minutes: 20
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install numpy scipy matplotlib qiskit qiskit-aer
+        run: pip install numpy scipy qiskit==2.5.1 qiskit-aer==0.17.2
 
-      - name: Download all per-job CSV artifacts
+      - name: Make output folders
+        run: mkdir -p research/data
+
+      - name: Download all split results
         uses: actions/download-artifact@v4
         with:
-          path: research/data_incoming
-          pattern: nullnonm-data-*
-          merge-multiple: false
+          pattern: nullnonm-*
+          path: research/data
+          merge-multiple: true
 
-      - name: Flatten downloaded artifacts into research/data/
+      - name: Merge CSVs
         run: |
-          mkdir -p data
-          find data_incoming -type f \( -name "nullraw_*.csv" -o \
-            -name "nullsummary_*.csv" -o -name "gradraw_*.csv" -o \
-            -name "gradsummary_*.csv" \) -exec cp {} data/ \;
-          echo "Collected CSVs:"
-          ls -la data/
+          cd research
+          COMBINE=1 python 3_null_nonm.py
 
-      - name: Merge CSVs and produce figures
-        env:
-          COMBINE: "1"
-          N_NULL: ${{ env.N_NULL }}
-          N_GRAD: ${{ env.N_GRAD }}
-          DETECTION_BUDGET: ${{ env.DETECTION_BUDGET }}
-        run: python 3_null_nonm.py
-
-      - name: Upload merged data + figures
+      - name: Upload final merged results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nullnonm-final-results
+          name: nullnonm-FINAL-merged
           path: |
             research/data/nullraw_ALL.csv
             research/data/nullsummary_ALL.csv
             research/data/gradraw_ALL.csv
             research/data/gradsummary_ALL.csv
-            research/figures/fig_null_gradient.pdf
-            research/figures/fig_null_gradient.png
-            research/figures/null_calibration_summary.txt
-          retention-days: 90
-          if-no-files-found: error
+            research/data/nullraw_live_ALL.csv
+            research/data/nullsummary_live_ALL.csv
+          if-no-files-found: warn
