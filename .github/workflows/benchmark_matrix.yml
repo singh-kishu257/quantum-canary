@@ -1,8 +1,8 @@
-name: Fig7 Benchmark - Parallel Matrix [all architectures]
+name: Benchmark - Parallel Matrix [all architectures]
 
 on:
   workflow_dispatch:
-  
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -14,17 +14,13 @@ jobs:
         architecture: [superconducting, trapped_ion, neutral_atom]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
-        run: pip install qiskit==2.5.1 qiskit-aer==0.17.2 qiskit-experiments==0.14.1 qiskit-ibm-runtime matplotlib
-
+        run: pip install qiskit==2.5.1 qiskit-aer==0.17.2 qiskit-experiments==0.14.1 qiskit-ibm-runtime
       - name: Make output folders
-        run: mkdir -p research/data research/figures
-
+        run: mkdir -p research/data
       - name: Run benchmark (budget=${{ matrix.budget }}, arch=${{ matrix.architecture }})
         run: |
           cd research
@@ -32,53 +28,44 @@ jobs:
           export ARCH="${{ matrix.architecture }}"
           export JOB_TAG="${{ matrix.budget }}_${{ matrix.architecture }}"
           N_WORKERS=4 python 7_benchmark_experiments.py
-
       - name: Upload results (always, even on timeout/failure)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fig7-results-${{ matrix.budget }}-${{ matrix.architecture }}
-          path: research/data/fig7_benchmark_${{ matrix.budget }}_${{ matrix.architecture }}.csv
+          name: benchmark-results-${{ matrix.budget }}-${{ matrix.architecture }}
+          path: research/data/qe_benchmark.csv
           if-no-files-found: warn
 
   merge:
+    name: "Merge into final CSVs"
+    runs-on: ubuntu-latest
     needs: run
     if: always()
-    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
-        run: pip install qiskit==2.5.1 qiskit-aer==0.17.2 qiskit-experiments==0.14.1 qiskit-ibm-runtime matplotlib
-
+        run: pip install numpy scipy qiskit==2.5.1 qiskit-aer==0.17.2
       - name: Make output folders
-        run: mkdir -p research/data research/figures
-
+        run: mkdir -p research/data
       - name: Download all split results
         uses: actions/download-artifact@v4
         with:
-          pattern: fig7-results-*
+          pattern: benchmark-results-*
           path: research/data
-          merge-multiple: true
-
-      - name: Merge into single CSV, threshold table, and figure
+      - name: Merge into qe_benchmark.csv + qe_threshold.csv
         run: |
           cd research
-          python 7b_merge_results.py
-
-      - name: Upload final merged results (single artifact)
+          COMBINE=1 python 7_benchmark_experiments.py
+      - name: Upload final merged results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fig7-FINAL-merged
+          name: qe-benchmark-FINAL
           path: |
-            research/data/fig7_benchmark.csv
-            research/data/fig7_threshold.csv
-            research/figures/fig7_benchmark.pdf
-            research/figures/fig7_benchmark.png
+            research/data/qe_benchmark.csv
+            research/data/qe_threshold.csv
           if-no-files-found: warn

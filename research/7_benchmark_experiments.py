@@ -7,10 +7,6 @@ import time
 import warnings
 import numpy as np
 from datetime import datetime, timezone
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 from collections import defaultdict
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
@@ -20,9 +16,7 @@ sys.modules["inversion"] = inv
 _spec.loader.exec_module(inv)
 
 DATA_DIR = SCRIPT_DIR / "data"
-FIG_DIR  = SCRIPT_DIR / "figures"
 DATA_DIR.mkdir(exist_ok=True)
-FIG_DIR.mkdir(exist_ok=True)
 
 SEED               = 48
 N_INSTANCES        = 200
@@ -42,15 +36,16 @@ QE_N_DELAYS        = 15
 QE_RB_LENGTHS      = [1, 2, 4, 8, 16, 32, 64, 128]
 QE_RB_SAMPLES      = 5
 QE_SX_PER_CLIFFORD = 1.875
+
 QE_DW_PLAUSIBILITY_MULT  = 2.0
 QE_T1_PLAUSIBILITY_MULT  = 5.0
 QE_EPS_PLAUSIBILITY_MULT = 5.0
-
 
 QE_GUARD_REJECTS = defaultdict(lambda: defaultdict(int))
 QE_GUARD_TOTAL   = defaultdict(lambda: defaultdict(int))
 
 import os as _os
+
 _ALL_BUDGETS = [1_000, 2_500, 5_000, 9_900, 15_000, 25_000, 50_000]
 _budget_env  = _os.environ.get("BUDGET_SUBSET", "").strip()
 if _budget_env:
@@ -63,8 +58,7 @@ ARCH = _os.environ.get("ARCH", "superconducting").strip()
 if ARCH not in ALL_ARCHITECTURES:
     sys.exit(f"ARCH env var must be one of {ALL_ARCHITECTURES}, got {ARCH!r}")
 
-JOB_TAG = _os.environ.get("JOB_TAG", f"full_{ARCH}")
-
+JOB_TAG = _os.environ.get("JOB_TAG", f"full{ARCH}")
 
 TRUE_PARAM_RANGES = {
     "superconducting": {
@@ -92,28 +86,12 @@ PARAMS = [
 ]
 
 BENCH_COLS = [
-    "budget", "architecture", "parameter", "method",
-    "r2", "r2_lo", "r2_hi",
-    "nrmse", "n_valid", "n_total", "mean_time_s",
+    "budget",  "architecture",  "parameter",  "method",
+    "r2",  "r2_lo",  "r2_hi",
+    "nrmse",  "n_valid",  "n_total",  "mean_time_s",
 ]
 
 THRESH_COLS = ["architecture", "parameter", "method", "shots_to_R2_095", "shots_to_R2_099"]
-
-PARAM_LATEX = {
-    "T1":          r"$T_1$",
-    "T2":          r"$T_2$ (combined)",
-    "delta_omega": r"$|\Delta\omega|$",
-    "epsilon_sx":  r"$\varepsilon_{sx}$",
-}
-
-COLOUR = {"Canary": "#1F3864", "QiskitExperiments": "#C00000"}
-MARKER = {"Canary": "o",       "QiskitExperiments": "s"}
-LABEL  = {
-    "Canary":            "Canary (this work)",
-    "QiskitExperiments": "Qiskit Experiments (T1+T2R+T2H+RB)",
-}
-METHODS = ["Canary", "QiskitExperiments"]
-PORDER  = ["T1", "T2", "delta_omega", "epsilon_sx"]
 
 
 def sample_instance(rng, arch_name):
@@ -121,7 +99,6 @@ def sample_instance(rng, arch_name):
     T1_lo, T1_hi = ranges["T1_s"]
     T2_lo, T2_hi = ranges["T2_s"]
     eps_lo, eps_hi = ranges["eps"]
-
     if T1_hi / T1_lo > 10.0:
         T1 = float(10 ** rng.uniform(np.log10(T1_lo), np.log10(T1_hi)))
     else:
@@ -187,26 +164,21 @@ def _perturb_instance(arch_name, T1, T2, eps, p0g1_nom, p1g0_nom, rng):
     """
     arch = inv.ARCH_DEFAULTS[arch_name]
     cfg  = REALISTIC_NOISE[arch_name]
-
     if cfg["sigma_T1_lognormal"] > 0.0:
         T1_eff = float(np.clip(
             T1 * np.exp(rng.normal(0.0, cfg["sigma_T1_lognormal"])),
             arch["T1_min_s"], arch["T1_max_s"]))
     else:
         T1_eff = T1
-
     T2_eff = float(np.clip(
         T2 * (1.0 - rng.uniform(0.0, cfg["T2_reduction_max"])),
         arch["T2_min_s"], min(2.0 * T1_eff, arch["T1_max_s"])))
-
     delta_coh = rng.normal(0.0, cfg["sigma_coherent_rad"])
     eps_eff   = float(np.clip(eps + delta_coh ** 2 / 4.0, 0.0, arch["eps_max"]))
-
     p0g1_eff = float(np.clip(
         p0g1_nom * (1.0 + rng.normal(0.0, cfg["sigma_SPAM_frac"])), 0.0, 0.30))
     p1g0_eff = float(np.clip(
         p1g0_nom * (1.0 + rng.normal(0.0, cfg["sigma_SPAM_frac"])), 0.0, 0.30))
-
     return T1_eff, T2_eff, eps_eff, p0g1_eff, p1g0_eff
 
 
@@ -227,12 +199,11 @@ def _make_backend(qc, T1, T2, eps, p0g1, p1g0, gate_time_ns, dt_ns,
                   noise_gate_names=None):
     from qiskit_aer import AerSimulator
     from qiskit_aer.noise import (NoiseModel, thermal_relaxation_error,
-                                   depolarizing_error, ReadoutError)
+                                  depolarizing_error, ReadoutError)
     nm   = NoiseModel()
     gate_time_s = gate_time_ns * 1e-9
     sx_e = (thermal_relaxation_error(T1, T2, gate_time_s)
             .compose(depolarizing_error(2.0 * eps, 1)))
-    
     names = noise_gate_names or ["sx", "x", "id", "rx", "u1", "p"]
     nm.add_quantum_error(sx_e, names, [0])
     seen = set()
@@ -250,8 +221,8 @@ def _make_backend(qc, T1, T2, eps, p0g1, p1g0, gate_time_ns, dt_ns,
 
 
 def _run_exp(exp_obj, T1, T2, eps, p0g1, p1g0, shots, gate_time_ns, dt_ns,
-            dw_true=0.0, inject_detuning=False, native_target=None,
-            native_gate_names=None):
+             dw_true=0.0, inject_detuning=False, native_target=None,
+             native_gate_names=None):
     from qiskit import transpile
     exp_obj.set_run_options(shots=shots)
     circuits = exp_obj.circuits()
@@ -261,7 +232,6 @@ def _run_exp(exp_obj, T1, T2, eps, p0g1, p1g0, shots, gate_time_ns, dt_ns,
                   if inject_detuning else qc)
         noise_gate_names = None
         if native_target is not None:
-            
             run_qc = transpile(run_qc, target=native_target, optimization_level=1)
             run_qc = _convert_native_to_unitary(run_qc, native_gate_names)
             noise_gate_names = ["unitary"]
@@ -291,7 +261,6 @@ def _extract(exp_data, name):
 
 
 def _ionq_native_target(gate_time_ns: float):
-    
     try:
         from qiskit.transpiler import Target, InstructionProperties
         from qiskit.circuit import Delay, Measure, Parameter
@@ -310,7 +279,6 @@ def _ionq_native_target(gate_time_ns: float):
 
 
 def _native_gates_per_clifford(rb_circuits, native_target):
-    
     from qiskit import transpile
     from qiskit.transpiler.exceptions import TranspilerError
     weighted_gates = 0.0
@@ -333,7 +301,6 @@ def _native_gates_per_clifford(rb_circuits, native_target):
 
 
 def _qe_backend(arch_name: str = "superconducting"):
-    
     try:
         from qiskit.providers.fake_provider import GenericBackendV2
         return GenericBackendV2(
@@ -351,15 +318,12 @@ def run_canary(T1_true, T2_true, dw_true, eps_true, seed, budget, arch_name,
     profile = inv.BackendProfile.from_architecture(arch_name)
     p0g1    = p0g1_eff if p0g1_eff is not None else arch["p0_given_1"]
     p1g0    = p1g0_eff if p1g0_eff is not None else arch["p1_given_0"]
-
     circuits, meta = inv.build_probe_circuits(profile)
-
     scale   = budget / CANARY_TOTAL
     sh_t1   = max(10, int(round(CANARY_SHOTS_T1     * scale)))
     sh_ram  = max(10, int(round(CANARY_SHOTS_RAMSEY  * scale)))
     sh_gate = max(10, int(round(CANARY_SHOTS_GATE    * scale)))
     sh_echo = max(10, int(round(CANARY_SHOTS_ECHO    * scale)))
-
     try:
         counts_list = inv.run_probe_circuits_aer(
             circuits, meta,
@@ -394,20 +358,15 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     gate_time_ns = arch["gate_time_ns"]
     dw_max = (profile_dw_max if profile_dw_max is not None
               else inv.BackendProfile.from_architecture(arch_name).dw_max_rad_s)
-
     budget_per_exp = budget // 4
     n_rb_circs     = len(QE_RB_LENGTHS) * QE_RB_SAMPLES
     shots_t1  = max(10, budget_per_exp // QE_N_DELAYS)
     shots_t2r = max(10, budget_per_exp // QE_N_DELAYS)
     shots_t2h = max(10, budget_per_exp // QE_N_DELAYS)
     shots_rb  = max(10, budget_per_exp // n_rb_circs)
-
     delays_t1 = np.linspace(1e-6, 5.0 * T1_pr, QE_N_DELAYS).tolist()
     delays_t2 = np.linspace(1e-6, 3.0 * T2_pr, QE_N_DELAYS).tolist()
-
     backend = _qe_backend(arch_name)
-
-    
     dt_ns = (backend.dt * 1e9) if getattr(backend, "dt", None) else 0.2222
 
     # Native Execution
@@ -423,12 +382,8 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
     T2h_qe  = float("nan");  T2h_std = float("nan")
     dw_qe   = float("nan")
     eps_qe  = float("nan")
-
-    
     guard_flags = {"T1": (False, False), "T2": (False, False),
                    "dw": (False, False), "eps": (False, False)}
-
-    
     T1_true_max = TRUE_PARAM_RANGES[arch_name]["T1_s"][1]
     T1_guard_threshold = QE_T1_PLAUSIBILITY_MULT * T1_true_max
 
@@ -459,7 +414,6 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
         freq_hz, _        = _extract(data, "Frequency")
         if np.isfinite(freq_hz):
             dw_candidate = abs(freq_hz - osc_freq_hz) * 2.0 * np.pi
-           
             plausible = dw_candidate <= QE_DW_PLAUSIBILITY_MULT * dw_max
             guard_flags["dw"] = (True, not plausible)
             if plausible:
@@ -495,12 +449,10 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
 
     T2_combined = float("nan")
     if np.isfinite(T2_candidate):
-       
         plausible = (0.0 < T2_candidate <= T1_guard_threshold)
         guard_flags["T2"] = (True, not plausible)
         if plausible:
             T2_combined = T2_candidate
-
     if np.isfinite(T1_qe) and np.isfinite(T2_combined):
         T2_combined = min(T2_combined, 2.0 * T1_qe)
 
@@ -515,19 +467,15 @@ def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
                               native_gate_names=native_gate_names)
         epc, _     = _extract(data, "EPC")
         if np.isfinite(epc) and epc > 0:
-           
             gates_per_clifford = QE_SX_PER_CLIFFORD
             if arch_name == "trapped_ion":
                 native_target = _ionq_native_target(gate_time_ns)
                 if native_target is not None:
-                   
                     measured = _native_gates_per_clifford(
                         exp_rb.circuits(), native_target)
                     if np.isfinite(measured) and measured > 0:
                         gates_per_clifford = measured
-                   
             eps_candidate = epc / gates_per_clifford
-            
             eps_true_max = TRUE_PARAM_RANGES[arch_name]["eps"][1]
             eps_guard_threshold = QE_EPS_PLAUSIBILITY_MULT * eps_true_max
             plausible = (0.0 <= eps_candidate <= eps_guard_threshold)
@@ -605,7 +553,6 @@ def _worker_qe(args):
 def run_sweep(n_workers):
     rng_master  = np.random.default_rng(SEED)
     instances   = [sample_instance(rng_master, ARCH) for _ in range(N_INSTANCES)]
-
     rng_perturb = np.random.default_rng(SEED + 999)
     arch_def    = inv.ARCH_DEFAULTS[ARCH]
     perturbed   = [
@@ -616,14 +563,10 @@ def run_sweep(n_workers):
             rng_perturb)
         for inst in instances
     ]
-
-   
     profile_dw_max = inv.BackendProfile.from_architecture(ARCH).dw_max_rad_s
     print(f"  profile_dw_max (dynamic, used for QE's dw guard) = "
           f"{profile_dw_max:.4f} rad/s", flush=True)
-
     rows = []
-
     print(f"  ARCH={ARCH}  N={N_INSTANCES}  budgets={SHOT_BUDGETS}  workers={n_workers}", flush=True)
     print(f"  Canary={CANARY_TOTAL} shots | QE=budget/4 per exp | osc_freq=arch-typical | RB lengths={QE_RB_LENGTHS}", flush=True)
     print(f"  Realistic noise: TLS T1 drift, 1/f T2 reduction, coherent over-rotation, SPAM drift", flush=True)
@@ -631,10 +574,8 @@ def run_sweep(n_workers):
 
     for bi, budget in enumerate(SHOT_BUDGETS):
         print(f"\n[{bi+1}/{len(SHOT_BUDGETS)}] budget={budget:,}  arch={ARCH}", flush=True)
-
         c_seed_base = SEED * 10_000 + bi * 1_000
         q_seed_base = c_seed_base + 500
-
         c_args = [
             (i,
              (perturbed[i][0], perturbed[i][1], instances[i][2], perturbed[i][2]),
@@ -649,14 +590,11 @@ def run_sweep(n_workers):
              perturbed[i][3], perturbed[i][4], profile_dw_max)
             for i in range(N_INSTANCES)
         ]
-
         c_res  = [None] * N_INSTANCES;  c_time = [float("nan")] * N_INSTANCES
         q_res  = [None] * N_INSTANCES;  q_time = [float("nan")] * N_INSTANCES
-
         with mp.Pool(n_workers) as pool:
             for idx, res, t in pool.imap_unordered(_worker_canary, c_args, chunksize=4):
                 c_res[idx]  = res;  c_time[idx] = t
-
         with mp.Pool(n_workers) as pool:
             for idx, res, t in pool.imap_unordered(_worker_qe, q_args, chunksize=4):
                 q_res[idx]  = res;  q_time[idx] = t
@@ -674,12 +612,10 @@ def run_sweep(n_workers):
             "delta_omega": [abs(instances[i][2]) for i in range(N_INSTANCES)],
             "epsilon_sx":  [perturbed[i][2] for i in range(N_INSTANCES)],
         }
-
         for pname, pidx in PARAMS:
             tv = true[pname]
             cv = [r[pidx] for r in c_res]
             qv = [r[pidx] for r in q_res]
-
             for method, vals, times in [
                     ("Canary",            cv, c_time),
                     ("QiskitExperiments", qv, q_time)]:
@@ -700,7 +636,6 @@ def run_sweep(n_workers):
                     "n_total":     N_INSTANCES,
                     "mean_time_s": mean_t,
                 })
-
             rc = _r2_point(tv, cv); nc = sum(1 for v in cv if np.isfinite(v))
             rq = _r2_point(tv, qv); nq = sum(1 for v in qv if np.isfinite(v))
             print(f"  {pname:12s}: Canary R2={rc:+.4f} ({nc}/{N_INSTANCES})"
@@ -719,12 +654,11 @@ def run_sweep(n_workers):
         flag     = "  <-- check this" if pct > 50.0 else ""
         print(f"    {pname:4s}: {rejected:5d}/{total:5d} rejected "
               f"({pct:5.1f}%){flag}", flush=True)
-
     return rows
 
 
 def save_benchmark_csv(rows):
-    path = DATA_DIR / f"fig7_benchmark_{JOB_TAG}.csv"
+    path = DATA_DIR / "qe_benchmark.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=BENCH_COLS)
         w.writeheader()
@@ -738,7 +672,6 @@ def save_threshold_csv(rows):
     for row in rows:
         groups[(row["architecture"], row["parameter"], row["method"])].append(
             (row["budget"], row["r2"]))
-
     thresh_rows = []
     max_b = max(SHOT_BUDGETS)
     for (arch_name, pname, method), pairs in sorted(groups.items()):
@@ -752,14 +685,12 @@ def save_threshold_csv(rows):
             "shots_to_R2_095": s95 if s95 else f"> {max_b:,}",
             "shots_to_R2_099": s99 if s99 else f"> {max_b:,}",
         })
-
-    path = DATA_DIR / "fig7_threshold.csv"
+    path = DATA_DIR / "qe_threshold.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=THRESH_COLS)
         w.writeheader()
         w.writerows(thresh_rows)
     print(f"Saved: {path}", flush=True)
-
     by_arch_param = defaultdict(dict)
     for r in thresh_rows:
         by_arch_param[(r["architecture"], r["parameter"])][r["method"]] = r["shots_to_R2_095"]
@@ -770,94 +701,7 @@ def save_threshold_csv(rows):
         sc = d.get("Canary", "-")
         sq = d.get("QiskitExperiments", "-")
         print(f"  {arch_name:16s}  {pname:14s}  {str(sc):>10s}  {str(sq):>10s}")
-
     return path
-
-
-def plot_results(rows):
-    idx_data = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
-    architectures_present = []
-    for row in rows:
-        a = row["architecture"]
-        if a not in architectures_present:
-            architectures_present.append(a)
-        idx_data[a][row["parameter"]][row["method"]][row["budget"]] = row
-
-    architectures_present = [a for a in ALL_ARCHITECTURES if a in architectures_present]
-    budgets = sorted(SHOT_BUDGETS)
-    n_rows  = len(architectures_present)
-    fig, axes = plt.subplots(n_rows, 4, figsize=(15, 3.6 * n_rows), squeeze=False)
-
-    ARCH_LABEL = {"superconducting": "Superconducting", "trapped_ion": "Trapped ion",
-                  "neutral_atom": "Neutral atom"}
-
-    for row_i, arch_name in enumerate(architectures_present):
-        for col, pname in enumerate(PORDER):
-            ax = axes[row_i, col]
-
-            for method in METHODS:
-                xs, ys, los, his = [], [], [], []
-                for b in budgets:
-                    r = idx_data[arch_name][pname][method].get(b)
-                    if r is None:
-                        continue
-                    xs.append(b)
-                    if np.isfinite(r["r2"]):
-                        ys.append(r["r2"])
-                        los.append(r["r2"] - r["r2_lo"])
-                        his.append(r["r2_hi"] - r["r2"])
-                    else:
-                        ys.append(float("nan"))
-                        los.append(0.0)
-                        his.append(0.0)
-
-                xs  = np.array(xs); ys = np.array(ys)
-                los = np.array(los); his = np.array(his)
-                finite = np.isfinite(ys)
-
-                if finite.any():
-                    ax.fill_between(xs[finite], (ys - los)[finite], (ys + his)[finite],
-                                    color=COLOUR[method], alpha=0.12)
-                    ax.errorbar(xs[finite], ys[finite],
-                                yerr=[los[finite], his[finite]],
-                                color=COLOUR[method], marker=MARKER[method],
-                                label=LABEL[method],
-                                linewidth=1.8, markersize=5, capsize=3,
-                                elinewidth=1.0, alpha=0.95)
-
-            ax.axhline(0.95, color="#555", linestyle="--", linewidth=0.9, alpha=0.7)
-            ax.axvline(CANARY_TOTAL, color=COLOUR["Canary"], linestyle=":",
-                       linewidth=1.0, alpha=0.5)
-            ax.set_xscale("log")
-            ax.set_xlim(budgets[0] * 0.75, budgets[-1] * 1.35)
-            ax.set_ylim(-0.15, 1.05)
-            if row_i == 0:
-                ax.set_title(PARAM_LATEX[pname], fontsize=12)
-            if row_i == n_rows - 1:
-                ax.set_xlabel("Total shots", fontsize=9)
-            ax.yaxis.set_minor_locator(mticker.AutoMinorLocator(4))
-            ax.grid(True, which="major", alpha=0.25)
-            ax.grid(True, which="minor", alpha=0.08)
-            if col == 0:
-                ax.set_ylabel(f"{ARCH_LABEL[arch_name]}\n" + r"$R^2$ (bootstrap median, 95% CI)",
-                              fontsize=8.5)
-            if col == 0 and row_i == 0:
-                ax.legend(fontsize=6.5, loc="lower right", framealpha=0.85)
-
-    fig.suptitle(
-        "Fig. 7 - Canary vs. Qiskit Experiments: "
-        r"$R^2$ vs. total shot budget across architectures"
-        "\n(N=200 instances, 2000-resample bootstrap 95% CI; "
-        "QE: osc_freq=arch-typical prior, arch-prior delays, equal budget; "
-        "vertical dotted = Canary native budget; dashed = 0.95 target)",
-        fontsize=9, y=1.01)
-
-    plt.tight_layout()
-    for fmt in ("pdf", "png"):
-        p = FIG_DIR / f"fig7_benchmark.{fmt}"
-        fig.savefig(p, dpi=150, bbox_inches="tight")
-        print(f"Saved: {p}", flush=True)
-    plt.close(fig)
 
 
 if __name__ == "__main__":
@@ -866,14 +710,10 @@ if __name__ == "__main__":
     if sys.platform != "win32":
         mp.set_start_method("fork", force=True)
     n_workers = int(os.environ.get("N_WORKERS", max(1, mp.cpu_count() - 1)))
-
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    print(f"[{ts}] Fig. 7 benchmark - Canary vs. Qiskit Experiments", flush=True)
+    print(f"[{ts}] QE benchmark - Canary vs. Qiskit Experiments", flush=True)
     print(f"  Architecture={ARCH}  Seed={SEED}  N={N_INSTANCES}  bootstrap={N_BOOTSTRAP}  workers={n_workers}", flush=True)
-
     rows = run_sweep(n_workers)
     save_benchmark_csv(rows)
-    print(f"\n[job JOB_TAG={JOB_TAG}] "
-         f"Skipping threshold CSV and plot — run 7_merge_results.py "
-         f"after all matrix jobs complete to produce final outputs.",
-         flush=True)
+    save_threshold_csv(rows)
+    print(f"\n[job JOB_TAG={JOB_TAG}] done. Outputs: data/qe_benchmark.csv, data/qe_threshold.csv", flush=True)
