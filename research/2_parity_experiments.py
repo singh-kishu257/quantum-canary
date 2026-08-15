@@ -1,8 +1,6 @@
 import importlib.util, pathlib, sys, csv, os
 import multiprocessing as mp
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 from datetime import datetime, timezone
 
 _spec = importlib.util.spec_from_file_location(
@@ -13,18 +11,16 @@ _spec.loader.exec_module(inv)
 
 SCRIPT_DIR  = pathlib.Path(__file__).resolve().parent
 DATA_DIR    = SCRIPT_DIR / "data"
-FIGURES_DIR = SCRIPT_DIR / "figures"
 DATA_DIR.mkdir(exist_ok=True)
-FIGURES_DIR.mkdir(exist_ok=True)
 
 N_INSTANCES   = 300
 SHOTS_T1      = 300
-SHOTS_RAMSEY  = 1000 
+SHOTS_RAMSEY  = 1000
 SHOTS_GATE    = 500
 SHOTS_ECHO    = 500
 SEED          = 43
-ARCHITECTURES = ["superconducting", "trapped_ion", "neutral_atom"]
 
+ARCHITECTURES = ["superconducting", "trapped_ion", "neutral_atom"]
 _arch_env = os.environ.get("ARCH", "").strip()
 if _arch_env in ARCHITECTURES:
     ARCHITECTURES = [_arch_env]
@@ -32,11 +28,8 @@ if _arch_env in ARCHITECTURES:
 _n_env = os.environ.get("N_INSTANCES", "").strip()
 if _n_env.isdigit():
     N_INSTANCES = int(_n_env)
-rng = np.random.default_rng(SEED)
 
-COLORS  = {"superconducting": "#1f77b4", "trapped_ion": "#ff7f0e", "neutral_atom": "#2ca02c"}
-MARKERS = {"superconducting": "o",       "trapped_ion": "s",       "neutral_atom": "^"}
-LABELS  = {"superconducting": "Superconducting", "trapped_ion": "Trapped ion", "neutral_atom": "Neutral atom"}
+rng = np.random.default_rng(SEED)
 
 
 def shot_budget(arch_name: str) -> int:
@@ -60,7 +53,6 @@ TRUE_PARAM_RANGES = {
         "eps":  (1e-3, 1e-2),
     },
 }
-
 
 REALISTIC_NOISE = {
     "superconducting": {
@@ -116,10 +108,8 @@ def simulate_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
         profile.custom_arch = custom_arch
     else:
         profile = inv.BackendProfile.from_architecture(arch_name)
-
     arch = inv.ARCH_DEFAULTS[arch_name]
     circuits, meta = inv.build_probe_circuits(profile)
-
     counts_list = inv.run_probe_circuits_aer(
         circuits, meta,
         T1_true, T2_true, eps_true,
@@ -128,7 +118,6 @@ def simulate_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
         SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO,
         dw_s=dw_true,
     )
-
     return inv.lindblad_inversion(
         counts_list, meta, profile,
         shots_t1=SHOTS_T1, shots_ramsey=SHOTS_RAMSEY,
@@ -160,7 +149,6 @@ def _worker_fig2(args):
 def run_experiment(use_true_prior: bool = True, n_workers: int = None):
     if n_workers is None:
         n_workers = max(1, mp.cpu_count() - 1)
-
     rec = {k: [] for k in ["arch",
         "T1_true","T1_rec","T1_sig",
         "T2_true","T2_rec","T2_sig",
@@ -170,19 +158,15 @@ def run_experiment(use_true_prior: bool = True, n_workers: int = None):
         "eps_true","eps_rec","eps_sig",
         "t1_resid","ram_resid","gate_resid","echo_resid",
         "t1_chi2","ramsey_chi2","gate_chi2","echo_chi2"]}
-
     fit_failures  = {arch: 0 for arch in ARCHITECTURES}
     fit_attempts  = {arch: 0 for arch in ARCHITECTURES}
-
     for arch in ARCHITECTURES:
         arch_default_dw_max = inv.BackendProfile.from_architecture(arch).dw_max_rad_s
         success = 0
         attempt_counter = 0
-
         while success < N_INSTANCES:
             n_needed = N_INSTANCES - success
             batch_size = max(n_workers, int(n_needed * 1.05))
-
             batch_args = []
             for _ in range(batch_size):
                 T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(arch, rng)
@@ -195,12 +179,9 @@ def run_experiment(use_true_prior: bool = True, n_workers: int = None):
                 attempt_counter += 1
                 batch_args.append((arch, T1_t, T2_t, dw_t, eps_t,
                                    attempt_counter, use_true_prior))
-
             fit_attempts[arch] += len(batch_args)
-
             with mp.Pool(n_workers) as pool:
                 results = pool.map(_worker_fig2, batch_args)
-
             for _, T1_t, T2_t, dw_t, eps_t, r in results:
                 if r is None:
                     fit_failures[arch] += 1
@@ -223,9 +204,7 @@ def run_experiment(use_true_prior: bool = True, n_workers: int = None):
                 rec["gate_chi2"].append(r.gate_chi2_dof)
                 rec["echo_chi2"].append(r.echo_chi2_dof)
                 success += 1
-
             print(f"  [{arch}] {success}/{N_INSTANCES} complete", flush=True)
-
     fit_failure_rate = {
         arch: fit_failures[arch] / fit_attempts[arch] if fit_attempts[arch] else 0.0
         for arch in ARCHITECTURES
@@ -243,80 +222,6 @@ def save_csv(rec):
     return path
 
 
-def make_figure(rec):
-    arch_arr = np.array(rec["arch"])
-    T1_t = np.array(rec["T1_true"]); T1_r = np.array(rec["T1_rec"]); T1_s = np.array(rec["T1_sig"])
-    T2_t = np.array(rec["T2_true"]); T2_r = np.array(rec["T2_rec"]); T2_s = np.array(rec["T2_sig"])
-    dw_t = np.array(rec["dw_true"]); dw_r = np.array(rec["dw_rec"]); dw_s = np.array(rec["dw_sig"])
-    eps_t = np.array(rec["eps_true"]); eps_r = np.array(rec["eps_rec"]); eps_s = np.array(rec["eps_sig"])
-
-    fig = plt.figure(figsize=(7.16, 6.6))
-    gs  = gridspec.GridSpec(2, 2, figure=fig, hspace=0.46, wspace=0.42,
-                            left=0.11, right=0.97, top=0.93, bottom=0.10)
-
-    panels = [
-        (gs[0,0], T1_t,  T1_r,  T1_s,  r"True $T_1$ (s)",              r"Recovered $T_1$ (s)",              "(a)", True, None),
-        (gs[0,1], T2_t,  T2_r,  T2_s,  r"True $T_2$ (s)",              r"Recovered $T_2$ (s)",              "(b)", True, None),
-        (gs[1,0], dw_t,  dw_r,  dw_s,  r"True $|\Delta\omega|$ (rad/s)", r"Recovered $|\Delta\omega|$ (rad/s)", "(c)", True,
-         "Sign resolved via $\\arctan_2(Y,X)$\nat $t_1=0.5\\,T_2^{\\rm prior}$.\nRange: $|\\Delta\\omega|\\leq 0.9\\pi/t_1$."),
-        (gs[1,1], eps_t, eps_r, eps_s, r"True $\varepsilon_{sx}$",      r"Recovered $\varepsilon_{sx}$",     "(d)", True, None),
-    ]
-
-    for (spec, tv, rv, sv, xl, yl, lab, loglog, note) in panels:
-        ax  = fig.add_subplot(spec)
-        r2_all, rmse_all = compute_metrics(tv, rv)
-
-        for arch in ARCHITECTURES:
-            mask = arch_arr == arch
-            ax.errorbar(tv[mask], rv[mask], yerr=sv[mask],
-                        fmt=MARKERS[arch], color=COLORS[arch],
-                        markersize=3.2, linewidth=0, elinewidth=0.55,
-                        capsize=1.4, alpha=0.65, label=LABELS[arch])
-
-        lo = min(tv.min(), rv.min()); hi = max(tv.max(), rv.max())
-        if loglog and lo > 0:
-            lo *= 0.82; hi *= 1.22
-            ax.set_xscale("log"); ax.set_yscale("log")
-        else:
-            pad = (hi-lo)*0.09; lo -= pad; hi += pad
-
-        ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.9, zorder=5)
-        ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
-        ax.set_xlabel(xl, fontsize=8.5); ax.set_ylabel(yl, fontsize=8.5)
-        ax.tick_params(labelsize=7.5)
-        ax.grid(True, which="both" if loglog else "major", linewidth=0.35, alpha=0.45)
-        ax.text(0.04, 0.96,
-                f"$R^2={r2_all:.4f}$\nRMSE$={rmse_all:.2e}$",
-                transform=ax.transAxes, fontsize=7.5, verticalalignment="top",
-                bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                          edgecolor="#cccccc", linewidth=0.6))
-        ax.text(-0.16, 1.05, lab, transform=ax.transAxes,
-                fontsize=9.5, fontweight="bold", va="top")
-        if note:
-            ax.text(0.04, 0.58, note, transform=ax.transAxes, fontsize=6.5,
-                    color="#555555", va="top",
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="#fffbe6",
-                              edgecolor="#cccc88", linewidth=0.5))
-
-    handles, leg_labels = fig.axes[0].get_legend_handles_labels()
-    fig.legend(handles, leg_labels, loc="lower center", ncol=3,
-               fontsize=7.5, frameon=True, bbox_to_anchor=(0.5, 0.005),
-               handletextpad=0.4, columnspacing=0.8, framealpha=0.9, edgecolor="#cccccc")
-
-    budget = shot_budget(ARCHITECTURES[0])
-    fig.suptitle(
-        f"Fig. 2 — Parameter Recovery Accuracy\n"
-        f"(N={N_INSTANCES}/arch, AerSimulator noise model, seed={SEED}, "
-        f"{budget:,} shots/qubit)",
-        fontsize=8.5, y=0.98)
-
-    out = FIGURES_DIR / "fig2_parity.pdf"
-    fig.savefig(out, dpi=300, bbox_inches="tight")
-    fig.savefig(str(out).replace(".pdf", ".png"), dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    return out
-
-
 def sample_true_t1_t2_eps_realistic(arch_name: str, rng_obj):
     """Physically self-consistent (T1, T_phi -> T2) sampling: T2 = 1/(1/(2*T1) + 1/T_phi).
     Draws from the same realistic current-hardware ranges (TRUE_PARAM_RANGES)
@@ -326,16 +231,13 @@ def sample_true_t1_t2_eps_realistic(arch_name: str, rng_obj):
     T1_lo, T1_hi = ranges["T1_s"]
     T2_lo, T2_hi = ranges["T2_s"]
     eps_lo, eps_hi = ranges["eps"]
-
     if T1_hi / T1_lo > 10.0:
         T1 = _log_uniform(rng_obj, T1_lo, T1_hi)
     else:
         T1 = rng_obj.uniform(T1_lo, T1_hi)
-
     T_phi = rng_obj.uniform(T2_lo, T2_hi)
     T2    = 1.0 / (1.0/(2.0*T1) + 1.0/T_phi)
     T2    = min(T2, 2.0*T1)
-
     eps = _log_uniform(rng_obj, eps_lo, eps_hi)
     return T1, T2, eps
 
@@ -349,20 +251,17 @@ def sample_true_params_realistic(arch_name: str, dw_max: float, rng_obj):
 def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
                                  instance_id, extra_seed):
     """Fig. 3 simulation: genuine model-mismatch experiment.
-
     The AerSimulator runs with EFFECTIVE hardware parameters that include
     unmodeled physical noise (TLS drift, 1/f dephasing, coherent over-
     rotation, quasi-static detuning offsets, SPAM calibration drift).
     Canary's inversion is blind to all of these — it uses a ±15% prior
     jitter around T1_true/T2_true and the device's nominal calibrated SPAM.
-
     The mismatch has two independent layers:
       Layer 1 — prior error: Canary's delay grid is centred on T1_prior ≠
                 T1_eff (already present in the original code).
       Layer 2 — physics mismatch (NEW): the simulator runs physics outside
                 Canary's Lindblad forward models. This breaks the Lindblad-
                 vs-Lindblad tautology and tests genuine robustness.
-
     Returns (result, T1_eff, T2_eff, abs(dw_eff), eps_eff) so that R² in
     Fig. 3 is computed against the effective parameters — i.e., what the
     hardware actually had during this measurement window — not T1_true,
@@ -371,30 +270,23 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
     arch     = inv.ARCH_DEFAULTS[arch_name]
     arch_idx = ARCHITECTURES.index(arch_name)
     noise_cfg = REALISTIC_NOISE[arch_name]
-
     rng_param, rng_noise = _spawn_probe_rngs(
         SEED + 1, arch_idx, instance_id, extra_seed, n_streams=2)
-
-
     if noise_cfg["sigma_T1_lognormal"] > 0.0:
         T1_eff = float(np.clip(
             T1_true * np.exp(rng_noise.normal(0.0, noise_cfg["sigma_T1_lognormal"])),
             arch["T1_min_s"], arch["T1_max_s"]))
     else:
         T1_eff = T1_true
-
     T2_reduction = rng_noise.uniform(0.0, noise_cfg["T2_reduction_max"])
     T2_eff = float(np.clip(
         T2_true * (1.0 - T2_reduction),
         arch["T2_min_s"], min(2.0 * T1_eff, arch["T1_max_s"])))
-
     delta_coh  = rng_noise.normal(0.0, noise_cfg["sigma_coherent_rad"])
     eps_eff    = float(np.clip(
         eps_true + delta_coh ** 2 / 4.0,
         0.0, arch["eps_max"]))
-
     dw_eff = dw_true + rng_noise.normal(0.0, noise_cfg["sigma_dw_rad_s"])
-
     p0g1_nom = arch["p0_given_1"]
     p1g0_nom = arch["p1_given_0"]
     p0g1_eff = float(np.clip(
@@ -403,7 +295,6 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
     p1g0_eff = float(np.clip(
         p1g0_nom * (1.0 + rng_noise.normal(0.0, noise_cfg["sigma_SPAM_frac"])),
         0.0, 0.30))
-
     if arch_name in ("superconducting", "trapped_ion"):
         T1_prior = float(np.clip(
             T1_true * (1.0 + rng_param.uniform(-0.15, 0.15)),
@@ -420,9 +311,7 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
         profile.custom_arch = custom_arch
     else:
         profile = inv.BackendProfile.from_architecture(arch_name)
-
     circuits, meta = inv.build_probe_circuits(profile)
-
     counts_list = inv.run_probe_circuits_aer(
         circuits, meta,
         T1_eff, T2_eff, eps_eff,
@@ -431,14 +320,12 @@ def simulate_realistic_inversion(arch_name, T1_true, T2_true, dw_true, eps_true,
         SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO,
         dw_s=dw_eff,
     )
-
     result = inv.lindblad_inversion(
         counts_list, meta, profile,
         shots_t1=SHOTS_T1, shots_ramsey=SHOTS_RAMSEY,
         shots_gate=SHOTS_GATE, shots_echo=SHOTS_ECHO,
         qubit_id=0,
         timestamp=datetime.now(timezone.utc).isoformat())
-
     return result, T1_eff, T2_eff, abs(dw_eff), eps_eff
 
 
@@ -457,9 +344,7 @@ def _worker_fig3(args):
 def run_realistic_mismatch_experiment(n_workers: int = None):
     if n_workers is None:
         n_workers = max(1, mp.cpu_count() - 1)
-
     rng_mismatch = np.random.default_rng(SEED + 1)
-
     rec = {k: [] for k in ["arch",
         "T1_true","T1_rec","T1_sig",
         "T2_true","T2_rec","T2_sig",
@@ -468,19 +353,15 @@ def run_realistic_mismatch_experiment(n_workers: int = None):
         "dw_true","dw_rec","dw_sig",
         "eps_true","eps_rec","eps_sig",
         "t1_chi2","ramsey_chi2","gate_chi2","echo_chi2"]}
-
     fit_failures  = {arch: 0 for arch in ARCHITECTURES}
     fit_attempts  = {arch: 0 for arch in ARCHITECTURES}
-
     for arch in ARCHITECTURES:
         arch_default_dw_max = inv.BackendProfile.from_architecture(arch).dw_max_rad_s
         success = 0
         attempt_counter = 0
-
         while success < N_INSTANCES:
             n_needed = N_INSTANCES - success
             batch_size = max(n_workers, int(n_needed * 1.05))
-
             batch_args = []
             for _ in range(batch_size):
                 T1_t, T2_t, eps_t = sample_true_t1_t2_eps_realistic(arch, rng_mismatch)
@@ -494,12 +375,9 @@ def run_realistic_mismatch_experiment(n_workers: int = None):
                 attempt_counter += 1
                 batch_args.append((arch, T1_t, T2_t, dw_t, eps_t,
                                    attempt_counter, extra_seed))
-
             fit_attempts[arch] += len(batch_args)
-
             with mp.Pool(n_workers) as pool:
                 results = pool.map(_worker_fig3, batch_args)
-
             for _, T1_t, T2_t, dw_t, eps_t, r, T1_eff, T2_eff, dw_eff, eps_eff in results:
                 if r is None:
                     fit_failures[arch] += 1
@@ -518,9 +396,7 @@ def run_realistic_mismatch_experiment(n_workers: int = None):
                 rec["gate_chi2"].append(r.gate_chi2_dof)
                 rec["echo_chi2"].append(r.echo_chi2_dof)
                 success += 1
-
             print(f"  [{arch}] {success}/{N_INSTANCES} complete", flush=True)
-
     fit_failure_rate = {
         arch: fit_failures[arch] / fit_attempts[arch] if fit_attempts[arch] else 0.0
         for arch in ARCHITECTURES
@@ -538,81 +414,6 @@ def save_mismatch_csv(rec):
     return path
 
 
-def make_mismatch_figure(rec):
-    arch_arr = np.array(rec["arch"])
-    T1_t = np.array(rec["T1_true"]); T1_r = np.array(rec["T1_rec"]); T1_s = np.array(rec["T1_sig"])
-    T2_t = np.array(rec["T2_true"]); T2_r = np.array(rec["T2_rec"]); T2_s = np.array(rec["T2_sig"])
-    dw_t = np.array(rec["dw_true"]); dw_r = np.array(rec["dw_rec"]); dw_s = np.array(rec["dw_sig"])
-    eps_t = np.array(rec["eps_true"]); eps_r = np.array(rec["eps_rec"]); eps_s = np.array(rec["eps_sig"])
-
-    fig = plt.figure(figsize=(7.16, 6.6))
-    gs  = gridspec.GridSpec(2, 2, figure=fig, hspace=0.46, wspace=0.42,
-                            left=0.11, right=0.97, top=0.93, bottom=0.10)
-
-    panels = [
-        (gs[0,0], T1_t,  T1_r,  T1_s,  r"True $T_1$ (s)",              r"Recovered $T_1$ (s)",              "(a)", None),
-        (gs[0,1], T2_t,  T2_r,  T2_s,  r"True $T_2$ (s)",              r"Recovered $T_2$ (s)",              "(b)", None),
-        (gs[1,0], dw_t,  dw_r,  dw_s,  r"True $|\Delta\omega|$ (rad/s)", r"Recovered $|\Delta\omega|$ (rad/s)", "(c)",
-         "Sign resolved via $\\arctan_2(Y,X)$\nat $t_1=0.5\\,T_2^{\\rm prior}$.\nRange: $|\\Delta\\omega|\\leq 0.9\\pi/t_1$."),
-        (gs[1,1], eps_t, eps_r, eps_s, r"True $\varepsilon_{sx}$",      r"Recovered $\varepsilon_{sx}$",     "(d)", None),
-    ]
-
-    for (spec, tv, rv, sv, xl, yl, lab, note) in panels:
-        ax  = fig.add_subplot(spec)
-        r2_all, rmse_all = compute_metrics(tv, rv)
-
-        for arch in ARCHITECTURES:
-            mask = arch_arr == arch
-            ax.errorbar(tv[mask], rv[mask], yerr=sv[mask],
-                        fmt=MARKERS[arch], color=COLORS[arch],
-                        markersize=3.2, linewidth=0, elinewidth=0.55,
-                        capsize=1.4, alpha=0.65, label=LABELS[arch])
-
-        lo = min(tv.min(), rv.min()); hi = max(tv.max(), rv.max())
-        if lo > 0:
-            lo *= 0.82; hi *= 1.22
-            ax.set_xscale("log"); ax.set_yscale("log")
-        else:
-            pad = (hi-lo)*0.09; lo -= pad; hi += pad
-
-        ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.9, zorder=5)
-        ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
-        ax.set_xlabel(xl, fontsize=8.5); ax.set_ylabel(yl, fontsize=8.5)
-        ax.tick_params(labelsize=7.5)
-        ax.grid(True, which="both", linewidth=0.35, alpha=0.45)
-        ax.text(0.04, 0.96,
-                f"$R^2={r2_all:.4f}$\nRMSE$={rmse_all:.2e}$",
-                transform=ax.transAxes, fontsize=7.5, verticalalignment="top",
-                bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                          edgecolor="#cccccc", linewidth=0.6))
-        ax.text(-0.16, 1.05, lab, transform=ax.transAxes,
-                fontsize=9.5, fontweight="bold", va="top")
-        if note:
-            ax.text(0.04, 0.58, note, transform=ax.transAxes, fontsize=6.5,
-                    color="#555555", va="top",
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="#fffbe6",
-                              edgecolor="#cccc88", linewidth=0.5))
-
-    handles, leg_labels = fig.axes[0].get_legend_handles_labels()
-    fig.legend(handles, leg_labels, loc="lower center", ncol=3,
-               fontsize=7.5, frameon=True, bbox_to_anchor=(0.5, 0.005),
-               handletextpad=0.4, columnspacing=0.8, framealpha=0.9, edgecolor="#cccccc")
-
-    budget = shot_budget(ARCHITECTURES[0])
-    fig.suptitle(
-        f"Fig. 3 — Realistic Hardware Performance\n"
-        f"(N={N_INSTANCES}/arch, AerSimulator noise model, per-arch prior "
-        f"mode: SC/TI live cal ±15%, NA arch-default, seed={SEED+1}, "
-        f"{budget:,} shots/qubit)",
-        fontsize=8.5, y=0.98)
-
-    out = FIGURES_DIR / "fig3_mismatch.pdf"
-    fig.savefig(out, dpi=300, bbox_inches="tight")
-    fig.savefig(str(out).replace(".pdf", ".png"), dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    return out
-
-
 if __name__ == "__main__":
     N_WORKERS = int(os.environ.get("N_WORKERS", max(1, mp.cpu_count() - 1)))
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -620,7 +421,7 @@ if __name__ == "__main__":
     print(f"  Protocol : 3-time XY Ramsey (Shnaiderov+) + 3-point T1 + adaptive gate-rep N")
     print(f"  Shots    : T1={SHOTS_T1}/circuit  Ramsey={SHOTS_RAMSEY}/circuit  Gate={SHOTS_GATE}/circuit")
     print(f"  Budget   : {shot_budget('superconducting'):,} shots/qubit (all architectures)")
-    print(f"  Sampling (Fig. 2 & 3, unified): T1 ~ TRUE_PARAM_RANGES; "
+    print(f"  Sampling (Fig. 2 & 3, unified): T1 ~ TRUE_PARAM_RANGES;  "
           f"T2 = 1/(1/(2*T1) + 1/T_phi), T_phi ~ TRUE_PARAM_RANGES T2 range")
     print(f"    superconducting: T1=[80,400]µs  T_phi=[40,200]µs  ε=[1e-4,2e-3]")
     print(f"    trapped_ion:     T1=[100,10000]s  T_phi=[0.1,3]s  ε=[1e-4,2e-3]")
@@ -635,16 +436,13 @@ if __name__ == "__main__":
         p_ideal = inv.BackendProfile.from_true_params(
             arch, inv.ARCH_DEFAULTS[arch]["T1_s"], inv.ARCH_DEFAULTS[arch]["T2_s"])
         p_real  = inv.BackendProfile.from_architecture(arch)
-        print(f"  {arch:16s}: [ideal] T1 delays={[f'{d:.3g}s' for d in p_ideal.t1_delays_s]}  "
+        print(f"  {arch:16s}: [ideal] T1 delays={[f'{d:.3g}s' for d in p_ideal.t1_delays_s]}   "
               f"Ramsey={[f'{d:.3g}s' for d in p_ideal.ramsey_delays_s]}")
-        print(f"  {'':16s}  [real ] T1 delays={[f'{d:.3g}s' for d in p_real.t1_delays_s]}  "
+        print(f"  {'':16s}  [real ] T1 delays={[f'{d:.3g}s' for d in p_real.t1_delays_s]}   "
               f"Ramsey={[f'{d:.3g}s' for d in p_real.ramsey_delays_s]}")
     print()
-
     rec, fit_failure_rate = run_experiment(use_true_prior=True, n_workers=N_WORKERS)
     csv_path = save_csv(rec)
-    fig_path = make_figure(rec)
-
     print(f"  Results (n={N_INSTANCES}/arch):")
     arch_arr = np.array(rec["arch"])
     all_pass = True
@@ -675,17 +473,12 @@ if __name__ == "__main__":
               f"Ramsey={ram_chi2_arr.mean():.2f}±{ram_chi2_arr.std():.2f}  "
               f"Gate={gate_chi2_arr.mean():.2f}±{gate_chi2_arr.std():.2f}  "
               f"Echo={echo_chi2_arr.mean():.2f}±{echo_chi2_arr.std():.2f}")
-
     print(f"\n  All R²≥0.94: {'YES ✓' if all_pass else 'NO ✗'}")
     print(f"\n  Data  : {csv_path}")
-    print(f"  Figure: {fig_path}")
-
     print()
     print("Fig. 3 — Per-arch real operating mode (SC/TI live cal +/-15%, NA arch-default)")
     mismatch_rec, mismatch_fail_rate = run_realistic_mismatch_experiment(n_workers=N_WORKERS)
     mismatch_csv = save_mismatch_csv(mismatch_rec)
-    mismatch_fig = make_mismatch_figure(mismatch_rec)
-
     mismatch_arch_arr = np.array(mismatch_rec["arch"])
     for arch in ARCHITECTURES:
         mask = mismatch_arch_arr == arch
@@ -713,6 +506,4 @@ if __name__ == "__main__":
               f"Ramsey={ram_chi2_arr.mean():.2f}±{ram_chi2_arr.std():.2f}  "
               f"Gate={gate_chi2_arr.mean():.2f}±{gate_chi2_arr.std():.2f}  "
               f"Echo={echo_chi2_arr.mean():.2f}±{echo_chi2_arr.std():.2f}")
-
     print(f"\n  Mismatch data  : {mismatch_csv}")
-    print(f"  Mismatch figure: {mismatch_fig}")
