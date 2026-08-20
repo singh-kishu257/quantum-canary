@@ -16,7 +16,7 @@ DATA_DIR = ROOT / "data"
 OUT_DIR  = ROOT / "figures"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-FW, FH = 3.6, 3.5
+FW, FH = 3.6, 3.15
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -57,9 +57,6 @@ PANELS = [
     ("eps", r"$\varepsilon_{sx}$"),
 ]
 
-FIG2_TITLE = ("Parameter-Recovery Accuracy Under\nIdeal Markovian Simulation")
-FIG3_TITLE = ("Parameter-Recovery Accuracy Under\nRealistic Hardware Mismatch")
-
 
 def load(path):
     if not path.exists():
@@ -86,7 +83,7 @@ def stats(t, r):
     return r2, rel_pct
 
 
-def make_parity_figure(rec, title, out_stem):
+def make_parity_figure(rec, out_stem):
     fig, axes = plt.subplots(2, 2, figsize=(FW, FH))
     fig.patch.set_facecolor("white")
 
@@ -140,9 +137,7 @@ def make_parity_figure(rec, title, out_stem):
                loc="lower center", ncol=3, bbox_to_anchor=(0.5, 0.0),
                handlelength=1.3, columnspacing=1.1, handletextpad=0.4)
 
-    fig.text(0.5, 0.995, title, ha="center", va="top", fontsize=10.0)
-
-    fig.subplots_adjust(left=0.125, right=0.99, top=0.885, bottom=0.185,
+    fig.subplots_adjust(left=0.125, right=0.99, top=0.984, bottom=0.206,
                         wspace=0.40, hspace=0.42)
 
     for ext in ("pdf", "png"):
@@ -155,8 +150,8 @@ def make_parity_figure(rec, title, out_stem):
 def main():
     ideal    = load(DATA_DIR / "parity_results_combined.csv")
     mismatch = load(DATA_DIR / "mismatch_results_combined.csv")
-    make_parity_figure(ideal,    FIG2_TITLE, "fig2_parity_ideal")
-    make_parity_figure(mismatch, FIG3_TITLE, "fig3_parity_mismatch")
+    make_parity_figure(ideal,    "fig2_parity_ideal")
+    make_parity_figure(mismatch, "fig3_parity_mismatch")
     print("Done.")
 
 

@@ -14,7 +14,7 @@ DATA_PATH = ROOT / "data" / "hardware" / "ionq_canary_allq_0-19_20260810T213159.
 OUT_DIR = ROOT / "figures"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-FW, FH = 7.16, 3.6
+FW, FH = 7.16, 3.47
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -122,9 +122,7 @@ ax2.grid(True, which="major", axis="x", lw=0.3, color="#cccccc", alpha=0.6)
 ax2.text(0.97, 0.03, "(b)", transform=ax2.transAxes, ha="right",
          va="bottom", fontsize=9.0, fontweight="bold", zorder=6)
 
-fig.text(0.5, 0.995, "Per-Qubit Gate-Error Resolution on IonQ Forte-1",
-         ha="center", va="top", fontsize=11.0, fontweight="semibold")
-fig.subplots_adjust(left=0.07, right=0.93, top=0.88, bottom=0.14)
+fig.subplots_adjust(left=0.07, right=0.93, top=0.914, bottom=0.145)
 
 for ext in ("pdf", "png"):
     out = OUT_DIR / f"fig8_hardware_ionq.{ext}"

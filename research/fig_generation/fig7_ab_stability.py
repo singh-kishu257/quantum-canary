@@ -18,7 +18,7 @@ OUT_DIR = ROOT / "figures"
 
 QUBIT_ORDER: list = []
 
-FW, FH = 3.5, 5.4
+FW, FH = 3.5, 5.07
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -203,11 +203,7 @@ def make_figure(A, B, out_stem):
                ncol=8, bbox_to_anchor=(0.5, 0.006), handlelength=1.0,
                columnspacing=0.8, handletextpad=0.3)
 
-    fig.text(0.5, 0.995, "Temporal Stability of Repeated\n"
-                         "Quantum Canary Characterization on ibm_fez",
-             ha="center", va="top", fontsize=10.0, fontweight="semibold")
-
-    fig.subplots_adjust(left=0.12, right=0.90, top=0.93, bottom=0.085)
+    fig.subplots_adjust(left=0.12, right=0.90, top=0.990, bottom=0.091)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for ext in ("pdf", "png"):

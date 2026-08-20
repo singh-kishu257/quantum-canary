@@ -68,7 +68,7 @@ with open(DATA_PATH, newline="", encoding="utf-8") as f:
             data[a][p][m][int(row["budget"])] = (
                 float(row["r2"]), float(row["r2_lo"]), float(row["r2_hi"]))
 
-FW, FH = 7.16, 5.9
+FW, FH = 7.16, 5.67
 fig, axes = plt.subplots(3, 4, figsize=(FW, FH), sharex=True, sharey=True)
 fig.patch.set_facecolor("white")
 
@@ -114,11 +114,7 @@ fig.legend(handles, [LABEL[m] for m in METHODS],
            loc="lower center", ncol=2, bbox_to_anchor=(0.5, 0.005),
            handlelength=2.2, columnspacing=1.5, handletextpad=0.5)
 
-fig.text(0.5, 0.995,
-         r"Quantum Canary vs. Qiskit Experiments — Recovery $R^2$ vs. Total Shot Budget",
-         ha="center", va="top", fontsize=11.0, fontweight="semibold")
-
-fig.subplots_adjust(left=0.075, right=0.99, top=0.91, bottom=0.10,
+fig.subplots_adjust(left=0.075, right=0.99, top=0.947, bottom=0.104,
                     wspace=0.12, hspace=0.20)
 
 for ext in ("pdf", "png"):

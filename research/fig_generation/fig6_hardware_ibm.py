@@ -293,9 +293,9 @@ def make_figure(A, B, out_stem):
     global QUBIT_ORDER
     QUBIT_ORDER = sorted([q["qubit_id"] for q in A["qubits"]])
 
-    fig = plt.figure(figsize=(7.16, 4.2))
+    fig = plt.figure(figsize=(7.16, 4.08))
     gs = gridspec.GridSpec(2, 4, figure=fig, height_ratios=[1.1, 1.0], hspace=0.55, wspace=0.45)
-    fig.subplots_adjust(left=0.06, right=0.95, top=0.90, bottom=0.16)
+    fig.subplots_adjust(left=0.06, right=0.95, top=0.926, bottom=0.165)
 
     panel_t1_all(fig.add_subplot(gs[0, 0]), A)
     panel_ramsey_all(fig.add_subplot(gs[0, 1]), A)
@@ -313,9 +313,6 @@ def make_figure(A, B, out_stem):
     fig.legend(handles, [f"Q{q}" for q in QUBIT_ORDER], loc="lower center",
                ncol=8, bbox_to_anchor=(0.5, 0.0), handlelength=1.3,
                columnspacing=1.0, handletextpad=0.4, fontsize=8.0)
-
-    fig.text(0.5, 0.995, "Quantum Canary Hardware Validation on IBM Heron r2 Processor",
-             ha="center", va="top", fontsize=11.0, fontweight="semibold")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for ext in ("pdf", "png"):

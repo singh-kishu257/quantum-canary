@@ -51,78 +51,70 @@ PARAMS       = ["T1", "T2", "delta_omega", "epsilon_sx"]
 PARAM_LABELS = {"T1": r"$T_1$", "T2": r"$T_2$",
                 "delta_omega": r"$|\Delta\omega|$",
                 "epsilon_sx": r"$\varepsilon_{sx}$"}
-METHODS = ["Canary", "QiskitExperiments"]
-COLOUR  = {"Canary": "#1F3864", "QiskitExperiments": "#C00000"}
-MARKER  = {"Canary": "o", "QiskitExperiments": "s"}
-LINESTY = {"Canary": "-", "QiskitExperiments": "--"}
-LABEL   = {"Canary": "Quantum Canary (this work)",
-           "QiskitExperiments": r"Qiskit Experiments ($T_1$+$T_2$R+$T_2$H+RB)"}
+COLOUR = {"T1": "#3A6B9E", "T2": "#4A8A60",
+          "delta_omega": "#7050A0", "epsilon_sx": "#A05030"}
+MARKER = {"T1": "o", "T2": "s", "delta_omega": "^", "epsilon_sx": "D"}
 NATIVE  = 9900
 YMIN, YMAX = -0.15, 1.05
 
-data = {a: {p: {m: {} for m in METHODS} for p in PARAMS} for a in ARCHS}
+data = {a: {p: {} for p in PARAMS} for a in ARCHS}
 with open(DATA_PATH, newline="", encoding="utf-8") as f:
     for row in csv.DictReader(f):
-        a, p, m = row["architecture"], row["parameter"], row["method"]
-        if a in data and p in data[a] and m in data[a][p]:
-            data[a][p][m][int(row["budget"])] = (
+        if row["method"] != "Canary":
+            continue
+        a, p = row["architecture"], row["parameter"]
+        if a in data and p in data[a]:
+            data[a][p][int(row["budget"])] = (
                 float(row["r2"]), float(row["r2_lo"]), float(row["r2_hi"]))
 
-FW, FH = 7.16, 5.9
-fig, axes = plt.subplots(3, 4, figsize=(FW, FH), sharex=True, sharey=True)
+FW, FH = 3.6, 3.5
+fig, axes = plt.subplots(3, 1, figsize=(FW, FH), sharex=True, sharey=True)
 fig.patch.set_facecolor("white")
 
 for ri, arch in enumerate(ARCHS):
-    for ci, p in enumerate(PARAMS):
-        ax = axes[ri, ci]
-        for m in METHODS:
-            d = data[arch][p][m]
-            budgets = sorted(d)
-            ys  = [np.clip(d[b][0], YMIN, YMAX) if np.isfinite(d[b][0]) else np.nan
-                   for b in budgets]
-            los = [np.clip(d[b][1], YMIN, YMAX) if np.isfinite(d[b][1]) else np.nan
-                   for b in budgets]
-            his = [np.clip(d[b][2], YMIN, YMAX) if np.isfinite(d[b][2]) else np.nan
-                   for b in budgets]
-            ax.fill_between(budgets, los, his, color=COLOUR[m], alpha=0.12, zorder=1)
-            ax.plot(budgets, ys, color=COLOUR[m], lw=1.1, ls=LINESTY[m],
-                    marker=MARKER[m], ms=2.6, mfc=COLOUR[m], mec=COLOUR[m],
-                    zorder=3, clip_on=True)
-        ax.axhline(0.95, color="#888888", lw=0.6, ls="--", zorder=2)
-        ax.axvline(NATIVE, color="#3A4A5A", lw=0.7, ls=":", zorder=2, alpha=0.7)
-        ax.set_xscale("log")
-        ax.set_xlim(750, 67500)
-        ax.set_ylim(YMIN, YMAX)
-        ax.set_xticks([1000, 10000, 50000])
-        ax.set_xticklabels(["1k", "10k", "50k"])
-        ax.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
-        ax.grid(True, which="major", lw=0.3, color="#cccccc", alpha=0.6)
-        ax.text(0.97, 0.03, f"({chr(ord('a') + ri * 4 + ci)})",
-                transform=ax.transAxes, ha="right", va="bottom",
-                fontsize=9.0, fontweight="bold")
-        if ri == 0:
-            ax.set_title(PARAM_LABELS[p], fontsize=10.0, pad=4)
-        if ci == 0:
-            ax.set_ylabel(f"{ARCH_LABELS[arch]}\n$R^2$", fontsize=9.0)
-        if ri == 2:
-            ax.set_xlabel("Total shot budget", fontsize=9.0, labelpad=2)
+    ax = axes[ri]
+    for p in PARAMS:
+        d = data[arch][p]
+        budgets = sorted(d)
+        ys  = [np.clip(d[b][0], YMIN, YMAX) if np.isfinite(d[b][0]) else np.nan
+               for b in budgets]
+        los = [np.clip(d[b][1], YMIN, YMAX) if np.isfinite(d[b][1]) else np.nan
+               for b in budgets]
+        his = [np.clip(d[b][2], YMIN, YMAX) if np.isfinite(d[b][2]) else np.nan
+               for b in budgets]
+        ax.fill_between(budgets, los, his, color=COLOUR[p], alpha=0.13, zorder=1)
+        ax.plot(budgets, ys, color=COLOUR[p], lw=1.3, ls="-",
+                marker=MARKER[p], ms=5.0, mfc=COLOUR[p], mec=COLOUR[p],
+                zorder=3, clip_on=True)
+    ax.axhline(0.95, color="#888888", lw=0.6, ls="--", zorder=2)
+    ax.axvline(NATIVE, color="#3A4A5A", lw=0.7, ls=":", zorder=2, alpha=0.7)
+    ax.set_xscale("log")
+    ax.set_xlim(750, 130000)
+    ax.set_ylim(YMIN, YMAX)
+    ax.set_xticks([1000, 10000, 100000])
+    ax.set_xticklabels(["1k", "10k", "100k"])
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
+    ax.grid(True, which="major", lw=0.3, color="#cccccc", alpha=0.6)
+    ax.text(0.97, 0.05, ARCH_LABELS[arch],
+            transform=ax.transAxes, ha="right", va="bottom",
+            fontsize=9.5, fontweight="bold")
+    if ri == 1:
+        ax.set_ylabel(r"$R^2$", fontsize=9.5)
+    if ri == 2:
+        ax.set_xlabel("Total shot budget", fontsize=9.0, labelpad=1)
 
-handles = [Line2D([0], [0], color=COLOUR[m], lw=1.1, ls=LINESTY[m],
-                  marker=MARKER[m], ms=3.0, mfc=COLOUR[m], mec=COLOUR[m],
-                  label=LABEL[m]) for m in METHODS]
-fig.legend(handles, [LABEL[m] for m in METHODS], loc="lower center",
-           ncol=2, bbox_to_anchor=(0.5, 0.005), handlelength=2.2,
-           columnspacing=1.5, handletextpad=0.6)
+handles = [Line2D([0], [0], color=COLOUR[p], lw=1.3, ls="-",
+                  marker=MARKER[p], ms=5.5, mfc=COLOUR[p], mec=COLOUR[p],
+                  label=PARAM_LABELS[p]) for p in PARAMS]
+fig.legend(handles, [PARAM_LABELS[p] for p in PARAMS], loc="lower center",
+           ncol=4, bbox_to_anchor=(0.5, 0.005), handlelength=1.8,
+           columnspacing=1.2, handletextpad=0.5)
 
-fig.text(0.5, 0.995,
-         r"Quantum Canary vs. Qiskit Experiments — Recovery $R^2$ vs. Total Shot Budget",
-         ha="center", va="top", fontsize=11.0, fontweight="semibold")
-
-fig.subplots_adjust(left=0.075, right=0.99, top=0.94, bottom=0.10,
-                    wspace=0.12, hspace=0.28)
+fig.subplots_adjust(left=0.115, right=0.97, top=0.926, bottom=0.155,
+                    hspace=0.07)
 
 for ext in ("pdf", "png"):
-    out = OUT_DIR / f"fig5_qe_benchmark.{ext}"
+    out = OUT_DIR / f"fig4_efficiency.{ext}"
     fig.savefig(out, dpi=600, facecolor="white")
     print(f"Saved: {out}")
 plt.close(fig)
