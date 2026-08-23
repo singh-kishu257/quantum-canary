@@ -14,6 +14,7 @@ __all__ = [
     "forward_gate", "forward_echo",
     "build_probe_circuits", "run_probe_circuits_aer", "lindblad_inversion",
     "get_live_profile", "fetch_live_spam",
+    "NATIVE_INVERSE_PAIRS", "register_native_pair",
     "_sqrtx_native_inverse_pair", "_build_gate_rep_circuit",
     "split_qubits_for_op_limit",
 ]
@@ -811,28 +812,81 @@ def _build_echo_circuit(delay_s: float, dt_ns: Optional[float], idx: int):
     return qc
 
 
+def _default_superconducting_pair(qc, q):
+    """sx, sxdg — Qiskit standard gate, native on IBM superconducting
+    hardware; used as the generic stand-in for any architecture without
+    a more specific registered pair (matches pre-existing behaviour)."""
+    qc.sx(q)
+    qc.sxdg(q)
+
+
+def _default_trapped_ion_pair(qc, q):
+    """GPI2(0), GPI2(0.5) — native IonQ pulses; GPI2(0.5) is verified
+    equal to GPI2(0)^dagger, so the pair nets to identity exactly as
+    sx/sxdg does. Falls back to an equivalent R-gate decomposition if
+    qiskit_ionq is not installed."""
+    try:
+        from qiskit_ionq.ionq_gates import GPI2Gate
+        qc.append(GPI2Gate(0.0), [q])
+        qc.append(GPI2Gate(0.5), [q])
+    except ImportError:
+        qc.r(np.pi / 2, 0.0, q)
+        qc.r(np.pi / 2, np.pi, q)
+
+
+# Registry mapping architecture name -> callable(qc, q) -> None, applying
+# one native (G, G^-1) pair that nets to identity in the absence of
+# coherent error, isolating the depolarizing/incoherent component that
+# forward_gate() models. Two entries ship built in; third-party backends
+# (QuEra, Quantum Machines, Google, Braket, Rigetti, IQM, etc.) register
+# their own physical self-inverse pair via register_native_pair() below —
+# no change to core inversion logic (forward_gate, _invert_gate,
+# lindblad_inversion) is ever required to add a new architecture.
+NATIVE_INVERSE_PAIRS: dict = {
+    "superconducting": _default_superconducting_pair,
+    "trapped_ion":      _default_trapped_ion_pair,
+}
+
+
+def register_native_pair(architecture: str, pair_fn) -> None:
+    """
+    Register a native self-inverse single-qubit gate pair for a new
+    architecture, so the gate-repetition (epsilon_sx) probe can run on
+    it without modifying quantum_canary's core code.
+
+    pair_fn must have signature pair_fn(qc, q) -> None and append exactly
+    one native gate G followed by its native inverse G^-1 to qubit q of
+    qc (a qiskit QuantumCircuit), such that G . G^-1 = I in the absence
+    of coherent error. This is what makes the depolarizing-channel
+    forward model (forward_gate) correctly isolate incoherent gate error
+    from coherent over-rotation — see the design note in build_probe_circuits
+    and Section IV of the paper.
+
+    Example (hypothetical neutral-atom backend with a native Rx(pi/2)):
+        def my_pair(qc, q):
+            qc.rx(np.pi / 2, q)
+            qc.rx(-np.pi / 2, q)
+        register_native_pair("neutral_atom_myvendor", my_pair)
+
+    The registered architecture name can then be passed to
+    build_custom_arch() / BackendProfile.from_true_params() and to
+    _build_gate_rep_circuit() / build_probe_circuits() directly.
+    """
+    NATIVE_INVERSE_PAIRS[architecture] = pair_fn
+
+
 def _sqrtx_native_inverse_pair(qc, q, architecture: str):
     """
-    Applies one native (G, G^-1) pair on qubit q, where G is the
-    architecture's physical sqrt-X-equivalent single-qubit gate:
-      - trapped_ion: GPI2(0), GPI2(0.5)  (native IonQ pulses; GPI2(0.5) is
-        verified equal to GPI2(0)^dagger, so the pair nets to identity
-        exactly as sx/sxdg does)
-      - all other architectures: sx, sxdg (Qiskit standard gate, native on
-        IBM superconducting hardware; used as the generic stand-in for
-        neutral_atom/unknown, matching pre-existing behaviour)
+    Applies one native (G, G^-1) pair on qubit q for the given
+    architecture, looked up from NATIVE_INVERSE_PAIRS. Unregistered
+    architectures (including "neutral_atom" and "unknown", which have no
+    confirmed native self-inverse pair yet) fall back to the
+    superconducting sx/sxdg default, preserving prior behaviour exactly —
+    register_native_pair() is the supported way to override this for a
+    specific backend.
     """
-    if architecture == "trapped_ion":
-        try:
-            from qiskit_ionq.ionq_gates import GPI2Gate
-            qc.append(GPI2Gate(0.0), [q])
-            qc.append(GPI2Gate(0.5), [q])
-        except ImportError:
-            qc.r(np.pi / 2, 0.0, q)
-            qc.r(np.pi / 2, np.pi, q)
-    else:
-        qc.sx(q)
-        qc.sxdg(q)
+    pair_fn = NATIVE_INVERSE_PAIRS.get(architecture, _default_superconducting_pair)
+    pair_fn(qc, q)
 
 
 def _build_gate_rep_circuit(N: int, architecture: str = "superconducting"):
