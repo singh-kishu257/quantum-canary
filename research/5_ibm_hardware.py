@@ -1,15 +1,16 @@
 import argparse
 import importlib.util
 import json
-import os
 import pathlib
 import sys
-import time
 import warnings
 from datetime import datetime, timezone
 
+import truststore
+truststore.inject_into_ssl()
+
 import numpy as np
-from scipy.optimize import curve_fit
+from qiskit import transpile
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location(
@@ -21,392 +22,484 @@ _spec.loader.exec_module(inv)
 DATA_DIR = SCRIPT_DIR / "data" / "hardware"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-ARCH           = inv.ARCH_DEFAULTS["trapped_ion"]
-GATE_REP_SHOTS = 500
-RB_SHOTS       = 300
-RB_DEPTHS      = [1, 2, 4, 8, 16, 32, 64]
-RB_SEQUENCES   = 5
-SEED           = 46
-COST_PER_SHOT  = 0.08
+ARCHITECTURE  = "superconducting"
+DEFAULT_SHOTS = dict(t1=300, ramsey=1000, gate=500, echo=500)
+FIT_FRACTION  = 0.70
 
 
-def get_backend(backend_arg: str, api_key: str):
-    from qiskit_ionq import IonQProvider
-    provider = IonQProvider(api_key)
-    if backend_arg.startswith("ionq_simulator:"):
-        b = provider.get_backend("ionq_simulator")
-        b.set_options(noise_model=backend_arg.split(":", 1)[1])
-        return b
-    return provider.get_backend(backend_arg)
+def get_backend(backend_name: str, instance: str = "open-instance"):
+    from qiskit_ibm_runtime import QiskitRuntimeService
+    service = QiskitRuntimeService(channel="ibm_quantum_platform", instance=instance)
+    return service.backend(backend_name)
 
 
-def is_real_qpu(backend_arg: str) -> bool:
-    return backend_arg.startswith("qpu.")
+def get_dry_run_backend():
+    try:
+        from qiskit_aer import AerSimulator
+        return AerSimulator(method="statevector")
+    except ImportError:
+        return None
 
 
-def ionq_backend_name(backend_arg: str) -> str:
-    if backend_arg.startswith("ionq_simulator:"):
-        return backend_arg.split(":", 1)[1]
-    if backend_arg.startswith("qpu."):
-        return backend_arg[4:]
-    return "forte-1"
+def select_qubits(backend, n: int) -> list:
+    if backend is None:
+        return list(range(n))
+    try:
+        props  = backend.properties()
+        scores = []
+        for q in range(backend.num_qubits):
+            try:
+                t1 = float(props.t1(q)) or 0.0
+                re = float(props.readout_error(q)) or 1.0
+                scores.append((q, t1 * (1.0 - re)))
+            except Exception:
+                scores.append((q, 0.0))
+        scores.sort(key=lambda x: -x[1])
+        chosen = [q for q, _ in scores[:n]]
+        print(f"  Auto-selected qubits: {chosen}")
+        return chosen
+    except Exception as e:
+        print(f"  WARNING: auto-selection failed ({e}); using 0..{n-1}")
+        return list(range(n))
 
 
-def load_per_qubit_profiles(qubits: list, api_key: str, backend_arg: str) -> dict:
-    bname = ionq_backend_name(backend_arg)
-    profiles = {}
+def load_profiles(backend, qubits: list, props, dry_run: bool) -> list:
+    profiles = []
     for q in qubits:
-        p = inv.get_live_profile(
-            f"ionq:{bname}", qubit_id=q, ionq_token=api_key)
-        profiles[q] = p
+        if dry_run:
+            p = inv.BackendProfile.from_architecture(ARCHITECTURE)
+        else:
+            p = inv.get_live_profile(backend, qubit_id=q)
+            if props is not None:
+                try:
+                    t1     = float(props.t1(q))
+                    t2_cal = float(props.t2(q))
+                    t2     = min(t2_cal, t1 / 4.0)
+                    p = inv.BackendProfile(
+                        architecture=p.architecture,
+                        T1_prior_s=t1, T2_prior_s=t2,
+                        dt_ns=p.dt_ns, backend_name=p.backend_name,
+                        custom_arch=p.custom_arch,
+                        calibration_source=p.calibration_source,
+                        prior_confidence="live")
+                    print(f"[Canary] Q{q:>3d}: T1_prior={t1*1e6:.1f}µs  "
+                          f"T2_prior={t2*1e6:.1f}µs (from {t2_cal*1e6:.1f}µs cal)")
+                except Exception as exc:
+                    print(f"[Canary] Q{q} profile patch failed: {exc}")
+        profiles.append(p)
     return profiles
 
 
-def gate_rep_circuit_nq(N: int, n_qubits: int):
-    from qiskit import QuantumCircuit
-    qc = QuantumCircuit(n_qubits, n_qubits, name=f"gate_rep_N{N}")
-    for _ in range(N):
-        for q in range(n_qubits):
-            qc.sx(q)
-            qc.sxdg(q)
-    qc.measure(list(range(n_qubits)), list(range(n_qubits)))
-    return qc
+def _shots_for_meta(meta: dict) -> list:
+    DS = DEFAULT_SHOTS
+    return (
+        [DS["t1"]]     * meta["n_t1"]    +
+        [DS["ramsey"]] * meta["n_ramsey"] +
+        [DS["gate"]]   * meta["n_gate"]   +
+        [DS["echo"]]   * meta["n_echo"]
+    )
 
 
-def rb_circuit_nq(depth: int, seed: int, n_qubits: int):
-    from qiskit import QuantumCircuit
-    from qiskit.quantum_info import random_clifford, Clifford
+def _strip_delays(qc):
+    c = qc.copy()
+    c.data = [inst for inst in c.data if inst.operation.name != "delay"]
+    return c
+
+
+def build_and_transpile(profiles: list, qubits: list,
+                        backend, dry_run: bool) -> tuple:
+    all_circuits, all_shots, all_qids = [], [], []
+    per_qubit_metas = []
+
+    for q_id, profile in zip(qubits, profiles):
+        circuits, meta = inv.build_probe_circuits(profile)
+        per_qubit_metas.append(meta)
+        shots_seq = _shots_for_meta(meta)
+        assert len(circuits) == len(shots_seq)
+        all_circuits.extend(circuits)
+        all_shots.extend(shots_seq)
+        all_qids.extend([q_id] * len(circuits))
+
+    circuits_per_qubit = len(all_circuits) // len(qubits)
+
+    if dry_run:
+        stripped = [_strip_delays(qc) for qc in all_circuits]
+        pubs = [(qc, None, sh) for qc, sh in zip(stripped, all_shots)]
+    else:
+        print(f"  Transpiling {len(all_circuits)} circuits "
+              f"({circuits_per_qubit} per qubit, per-qubit layout, opt=0)... ",
+              end="", flush=True)
+        t_circuits = [
+            transpile(qc, backend=backend,
+                      initial_layout=[q_id], optimization_level=0)
+            for qc, q_id in zip(all_circuits, all_qids)
+        ]
+        print("done")
+        pubs = [(tc, None, sh) for tc, sh in zip(t_circuits, all_shots)]
+
+    return pubs, all_shots, per_qubit_metas, circuits_per_qubit
+
+
+def submit(backend, pubs: list, dry_run: bool):
+    if dry_run:
+        from qiskit.primitives import StatevectorSampler
+        sampler = StatevectorSampler()
+        print(f"  [dry-run] {len(pubs)} PUBs → StatevectorSampler... ",
+              end="", flush=True)
+        result = sampler.run(pubs).result()
+        print("done")
+        return result
+
+    from qiskit_ibm_runtime import SamplerV2
+    sampler = SamplerV2(backend)
+    print(f"  Submitting {len(pubs)} PUBs as one job... ", end="", flush=True)
+    job = sampler.run(pubs)
+    print(f"job_id={job.job_id()}")
+    print("  Waiting for results... ", end="", flush=True)
+    result = job.result()
+    print("done")
+    return result
+
+
+def _single_qubit_counts(pub_result, shots: int) -> dict:
+    for reg in ["c", "meas", "measure"]:
+        try:
+            raw = getattr(pub_result.data, reg).get_counts()
+            c   = {"0": int(raw.get("0", 0)), "1": int(raw.get("1", 0))}
+            total = c["0"] + c["1"]
+            if total < shots:
+                c["0"] += shots - total
+            return c
+        except AttributeError:
+            continue
+    return {"0": shots // 2, "1": shots - shots // 2}
+
+
+def reassemble(job_result, all_shots: list,
+               per_qubit_metas: list, qubits: list,
+               circuits_per_qubit: int) -> list:
+    per_qubit_counts = []
+    for q_idx in range(len(qubits)):
+        start  = q_idx * circuits_per_qubit
+        meta   = per_qubit_metas[q_idx]
+        n_circ = meta["n_t1"] + meta["n_ramsey"] + meta["n_gate"] + meta["n_echo"]
+        counts = [
+            _single_qubit_counts(job_result[start + i], all_shots[start + i])
+            for i in range(n_circ)
+        ]
+        per_qubit_counts.append(counts)
+    return per_qubit_counts
+
+
+def predict_and_residualize(counts_list: list, meta: dict,
+                             result, profile) -> dict:
+    arch = profile.constants
+    p0g1 = arch.get("p0_given_1", 0.0)
+    p1g0 = arch.get("p1_given_0", 0.0)
+    n_t1, n_ram   = meta["n_t1"], meta["n_ramsey"]
+    n_gate, n_echo = meta["n_gate"], meta["n_echo"]
+
+    t1_c     = counts_list[:n_t1]
+    ramsey_c = counts_list[n_t1:n_t1 + n_ram]
+    gate_c   = counts_list[n_t1 + n_ram:n_t1 + n_ram + n_gate]
+    echo_c   = counts_list[n_t1 + n_ram + n_gate:]
+    records  = []
+
+    def _rec(probe, cond, p_meas, p_model, sh):
+        sigma = max(np.sqrt(p_model * (1 - p_model) / sh), 1e-4) if sh > 0 else np.nan
+        z     = (p_meas - p_model) / sigma if sh > 0 else np.nan
+        return dict(probe=probe, condition=float(cond),
+                    p_meas=float(p_meas), p_model=float(p_model),
+                    sigma=float(sigma), z=float(z), shots=int(sh))
+
+    for d, c in zip(meta["t1_delays_s"], t1_c):
+        sh = c["0"] + c["1"]
+        pm = c["1"] / sh if sh else np.nan
+        records.append(_rec("T1", d, pm,
+                            float(inv.forward_t1(d, result.T1_s, p0g1, p1g0)), sh))
+
+    T2r = result.T2_ramsey_s or result.T2_s
+    for i, t in enumerate(meta["ramsey_delays_s"]):
+        px, py = inv.forward_ramsey_xy(t, T2r, result.delta_omega)
+        for label, c, pm_model in [("Ramsey-X", ramsey_c[2 * i],     px),
+                                    ("Ramsey-Y", ramsey_c[2 * i + 1], py)]:
+            sh = c["0"] + c["1"]
+            pm = c["1"] / sh if sh else np.nan
+            records.append(_rec(label, t, pm, float(pm_model), sh))
+
+    for N, c in zip(meta["gate_rep_N"], gate_c):
+        sh      = c["0"] + c["1"]
+        pm      = c["0"] / sh if sh else np.nan
+        p_model = float(inv.forward_gate(
+            np.array([N]), result.epsilon_sx, p0g1, p1g0)[0])
+        records.append(_rec("Gate", int(N), pm, p_model, sh))
+
+    T2e = result.T2_echo_s or min(result.T2_s, 2.0 * result.T1_s)
+    for d, c in zip(meta["echo_delays_s"], echo_c):
+        sh = c["0"] + c["1"]
+        pm = c["1"] / sh if sh else np.nan
+        records.append(_rec("Echo", d, pm,
+                            float(inv.forward_echo(d, T2e, p0g1, p1g0)), sh))
+
+    z = np.array([r["z"] for r in records if np.isfinite(r["z"])])
+    return dict(records=records,
+                chi2_dof_joint=float(np.mean(z ** 2)) if len(z) else np.nan,
+                n_conditions=len(records))
+
+
+def check_admissibility(result) -> dict:
+    T1, T2 = result.T1_s, result.T2_s
+    ok = T1 > 0 and T2 > 0 and T2 <= 2.0 * T1 * 1.001
+    return dict(T1_positive=T1 > 0, T2_positive=T2 > 0,
+                T2_le_2T1=T2 <= 2.0 * T1 * 1.001,
+                T2_over_2T1_ratio=float(T2 / (2.0 * T1)) if T1 > 0 else np.nan,
+                all_admissible=bool(ok))
+
+
+def _hypergeometric_split(counts: dict, fit_frac: float, rng) -> tuple:
+    n0, n1 = counts["0"], counts["1"]
+    n_fit  = int(round((n0 + n1) * fit_frac))
+    fit_n1 = int(rng.hypergeometric(ngood=n1, nbad=n0, nsample=n_fit))
+    fit_n0 = n_fit - fit_n1
+    return ({"0": fit_n0, "1": fit_n1}, {"0": n0 - fit_n0, "1": n1 - fit_n1})
+
+
+def split_counts_list(counts_list: list, fit_frac: float, seed: int) -> tuple:
     rng = np.random.default_rng(seed)
-    qc    = QuantumCircuit(n_qubits, n_qubits, name=f"rb_d{depth}_s{seed}")
-    total = Clifford(QuantumCircuit(1))
-    for _ in range(depth):
-        c = random_clifford(1, seed=int(rng.integers(0, 2**31)))
-        for q in range(n_qubits):
-            qc.compose(c.to_circuit(), qubits=[q], inplace=True)
-        total = total.compose(c)
-    inv_c = total.adjoint()
-    for q in range(n_qubits):
-        qc.compose(inv_c.to_circuit(), qubits=[q], inplace=True)
-    qc.measure(list(range(n_qubits)), list(range(n_qubits)))
-    return qc
+    fit, tst = [], []
+    for c in counts_list:
+        f, t = _hypergeometric_split(c, fit_frac, rng)
+        fit.append(f); tst.append(t)
+    return fit, tst
 
 
-def submit_and_wait(backend, circuit, shots: int):
-    from qiskit import transpile
-    tqc = transpile(circuit, backend=backend, optimization_level=0)
-    try:
-        job = backend.run(tqc, shots=shots,
-                          error_mitigation={"debias": False, "sharpen": False})
-    except TypeError:
-        job = backend.run(tqc, shots=shots)
-    return job.result()
+def _avg_shots(counts_list: list) -> int:
+    if not counts_list:
+        return 1
+    return max(1, int(round(np.mean([c["0"] + c["1"] for c in counts_list]))))
 
 
-def counts_to_per_qubit(result, n_qubits: int, shots: int) -> list:
-    counts = result.get_counts()
-    per_q  = [{"0": 0, "1": 0} for _ in range(n_qubits)]
-    for bitstring, count in counts.items():
-        bs = bitstring.replace(" ", "").zfill(n_qubits)
-        for q in range(n_qubits):
-            bit = bs[-(q + 1)]
-            if bit in ("0", "1"):
-                per_q[q][bit] += count
-    for q in range(n_qubits):
-        total = per_q[q]["0"] + per_q[q]["1"]
-        if total < shots:
-            per_q[q]["0"] += shots - total
-    return per_q
+def evaluate_holdout(test_counts: list, meta: dict,
+                     fit_result, profile) -> dict:
+    pred = predict_and_residualize(test_counts, meta, fit_result, profile)
+    z    = np.array([r["z"] for r in pred["records"] if np.isfinite(r["z"])])
+    cov  = float(np.mean(np.abs(z) <= 1.96)) if len(z) else np.nan
+    return dict(chi2_dof_predictive=pred["chi2_dof_joint"],
+                coverage_95=cov, n_conditions=pred["n_conditions"])
 
 
-def save_checkpoint(path: pathlib.Path, data: dict):
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    tmp.replace(path)
+def invert_and_analyze(physical_qubits: list, per_qubit_metas: list,
+                       per_qubit_counts: list, per_qubit_profiles: list,
+                       seed: int) -> list:
+    DS      = DEFAULT_SHOTS
+    results = []
 
+    for local_q, (phys_q, meta, counts_list, profile) in enumerate(
+            zip(physical_qubits, per_qubit_metas,
+                per_qubit_counts, per_qubit_profiles)):
 
-def load_checkpoint(path: pathlib.Path) -> dict:
-    if path.exists():
-        with open(path) as f:
-            return json.load(f)
-    return {}
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            result_full = inv.lindblad_inversion(
+                counts_list, meta, profile,
+                shots_t1=DS["t1"], shots_ramsey=DS["ramsey"],
+                shots_gate=DS["gate"], shots_echo=DS["echo"],
+                qubit_id=phys_q,
+                timestamp=datetime.now(timezone.utc).isoformat())
 
+        model_fit     = predict_and_residualize(
+            counts_list, meta, result_full, profile)
+        admissibility = check_admissibility(result_full)
 
-def run_gate_rep(backend, qubits: list, profiles: dict,
-                 chk: dict, chk_path: pathlib.Path) -> dict:
-    n_q   = len(qubits)
-    first = profiles[qubits[0]]
-    Nv    = first.gate_rep_n
+        fit_c, test_c = split_counts_list(
+            counts_list, FIT_FRACTION, seed=seed + local_q)
+        n_t1  = meta["n_t1"]
+        n_ram = meta["n_ramsey"]
+        n_g   = meta["n_gate"]
+        fit_sh = dict(
+            t1     = _avg_shots(fit_c[:n_t1]),
+            ramsey = _avg_shots(fit_c[n_t1:n_t1 + n_ram]),
+            gate   = _avg_shots(fit_c[n_t1 + n_ram:n_t1 + n_ram + n_g]),
+            echo   = _avg_shots(fit_c[n_t1 + n_ram + n_g:]))
 
-    print(f"  Gate rep (SX·SX† pairs): N={Nv}")
-    print(f"  {GATE_REP_SHOTS} shots × {n_q} qubits parallel")
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            result_fit = inv.lindblad_inversion(
+                fit_c, meta, profile,
+                shots_t1=fit_sh["t1"], shots_ramsey=fit_sh["ramsey"],
+                shots_gate=fit_sh["gate"], shots_echo=fit_sh["echo"],
+                qubit_id=phys_q,
+                timestamp=datetime.now(timezone.utc).isoformat())
 
-    p0_by_N = chk.get("gate_rep_p0_by_N", {})
-    done    = set(str(k) for k in p0_by_N.keys())
+        holdout = evaluate_holdout(test_c, meta, result_fit, profile)
 
-    for N in Nv:
-        if str(N) in done:
-            print(f"    N={N}: loaded from checkpoint")
-            continue
-        try:
-            qc     = gate_rep_circuit_nq(N, n_q)
-            result = submit_and_wait(backend, qc, GATE_REP_SHOTS)
-            per_q  = counts_to_per_qubit(result, n_q, GATE_REP_SHOTS)
-            row    = {}
-            for qi, q_id in enumerate(qubits):
-                sh = per_q[qi]["0"] + per_q[qi]["1"]
-                p0 = per_q[qi]["0"] / sh if sh > 0 else 0.5
-                row[q_id] = p0
-            p0_by_N[str(N)] = row
-            chk["gate_rep_p0_by_N"] = p0_by_N
-            save_checkpoint(chk_path, chk)
-            print(f"    N={N}: p0={[f'{row[q]:.3f}' for q in qubits]}")
-        except Exception as e:
-            print(f"    N={N} FAILED — {e}  (checkpoint saved, aborting gate rep)")
-            chk["gate_rep_p0_by_N"] = p0_by_N
-            save_checkpoint(chk_path, chk)
-            break
+        print(f"  Q{phys_q:>3d}: "
+              f"T1={result_full.T1_s:.4g}s  T2={result_full.T2_s:.4g}s  "
+              f"Δω={result_full.delta_omega:.4g} rad/s  "
+              f"ε_sx={result_full.epsilon_sx:.3e}  "
+              f"χ²={model_fit['chi2_dof_joint']:.2f}  "
+              f"cov95={holdout['coverage_95']:.2f}  "
+              f"T2≤2T1={'OK' if admissibility['all_admissible'] else 'VIOLATED'}")
 
-    results = {}
-    for q_id in qubits:
-        profile = profiles[q_id]
-        cal     = profile.constants
-        p0g1    = cal["p0_given_1"]
-        p1g0    = cal["p1_given_0"]
-        eps0    = cal["eps_typical"]
-
-        Nv_done  = [N for N in Nv if str(N) in p0_by_N]
-        p0_meas  = [p0_by_N[str(N)][q_id] for N in Nv_done]
-
-        if len(Nv_done) < 2:
-            print(f"    Q{q_id}: insufficient data")
-            results[q_id] = dict(Nv=Nv_done, p0_measured=p0_meas,
-                                 eps_sx=float("nan"), eps_sx_sigma=float("nan"),
-                                 p0g1=p0g1, p1g0=p1g0)
-            continue
-
-        sigma = [max(np.sqrt(p * (1 - p) / GATE_REP_SHOTS), 1e-4)
-                 for p in p0_meas]
-        try:
-            def model(Nv, eps):
-                return np.array([
-                    float(inv.forward_gate(np.array([n]), eps, p0g1, p1g0)[0])
-                    for n in Nv
-                ])
-            popt, pcov = curve_fit(
-                model, Nv_done, p0_meas,
-                p0=[eps0], bounds=(0, ARCH["eps_max"]),
-                sigma=sigma, absolute_sigma=True)
-            eps     = float(popt[0])
-            eps_sig = float(np.sqrt(pcov[0, 0]))
-        except Exception:
-            eps, eps_sig = float("nan"), float("nan")
-
-        print(f"    Q{q_id}: eps_sx={eps:.4e}±{eps_sig:.2e}  "
-              f"p0={[f'{v:.3f}' for v in p0_meas]}  "
-              f"p0|1={p0g1:.4f}  p1|0={p1g0:.4f}  eps0={eps0:.2e}")
-
-        results[q_id] = dict(Nv=Nv_done, p0_measured=p0_meas,
-                             eps_sx=eps, eps_sx_sigma=eps_sig,
-                             p0g1=p0g1, p1g0=p1g0, eps_prior=eps0)
-    return results, Nv
-
-
-def fit_rb(depths: list, survival: list) -> tuple:
-    def model(m, A, p, B):
-        return A * np.array(p) ** np.array(m) + B
-    try:
-        popt, pcov = curve_fit(model, depths, survival,
-                               p0=[0.5, 0.99, 0.5],
-                               bounds=([0, 0, 0], [1, 1, 1]))
-        A, p, B     = popt
-        epc         = (1.0 - p) / 2.0
-        epc_sigma   = float(np.sqrt(pcov[1, 1])) / 2.0
-        eps_rb      = epc / 1.875
-        eps_rb_sig  = epc_sigma / 1.875
-        return float(p), float(epc), float(eps_rb), float(eps_rb_sig)
-    except Exception:
-        return float("nan"), float("nan"), float("nan"), float("nan")
-
-
-def run_rb(backend, qubits: list, chk: dict, chk_path: pathlib.Path) -> dict:
-    n_q      = len(qubits)
-    survival = chk.get("rb_survival", {str(q): {str(d): [] for d in RB_DEPTHS}
-                                       for q in qubits})
-    done_seqs = chk.get("rb_done_seqs", 0)
-
-    print(f"  RB: depths={RB_DEPTHS}  {RB_SEQUENCES} seqs  {RB_SHOTS} shots  {n_q}q")
-    if done_seqs > 0:
-        print(f"  Resuming from sequence {done_seqs+1}/{RB_SEQUENCES}")
-
-    for seq_idx in range(done_seqs, RB_SEQUENCES):
-        seq_failed = False
-        for depth in RB_DEPTHS:
-            seq_seed = SEED + seq_idx * 10000 + depth
-            try:
-                qc     = rb_circuit_nq(depth, seq_seed, n_q)
-                result = submit_and_wait(backend, qc, RB_SHOTS)
-                per_q  = counts_to_per_qubit(result, n_q, RB_SHOTS)
-                for qi, q_id in enumerate(qubits):
-                    sh = per_q[qi]["0"] + per_q[qi]["1"]
-                    p0 = per_q[qi]["0"] / sh if sh > 0 else 0.5
-                    survival[str(q_id)][str(depth)].append(p0)
-            except Exception as e:
-                print(f"    Seq {seq_idx+1} depth {depth} FAILED — {e}")
-                seq_failed = True
-                break
-
-        chk["rb_survival"]  = survival
-        chk["rb_done_seqs"] = seq_idx + (0 if seq_failed else 1)
-        save_checkpoint(chk_path, chk)
-
-        if seq_failed:
-            print(f"    Checkpoint saved after partial sequence {seq_idx+1}.")
-            break
-        print(f"    Sequence {seq_idx+1}/{RB_SEQUENCES} done")
-
-    results = {}
-    for q_id in qubits:
-        depths_with_data = [d for d in RB_DEPTHS
-                            if len(survival[str(q_id)][str(d)]) > 0]
-        if len(depths_with_data) < 3:
-            print(f"    Q{q_id}: insufficient RB data ({len(depths_with_data)} depths)")
-            results[q_id] = dict(depths=depths_with_data, mean_survival=[],
-                                 p_decay=float("nan"), epc=float("nan"),
-                                 eps_rb=float("nan"), eps_rb_sigma=float("nan"))
-            continue
-        mean_surv = [float(np.mean(survival[str(q_id)][str(d)]))
-                     for d in depths_with_data]
-        p_decay, epc, eps_rb, eps_rb_sig = fit_rb(depths_with_data, mean_surv)
-        print(f"    Q{q_id}: EPC={epc:.4e}  eps_rb={eps_rb:.4e}±{eps_rb_sig:.2e}")
-        results[q_id] = dict(depths=depths_with_data, mean_survival=mean_surv,
-                             p_decay=p_decay, epc=epc,
-                             eps_rb=eps_rb, eps_rb_sigma=eps_rb_sig)
+        cal_source = profile.calibration_source
+        cal        = profile.constants
+        results.append(dict(
+            qubit_id=phys_q,
+            meta=meta,
+            calibration=dict(
+                T1_prior_s=profile.T1_prior_s,
+                T2_prior_s=profile.T2_prior_s,
+                p0_given_1=cal.get("p0_given_1", 0.0),
+                p1_given_0=cal.get("p1_given_0", 0.0),
+                eps_typical=cal.get("eps_typical"),
+                prior_confidence=profile.prior_confidence,
+                T1_source=cal_source.T1_source if cal_source else "unknown",
+                T2_source=cal_source.T2_source if cal_source else "unknown",
+                spam_source=cal_source.spam_source if cal_source else "unknown",
+            ),
+            counts_list=counts_list,
+            result_full=dict(
+                T1_s=result_full.T1_s,
+                T1_sigma_s=result_full.T1_sigma_s,
+                T2_s=result_full.T2_s,
+                T2_sigma_s=result_full.T2_sigma_s,
+                T2_ramsey_s=result_full.T2_ramsey_s,
+                T2_ramsey_sigma_s=result_full.T2_ramsey_sigma_s,
+                T2_echo_s=result_full.T2_echo_s,
+                T2_echo_sigma_s=result_full.T2_echo_sigma_s,
+                delta_omega=result_full.delta_omega,
+                delta_omega_sigma=result_full.delta_omega_sigma,
+                epsilon_sx=result_full.epsilon_sx,
+                epsilon_sx_sigma=result_full.epsilon_sx_sigma,
+                t1_chi2_dof=result_full.t1_chi2_dof,
+                ramsey_chi2_dof=result_full.ramsey_chi2_dof,
+                gate_chi2_dof=result_full.gate_chi2_dof,
+                echo_chi2_dof=result_full.echo_chi2_dof,
+            ),
+            model_fit=model_fit,
+            admissibility=admissibility,
+            holdout=holdout,
+        ))
     return results
 
 
-def compare_and_print(gate_rep: dict, rb: dict, qubits: list):
+def compare_runs(run_a_path: pathlib.Path, run_b_data: dict) -> None:
+    if not run_a_path.exists():
+        return
+    with open(run_a_path) as f:
+        run_a = json.load(f)
+    a_by_q = {q["qubit_id"]: q for q in run_a["qubits"]}
+    params = [("T1_s", "T1_sigma_s", "T1 (s)"),
+              ("T2_s", "T2_sigma_s", "T2 (s)"),
+              ("delta_omega", "delta_omega_sigma", "Δω (rad/s)"),
+              ("epsilon_sx", "epsilon_sx_sigma", "ε_sx")]
     print("\n" + "=" * 72)
-    print("  CANARY ε_sx  (SX·SX†)  vs  RB ε_sx  —  PER QUBIT")
+    print("  RUN A vs RUN B — z_j = (A−B)/√(σ_A²+σ_B²)")
     print("=" * 72)
-    print(f"  {'Q':>4}  {'Canary':>14}  {'RB':>14}  {'C/RB':>8}  {'z':>6}  {'OK?':>6}")
-    print("-" * 72)
-    for q_id in qubits:
-        c_eps = gate_rep[q_id]["eps_sx"]
-        c_sig = gate_rep[q_id]["eps_sx_sigma"]
-        r_eps = rb[q_id]["eps_rb"]
-        r_sig = rb[q_id]["eps_rb_sigma"]
-        ratio = c_eps / r_eps if r_eps > 0 else float("nan")
-        denom = np.sqrt(c_sig ** 2 + r_sig ** 2)
-        z     = ((c_eps - r_eps) / denom
-                 if denom > 0 and np.isfinite(denom) else float("nan"))
-        flag  = "OK" if np.isfinite(z) and abs(z) <= 2.0 else "CHECK"
-        print(f"  {q_id:>4}  {c_eps:>14.4e}  {r_eps:>14.4e}  "
-              f"{ratio:>8.3f}  {z:>+6.2f}  {flag:>6}")
+    for q in run_b_data["qubits"]:
+        qid = q["qubit_id"]
+        if qid not in a_by_q:
+            continue
+        a = a_by_q[qid]["result_full"]
+        b = q["result_full"]
+        print(f"\n  Q{qid}:")
+        for vk, sk, lbl in params:
+            va, sa = a[vk], a[sk]
+            vb, sb = b[vk], b[sk]
+            denom  = np.sqrt(sa ** 2 + sb ** 2)
+            z      = (va - vb) / denom if denom > 0 and np.isfinite(denom) else np.nan
+            flag   = "OK" if np.isfinite(z) and abs(z) <= 2.0 else "DRIFT"
+            print(f"    {lbl:14s}  A={va:.4g}±{sa:.2g}  "
+                  f"B={vb:.4g}±{sb:.2g}  z={z:+.2f}  {flag}")
     print("=" * 72)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--qubits",          required=True,
-                    help="Comma-separated qubit indices, e.g. 0,1,2,3,4,5,6,7")
-    ap.add_argument("--backend",         default="ionq_simulator:forte-1",
-                    help="ionq_simulator:forte-1 | ionq_simulator | qpu.forte-enterprise-1")
-    ap.add_argument("--live",            action="store_true",
-                    help="Required when targeting a real QPU (qpu.*)")
-    ap.add_argument("--gate-rep-shots",  type=int, default=GATE_REP_SHOTS)
-    ap.add_argument("--rb-shots",        type=int, default=RB_SHOTS)
-    ap.add_argument("--rb-seqs",         type=int, default=RB_SEQUENCES)
-    ap.add_argument("--resume",          default=None,
-                    help="Path to an existing checkpoint JSON to resume from")
+    ap.add_argument("--backend", default="ibm_fez",
+                    choices=["ibm_fez", "ibm_kingston", "ibm_marrakesh"])
+    ap.add_argument("--instance", default="open-instance")
+
+    qubit_group = ap.add_mutually_exclusive_group(required=True)
+    qubit_group.add_argument("--qubits")
+    qubit_group.add_argument("--n-qubits", type=int)
+
+    ap.add_argument("--run-label", required=True, choices=["A", "B"])
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
-    qubits = [int(q.strip()) for q in args.qubits.split(",")]
-
-    if is_real_qpu(args.backend) and not args.live:
-        sys.exit(f"ERROR: '{args.backend}' is real QPU. Add --live to confirm.")
-
-    api_key = os.environ.get("IONQ_API_KEY")
-    if not api_key:
-        sys.exit("ERROR: IONQ_API_KEY not set.\n"
-                 "PowerShell: $env:IONQ_API_KEY = 'your_key'")
-
-    ts           = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    chk_path     = (pathlib.Path(args.resume) if args.resume
-                    else DATA_DIR / f"checkpoint_ionq_{ts}.json")
-    chk          = load_checkpoint(chk_path)
-
-    n_gate_circ  = 3
-    n_rb_circ    = args.rb_seqs * len(RB_DEPTHS)
-    total_shots  = (n_gate_circ * args.gate_rep_shots +
-                    n_rb_circ   * args.rb_shots)
-
     print(f"\n[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] "
-          f"6_ionq_eps_rb.py")
-    print(f"  Backend        : {args.backend}")
-    print(f"  Qubits         : {qubits}  (n={len(qubits)}, parallel per circuit)")
-    print(f"  Gate rep shots : {args.gate_rep_shots}/circuit  (3 circuits, SX·SX† pairs)")
-    print(f"  RB             : depths={RB_DEPTHS}")
-    print(f"  RB shots       : {args.rb_shots}/circuit  "
-          f"({args.rb_seqs} seqs × {len(RB_DEPTHS)} depths)")
-    print(f"  Total shots    : {total_shots:,}")
-    print(f"  Error mitig.   : OFF  (debias=False, sharpen=False)")
-    print(f"  Opt level      : 0")
-    print(f"  Checkpoint     : {chk_path}")
+          f"5_ibm_hardware.py  Run {args.run_label}")
 
-    if is_real_qpu(args.backend):
-        est = total_shots * COST_PER_SHOT
-        print(f"  Est. cost      : ${est:,.2f}  (at ${COST_PER_SHOT}/shot)")
-        if input("  Type RUN to confirm: ").strip() != "RUN":
-            sys.exit("Aborted.")
+    if args.dry_run:
+        backend       = get_dry_run_backend()
+        backend_label = "dry-run"
+        print(f"  Mode: {backend_label}")
+        props = None
     else:
-        nm = (args.backend.split(":", 1)[1] if ":" in args.backend
-              else "noiseless")
-        print(f"  Est. cost      : $0.00  (simulator, {nm})")
+        print(f"  Backend : {args.backend}  ({args.instance})")
+        print("  Connecting... ", end="", flush=True)
+        backend = get_backend(args.backend, args.instance)
+        print(f"done  [{backend.num_qubits}-qubit Heron r2]")
+        backend_label = args.backend
+        props = backend.properties()
+
+    if args.qubits:
+        qubits = [int(q.strip()) for q in args.qubits.split(",")]
+        print(f"  Qubits  : {qubits}  (explicit)")
+    else:
+        qubits = select_qubits(backend, args.n_qubits)
+    nq = len(qubits)
+
+    print(f"\n  Loading per-qubit live profiles...")
+    per_qubit_profiles = load_profiles(backend, qubits, props, args.dry_run)
+
+    pubs, all_shots, per_qubit_metas, cpq = build_and_transpile(
+        per_qubit_profiles, qubits, backend, args.dry_run)
+
+    DS = DEFAULT_SHOTS
+    shots_per_q = (per_qubit_metas[0]["n_t1"]     * DS["t1"]     +
+                   per_qubit_metas[0]["n_ramsey"]  * DS["ramsey"] +
+                   per_qubit_metas[0]["n_gate"]    * DS["gate"]   +
+                   per_qubit_metas[0]["n_echo"]    * DS["echo"])
+
+    print(f"\n  Strategy     : {nq} qubits × {cpq} circuits = {len(pubs)} PUBs, 1 job")
+    print(f"  Shots/qubit  : {shots_per_q:,}  "
+          f"(T1={DS['t1']} Ramsey={DS['ramsey']} Gate={DS['gate']} Echo={DS['echo']})")
+    print(f"  Delays       : per-qubit, matched to each qubit's live T1/T2 prior")
     print()
 
-    backend = get_backend(args.backend, api_key)
+    job_result = submit(backend, pubs, args.dry_run)
 
-    print("Loading per-qubit live profiles from IonQ API...")
-    profiles = load_per_qubit_profiles(qubits, api_key,
-                                       args.backend if is_real_qpu(args.backend)
-                                       else args.backend)
+    print("  Reassembling per-qubit counts... ", end="", flush=True)
+    per_qubit_counts = reassemble(
+        job_result, all_shots, per_qubit_metas, qubits, cpq)
+    print("done")
 
-    print("\nRunning Canary gate repetition...")
-    gate_rep_results, Nv = run_gate_rep(
-        backend, qubits, profiles, chk, chk_path)
+    print("\nRunning Lindblad inversion per qubit...")
+    qubit_results = invert_and_analyze(
+        qubits, per_qubit_metas, per_qubit_counts,
+        per_qubit_profiles, args.seed)
 
-    print("\nRunning Clifford RB...")
-    rb_results = run_rb(backend, qubits, chk, chk_path)
+    label_str = "-".join(map(str, qubits))
+    out_path  = DATA_DIR / f"run_{args.run_label}_{args.backend}_q{label_str}.json"
+    payload   = dict(
+        run_label=args.run_label,
+        backend=backend_label,
+        architecture=ARCHITECTURE,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        qubits=qubit_results,
+    )
+    with open(out_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"\n  Saved: {out_path}")
 
-    compare_and_print(gate_rep_results, rb_results, qubits)
+    if args.run_label == "B":
+        run_a = DATA_DIR / f"run_A_{args.backend}_q{label_str}.json"
+        compare_runs(run_a, payload)
 
-    cal_summary = {
-        q: dict(
-            eps_prior   = profiles[q].constants["eps_typical"],
-            p0g1        = profiles[q].constants["p0_given_1"],
-            p1g0        = profiles[q].constants["p1_given_0"],
-            confidence  = profiles[q].prior_confidence,
-        )
-        for q in qubits
-    }
-
-    out = DATA_DIR / f"ionq_eps_rb_{'-'.join(map(str, qubits))}_{ts}.json"
-    with open(out, "w") as f:
-        json.dump(dict(
-            backend   = args.backend,
-            timestamp = datetime.now(timezone.utc).isoformat(),
-            qubits    = qubits,
-            gate_rep_N = Nv,
-            calibration = cal_summary,
-            gate_rep  = {str(k): v for k, v in gate_rep_results.items()},
-            rb        = {str(k): v for k, v in rb_results.items()},
-        ), f, indent=2)
-    print(f"\n  Saved: {out}")
-
-    if chk_path.exists():
-        chk_path.unlink()
-        print(f"  Checkpoint removed: {chk_path}")
+    print(f"\n  Done. {len(qubit_results)}/{nq} qubits completed.")
 
 
 if __name__ == "__main__":
