@@ -12,7 +12,7 @@ __all__ = [
     "ARCH_DEFAULTS", "build_custom_arch", "BackendProfile",
     "CalibrationSource", "InversionResult", "forward_t1", "forward_ramsey_xy",
     "forward_gate", "forward_echo",
-    "build_probe_circuits", "run_probe_circuits_aer", "lindblad_inversion",
+    "build_probe_circuits", "lindblad_inversion",
     "get_live_profile", "fetch_live_spam",
     "NATIVE_INVERSE_PAIRS", "register_native_pair",
     "_sqrtx_native_inverse_pair", "_build_gate_rep_circuit",
@@ -559,32 +559,6 @@ class BackendProfile:
                    calibration_source=calibration_source,
                    prior_confidence="arch_default")
 
-    @classmethod
-    def from_true_params(cls, architecture: str,
-                         T1_true_s: float,
-                         T2_true_s: float) -> "BackendProfile":
-        """
-        Constructs a BackendProfile with priors set to the true parameter
-        values and prior_confidence="live", so Strategy A (linear delays)
-        is used and delays are perfectly centred on the true decay.
-        Used exclusively for Fig. 2 (ideal hardware validation) in
-        2_parity_experiments.py. Never used for real hardware runs.
-        """
-        defaults = ARCH_DEFAULTS.get(architecture, ARCH_DEFAULTS["unknown"])
-        T1 = T1_true_s
-        T2 = min(T2_true_s, 2.0 * T1_true_s)
-        live_p0, live_p1, spam_source, spam_note = fetch_live_spam(architecture)
-        calibration_source = CalibrationSource(
-            T1_source="arch_default", T2_source="arch_default",
-            eps_source="arch_default", dw_source="arch_default",
-            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            backend="from_true_params",
-            spam_source=spam_source, spam_note=spam_note)
-        return cls(architecture=architecture, T1_prior_s=T1, T2_prior_s=T2,
-                   dt_ns=defaults["dt_ns"], backend_name="from_true_params",
-                   calibration_source=calibration_source,
-                   prior_confidence="live")
-
     def updated(self, T1_est_s: float, T2_est_s: float) -> "BackendProfile":
         T2_est_s = min(T2_est_s, 2.0*T1_est_s)
         return BackendProfile(architecture=self.architecture, T1_prior_s=T1_est_s,
@@ -651,114 +625,6 @@ def _snap(delay_s: float, dt_ns: Optional[float]) -> tuple[float, str]:
         dt_s = dt_ns*1e-9
         return float(max(1, round(delay_s/dt_s))), "dt"
     return delay_s, "s"
-
-
-def _delay_seconds(inst, dt_ns: Optional[float]) -> float:
-    dur = inst.operation.params[0]
-    unit = getattr(inst.operation, "unit", "dt")
-    if unit == "s":
-        return float(dur)
-    elif unit == "ns":
-        return float(dur) * 1e-9
-    elif unit == "us":
-        return float(dur) * 1e-6
-    elif unit == "ms":
-        return float(dur) * 1e-3
-    elif unit == "dt":
-        return float(dur) * (dt_ns if dt_ns is not None else 0.2222) * 1e-9
-    return float(dur)
-
-
-def _make_aer_backend_for_circuit(qc, T1_s: float, T2_s: float,
-                                   eps_sx: float, p0g1: float, p1g0: float,
-                                   gate_time_ns: float, dt_ns: Optional[float]):
-    from qiskit_aer import AerSimulator
-    from qiskit_aer.noise import (NoiseModel, thermal_relaxation_error,
-                                   depolarizing_error, ReadoutError)
-
-    nm = NoiseModel()
-
-    gate_time_s = gate_time_ns * 1e-9
-    gate_err = (thermal_relaxation_error(T1_s, T2_s, gate_time_s)
-                .compose(depolarizing_error(2.0 * eps_sx, 1)))
-    nm.add_quantum_error(gate_err,
-        ["sx", "sxdg", "x", "h", "s", "sdg", "id",
-         "rx", "ry", "r", "u", "u1", "u2", "u3", "p"], [0])
-
-    seen: set = set()
-    for inst in qc.data:
-        if inst.operation.name == "delay":
-            ds = _delay_seconds(inst, dt_ns)
-            key = round(ds, 15)
-            if key not in seen and ds > 1e-12:
-                seen.add(key)
-                nm.add_quantum_error(
-                    thermal_relaxation_error(T1_s, T2_s, ds), ["delay"], [0])
-
-    nm.add_readout_error(
-        ReadoutError([[1.0 - p0g1, p0g1], [p1g0, 1.0 - p1g0]]), [0])
-
-    return AerSimulator(noise_model=nm)
-
-
-def _inject_ramsey_detuning(qc, dw_s: float, dt_ns: Optional[float]):
-    from qiskit import QuantumCircuit
-    qc_new = QuantumCircuit(qc.num_qubits, qc.num_clbits, name=qc.name)
-    for inst in qc.data:
-        qc_new.append(inst.operation, inst.qubits, inst.clbits)
-        if inst.operation.name == "delay":
-            ds = _delay_seconds(inst, dt_ns)
-            qc_new.rz(dw_s * ds, 0)
-    return qc_new
-
-
-def run_probe_circuits_aer(
-    circuits: list,
-    meta: dict,
-    T1_s: float,
-    T2_s: float,
-    eps_sx: float,
-    p0g1: float,
-    p1g0: float,
-    dt_ns: Optional[float],
-    shots_t1: int,
-    shots_ramsey: int,
-    shots_gate: int,
-    shots_echo: int,
-    dw_s: float = 0.0,
-) -> list:
-    from qiskit import transpile
-
-    arch_name = meta.get("architecture", "superconducting")
-    arch = ARCH_DEFAULTS.get(arch_name, ARCH_DEFAULTS["superconducting"])
-    gate_time_ns = arch.get("gate_time_ns", 50.0)
-
-    n_t1     = meta["n_t1"]
-    n_ramsey = meta["n_ramsey"]
-    n_gate   = meta["n_gate"]
-
-    shots_per_circuit = (
-        [shots_t1]     * n_t1 +
-        [shots_ramsey] * n_ramsey +
-        [shots_gate]   * n_gate +
-        [shots_echo]   * (len(circuits) - n_t1 - n_ramsey - n_gate)
-    )
-
-    counts_list = []
-    for qc, sh in zip(circuits, shots_per_circuit):
-        run_qc = (_inject_ramsey_detuning(qc, dw_s, dt_ns)
-                  if "ramsey" in qc.name else qc)
-        backend = _make_aer_backend_for_circuit(
-            run_qc, T1_s, T2_s, eps_sx, p0g1, p1g0, gate_time_ns, dt_ns)
-        tqc = transpile(run_qc, backend, optimization_level=0)
-        raw = backend.run(tqc, shots=sh).result().get_counts()
-        norm: dict = {}
-        for bitstring, cnt in raw.items():
-            b = bitstring.replace(" ", "")[-1]
-            norm[b] = norm.get(b, 0) + cnt
-        counts_list.append(norm)
-
-    return counts_list
 
 
 def _build_t1_circuit(delay_s: float, dt_ns: Optional[float], idx: int):
@@ -869,7 +735,7 @@ def register_native_pair(architecture: str, pair_fn) -> None:
         register_native_pair("neutral_atom_myvendor", my_pair)
 
     The registered architecture name can then be passed to
-    build_custom_arch() / BackendProfile.from_true_params() and to
+    build_custom_arch() / BackendProfile.from_architecture() and to
     _build_gate_rep_circuit() / build_probe_circuits() directly.
     """
     NATIVE_INVERSE_PAIRS[architecture] = pair_fn
@@ -987,10 +853,13 @@ def forward_t1(tau_s, T1_s: float, p0_given_1: float = 0.0, p1_given_0: float = 
     return p_ideal * (1.0 - p0_given_1) + (1.0 - p_ideal) * p1_given_0
 
 
-def forward_ramsey_xy(t: float, T2_s: float, delta_omega: float):
-    decay = np.exp(-t / T2_s)
-    p1_x  = 0.5 * (1.0 - decay * np.cos(delta_omega * t))
-    p1_y  = 0.5 * (1.0 - decay * np.sin(delta_omega * t))
+def forward_ramsey_xy(t: float, T2_s: float, delta_omega: float,
+                       p0_given_1: float = 0.0, p1_given_0: float = 0.0):
+    decay      = np.exp(-t / T2_s)
+    p1_x_ideal = 0.5 * (1.0 - decay * np.cos(delta_omega * t))
+    p1_y_ideal = 0.5 * (1.0 - decay * np.sin(delta_omega * t))
+    p1_x = p1_x_ideal * (1.0 - p0_given_1) + (1.0 - p1_x_ideal) * p1_given_0
+    p1_y = p1_y_ideal * (1.0 - p0_given_1) + (1.0 - p1_y_ideal) * p1_given_0
     return p1_x, p1_y
 
 
@@ -1042,6 +911,8 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
                        T2_prior_s: float, arch: dict,
                        T1_estimate_s: float, shots_ramsey: int
                        ) -> tuple[float, float, float, float, float]:
+    p0_given_1 = arch.get("p0_given_1", 0.0)
+    p1_given_0 = arch.get("p1_given_0", 0.0)
     x_means = np.clip(1.0 - 2.0*p1_x_arr, -1.0, 1.0)
     y_means = np.clip(1.0 - 2.0*p1_y_arr, -1.0, 1.0)
     amps    = np.clip(np.sqrt(x_means**2 + y_means**2), 1e-6, 1.0)
@@ -1058,8 +929,12 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
                                      T2_min, T2_max))
 
     t1     = float(ramsey_delays[0])
+    # Declared Nyquist-style detuning constraint (same 0.90*pi/t1 bound as
+    # BackendProfile.dw_max_rad_s, evaluated on the shortest Ramsey delay):
+    # the estimator must never report |delta_omega| beyond this interval.
+    dw_max = 0.90 * np.pi / t1
     angle  = float(np.arctan2(y_means[0], x_means[0]))
-    dw     = angle / t1
+    dw     = float(np.clip(angle / t1, -dw_max, dw_max))
     amp_t1 = float(amps[0])
     # Cramér-Rao lower bound check: below this amplitude the angle estimate
     # carries no reliable information at this shot count, so mark it
@@ -1070,11 +945,14 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
         sigma_angle = np.inf
     else:
         sigma_angle = 1.0 / (amp_t1 * np.sqrt(max(shots_ramsey, 1)))
-    sdw    = float(np.clip(sigma_angle / t1, 0, np.inf))
+    # Capped at dw_max: a 1-sigma uncertainty wider than the enforced bound
+    # itself would misrepresent this as an unconstrained ML estimate.
+    sdw    = float(np.clip(sigma_angle / t1, 0, dw_max))
 
     xy_meas = np.concatenate([p1_x_arr, p1_y_arr])
     def xy_model(_, T2_s):
-        px_pred, py_pred = forward_ramsey_xy(ramsey_delays, T2_s, dw)
+        px_pred, py_pred = forward_ramsey_xy(ramsey_delays, T2_s, dw,
+                                              p0_given_1, p1_given_0)
         return np.concatenate([px_pred, py_pred])
 
     p_guess   = xy_model(None, T2_guess)
@@ -1263,7 +1141,9 @@ def lindblad_inversion(counts_list: list[dict],
         p1_x_arr, p1_y_arr, ramsey_delays, profile.T2_prior_s, arch,
         T1_estimate_s=T1, shots_ramsey=shots_ramsey)
 
-    px_pred, py_pred = forward_ramsey_xy(ramsey_delays, T2, dw)
+    px_pred, py_pred = forward_ramsey_xy(
+        ramsey_delays, T2, dw,
+        arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0))
     ramsey_meas = np.concatenate([p1_x_arr, p1_y_arr])
     ramsey_pred = np.concatenate([px_pred, py_pred])
     ramsey_chi2 = _chi2_per_dof(ramsey_meas, ramsey_pred, shots_ramsey, n_params=1)
@@ -1333,97 +1213,3 @@ def lindblad_inversion(counts_list: list[dict],
         echo_residual=r_echo, echo_chi2_dof=echo_chi2,
         calibration_source=profile.calibration_source,
         prior_warning=prior_warning)
-
-
-if __name__ == "__main__":
-    print("=" * 70)
-    print("Canary self-test: live calibration priors (get_live_profile)")
-    print("=" * 70)
-
-    print("\n[1] get_live_profile('superconducting', qubit_id=0)")
-    sc_profile = get_live_profile("superconducting", qubit_id=0)
-    print(sc_profile)
-    print("calibration_source:", sc_profile.calibration_source)
-
-    print("\n[2] get_live_profile('trapped_ion')")
-    ti_profile = get_live_profile("trapped_ion")
-    print(ti_profile)
-    print("calibration_source:", ti_profile.calibration_source)
-    print(f"trapped_ion t1_delays_s (log-spaced [0.01, 100000]): {ti_profile.t1_delays_s}")
-    print(f"trapped_ion ramsey_delays_s: {ti_profile.ramsey_delays_s}")
-
-    na_profile = get_live_profile("neutral_atom")
-    print(f"neutral_atom t1_delays_s (log-spaced [0.001, 100000]): {na_profile.t1_delays_s}")
-    print(f"neutral_atom ramsey_delays_s: {na_profile.ramsey_delays_s}")
-
-    print("\n[2b] gate_rep_n for all three architectures")
-    for arch_name in ("superconducting", "trapped_ion", "neutral_atom"):
-        p = get_live_profile(arch_name)
-        print(f"{arch_name}: eps_typical={p.constants['eps_typical']:.2e} "
-              f"gate_rep_n={p.gate_rep_n}")
-
-    print("\n[3] get_live_profile('ionq:forte-1', ionq_token='dummy_token')"
-          " — expect graceful fallback")
-    ionq_profile = get_live_profile("ionq:forte-1", ionq_token="dummy_token")
-    print(ionq_profile)
-    print("calibration_source:", ionq_profile.calibration_source)
-
-    print("\n[4] build_probe_circuits() + lindblad_inversion() end-to-end "
-          "with a get_live_profile() profile (synthetic all-zero counts)")
-    probe_profile = get_live_profile("superconducting", qubit_id=0)
-    circuits, metadata = build_probe_circuits(probe_profile)
-    n_circuits = len(circuits)
-    print(f"built {n_circuits} probe circuits")
-
-    zero_counts = [{"0": 300, "1": 0} for _ in range(n_circuits)]
-    result = lindblad_inversion(
-        zero_counts, metadata, probe_profile,
-        shots_t1=300, shots_ramsey=300, shots_gate=300, shots_echo=300,
-        qubit_id=0, timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    )
-    print(result.summary(arch=probe_profile.constants))
-
-    print("\n[4b] build_probe_circuits() + lindblad_inversion() on all three "
-          "architectures with synthetic all-zero counts")
-    for arch_name in ("superconducting", "trapped_ion", "neutral_atom"):
-        p = get_live_profile(arch_name)
-        circs, meta = build_probe_circuits(p)
-        zc = [{"0": 300, "1": 0} for _ in range(len(circs))]
-        res = lindblad_inversion(
-            zc, meta, p, shots_t1=300, shots_ramsey=300, shots_gate=300,
-            shots_echo=300, qubit_id=0,
-            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
-        assert np.isfinite(res.T1_s) and np.isfinite(res.T2_s), \
-            f"{arch_name}: non-finite T1/T2"
-        print(f"{arch_name}: {len(circs)} circuits, T1={res.T1_s:.4g}s "
-              f"T2={res.T2_s:.4g}s (finite: OK)")
-
-    print("\n" + "=" * 70)
-    print("Canary self-test: live SPAM ingestion (fetch_live_spam)")
-    print("=" * 70)
-
-    print("\n[5] fetch_live_spam('superconducting', backend=None)"
-          " — expect literature_fallback")
-    p0, p1, src, note = fetch_live_spam("superconducting", backend=None)
-    print(f"p0|1={p0:.4f}, p1|0={p1:.4f}, source={src}\nnote: {note}")
-
-    print("\n[6] fetch_live_spam('trapped_ion', ionq_api_token='dummy')"
-          " — expect graceful fallback")
-    p0, p1, src, note = fetch_live_spam("trapped_ion", ionq_api_token="dummy")
-    print(f"p0|1={p0:.4f}, p1|0={p1:.4f}, source={src}\nnote: {note}")
-
-    print("\n[7] fetch_live_spam('neutral_atom') — expect literature_fallback")
-    p0, p1, src, note = fetch_live_spam("neutral_atom")
-    print(f"p0|1={p0:.4f}, p1|0={p1:.4f}, source={src}\nnote: {note}")
-
-    print("\n[8] IonQ ratio-rescaling formula check "
-          "(simulated spam_error=0.003305)")
-    spam_error = 0.003305
-    ratio = _MAI_2024_P0_GIVEN_1 / _MAI_2024_P1_GIVEN_0
-    p0_sim = spam_error * 2.0 * ratio / (1.0 + ratio)
-    p1_sim = spam_error * 2.0 / (1.0 + ratio)
-    print(f"spam_error={spam_error}, ratio={ratio:.4f} -> "
-          f"p0|1={p0_sim:.6f}, p1|0={p1_sim:.6f}")
-    print(f"check: (p0+p1)/2 = {(p0_sim+p1_sim)/2:.6f} (should equal spam_error)")
-
-    print("\nAll self-tests completed without crashing.")
