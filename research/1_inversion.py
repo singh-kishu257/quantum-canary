@@ -278,10 +278,12 @@ class BackendProfile:
             delays = [0.5*T2, 1.0*T2, 1.5*T2]
         else:
             arch        = self.constants
-            t1_delays   = self.t1_delays_s
-            T1_estimate = t1_delays[1]
             T2c         = arch["T2_s"]
-            lo, hi      = arch["T2_min_s"], 2.0 * T1_estimate
+            # Ceiling is the architecture-typical 2*T1 (the physical T2 bound).
+            # It must not be derived from t1_delays_s: those are log-spaced
+            # probe times, not a T1 estimate, and their median can fall far
+            # below T1 — collapsing two of the three delays onto the ceiling.
+            lo, hi      = arch["T2_min_s"], 2.0 * arch["T1_s"]
             delays      = [float(np.clip(d, lo, hi))
                            for d in (T2c / 5.0, T2c, T2c * 5.0)]
         return self._snap_all(delays)
@@ -869,9 +871,10 @@ def forward_echo(tau_s, T2_echo_s: float, p0_given_1: float = 0.0, p1_given_0: f
 
 
 def forward_gate(N, epsilon_sx: float, p0_given_1: float = 0.0, p1_given_0: float = 0.0):
+    
     N = np.asarray(N, dtype=float)
     p_ideal = 0.5 * (1.0 + (1.0 - 2.0*epsilon_sx)**(2.0*N))
-    return p_ideal * (1.0 - p0_given_1) + (1.0 - p_ideal) * p1_given_0
+    return p_ideal * (1.0 - p1_given_0) + (1.0 - p_ideal) * p0_given_1
 
 
 def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
@@ -913,8 +916,13 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
                        ) -> tuple[float, float, float, float, float]:
     p0_given_1 = arch.get("p0_given_1", 0.0)
     p1_given_0 = arch.get("p1_given_0", 0.0)
-    x_means = np.clip(1.0 - 2.0*p1_x_arr, -1.0, 1.0)
-    y_means = np.clip(1.0 - 2.0*p1_y_arr, -1.0, 1.0)
+    # Asymmetric readout error shifts both Bloch components by an additive
+    # (p0|1 - p1|0):  1 - 2*p1 = (p0|1 - p1|0) + (1 - p0|1 - p1|0)*decay*cos.
+    # Subtracting it before arctan2 removes a systematic detuning bias, and
+    # leaves amps as the true Bloch length for the T2 seed and the CRLB gate.
+    spam_offset = p0_given_1 - p1_given_0
+    x_means = np.clip(1.0 - 2.0*p1_x_arr - spam_offset, -1.0, 1.0)
+    y_means = np.clip(1.0 - 2.0*p1_y_arr - spam_offset, -1.0, 1.0)
     amps    = np.clip(np.sqrt(x_means**2 + y_means**2), 1e-6, 1.0)
 
     T2_min = arch["T2_min_s"]
@@ -1146,7 +1154,9 @@ def lindblad_inversion(counts_list: list[dict],
         arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0))
     ramsey_meas = np.concatenate([p1_x_arr, p1_y_arr])
     ramsey_pred = np.concatenate([px_pred, py_pred])
-    ramsey_chi2 = _chi2_per_dof(ramsey_meas, ramsey_pred, shots_ramsey, n_params=1)
+    # n_params=2: _invert_ramsey_3t determines both T2 (curve_fit) and
+    # delta_omega (arctan2 on the first delay) from these same points.
+    ramsey_chi2 = _chi2_per_dof(ramsey_meas, ramsey_pred, shots_ramsey, n_params=2)
 
     p0_gate = np.array([c.get("0",0)/shots_gate for c in gate_counts])
     N_vals  = np.array(metadata["gate_rep_N"], dtype=float)

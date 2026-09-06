@@ -8,6 +8,14 @@ this file is not tied to any one algorithm). Canary probes run in the
 same job submission, on the same qubits the algorithm already uses,
 between batches of algorithm circuits. The algorithm's own circuits
 and results are never touched or reordered.
+
+health_summary() (per round, from InversionResult's own chi2/dof) and
+drift_report() (cross-round, comparing fitted parameters against a
+baseline) answer different questions and are not interchangeable: the
+former flags a round whose own data doesn't fit the assumed Markovian
+model (e.g. coherent gate error, 1/f dephasing); the latter flags a
+qubit whose fitted T1/T2/delta_omega/epsilon_sx has genuinely moved
+since baseline, which a well-fit round will not by itself reveal.
 """
 from __future__ import annotations
 import csv
@@ -34,7 +42,31 @@ __all__ = [
     "interleave_circuits",
     "parse_inline_results",
     "online_inversion",
+    "chi2_scaled_z",
 ]
+
+
+def chi2_scaled_z(delta: float, sigma_cur: float, sigma_base: float,
+                   chi2_cur: float = 1.0, chi2_base: float = 1.0) -> float:
+    """Two-sample z-score with each side's sigma inflated by
+    sqrt(max(chi2/dof, 1)) before differencing -- the standard
+    chi2-rescaling of a fit's reported uncertainty when its reduced
+    chi-square exceeds 1 (Bevington & Robinson, Data Reduction and
+    Error Analysis). This keeps a round whose own fit was already
+    flagged as poorly modelled (non-Markovian noise, coherent gate
+    error -- see InversionResult.t1_chi2_dof etc.) from masquerading
+    as spurious parameter drift: an inflated chi2 on either side
+    widens that side's effective sigma and shrinks |z| accordingly.
+    Returns nan if either input is non-finite or both sigmas are zero.
+    """
+    if not np.isfinite(delta):
+        return float("nan")
+    sig_c = sigma_cur * np.sqrt(max(chi2_cur, 1.0)) if np.isfinite(chi2_cur) else sigma_cur
+    sig_b = sigma_base * np.sqrt(max(chi2_base, 1.0)) if np.isfinite(chi2_base) else sigma_base
+    denom = np.sqrt(sig_c**2 + sig_b**2)
+    if not np.isfinite(denom) or denom <= 0:
+        return float("nan")
+    return float(delta / denom)
 
 
 @dataclass
@@ -278,7 +310,11 @@ class CanaryInterleaver:
                  # tight and flags ~14% of valid fits as YELLOW by sampling
                  # variance alone.
                  green_chi2_threshold: float = 5.0,
-                 yellow_t2_disagree_threshold: float = 0.20):
+                 yellow_t2_disagree_threshold: float = 0.20,
+                 # |z| > 2 matches the two-sample criterion used for the
+                 # IBM Heron r2 A/B stability check (5_ibm_hardware.py's
+                 # compare_runs()) -- roughly a 95% two-sided normal bound.
+                 drift_z_threshold: float = 2.0):
         """Store configuration and pre-build the Canary probe circuit set
         (shared across every round) once at construction time."""
         self.qubit_ids = list(qubit_ids)
@@ -290,10 +326,13 @@ class CanaryInterleaver:
         self.shots_echo = shots_echo
         self.green_chi2_threshold = green_chi2_threshold
         self.yellow_t2_disagree_threshold = yellow_t2_disagree_threshold
+        self.drift_z_threshold = drift_z_threshold
 
         self.canary_circuits, self.canary_metadata = build_inline_probe_circuits(
             profiles, self.qubit_ids)
         self._history: list = []
+        self._baseline: dict = {}
+        self._baseline_round: dict = {}
 
     def prepare(self, algo_circuits: list) -> tuple:
         """Interleave the cached Canary probe circuits into algo_circuits
@@ -317,7 +356,9 @@ class CanaryInterleaver:
         """Split job_results back into algorithm vs. Canary results, run
         Lindblad inversion for every Canary round, append each round's
         OnlineInversionResult to self.history, print a compact per-round
-        health update, and return (algo_results, health_rounds)."""
+        health update (including drift vs. baseline, once a qubit has
+        more than one round on record), and return
+        (algo_results, health_rounds)."""
         algo_results, canary_results_per_round = parse_inline_results(
             job_results, round_map, self.canary_metadata)
 
@@ -336,6 +377,11 @@ class CanaryInterleaver:
             self._history.append(result)
             health_rounds.append(result)
 
+            for qid in sorted(result.qubit_results.keys()):
+                if qid not in self._baseline:
+                    self._baseline[qid] = result.qubit_results[qid]
+                    self._baseline_round[qid] = round_index
+
             table_first_line = result.summary_table().splitlines()[0]
             print(f"[Canary] Round {round_index}: {table_first_line}")
             health = result.health_summary()
@@ -343,9 +389,19 @@ class CanaryInterleaver:
                 r = result.qubit_results[qid]
                 arch = inv.ARCH_DEFAULTS.get(r.architecture, inv.ARCH_DEFAULTS["unknown"])
                 s, u = arch["time_scale"], arch["display_unit"]
+                # Identity, not round_index, distinguishes "this round just
+                # became the baseline" from "any other round": interleave_
+                # circuits() restarts round_index at 0 on every independent
+                # prepare() call, so two different rounds across separate
+                # monitoring sessions can share the same round_index.
+                drift_str = ""
+                if self._baseline[qid] is not result.qubit_results[qid]:
+                    flagged = [k for k, v in self.drift_report(qid)["drifted"].items() if v]
+                    if flagged:
+                        drift_str = f"  DRIFT[{','.join(flagged)}]"
                 print(f"  Q{qid}: {health[qid]} "
                       f"T1={r.T1_s*s:.2f}{u} T2={r.T2_s*s:.2f}{u} "
-                      f"ε={r.epsilon_sx:.2e}")
+                      f"ε={r.epsilon_sx:.2e}{drift_str}")
 
         return algo_results, health_rounds
 
@@ -354,6 +410,84 @@ class CanaryInterleaver:
         """All OnlineInversionResult objects produced by process() calls
         so far, in chronological (round) order."""
         return self._history
+
+    def set_baseline(self, qubit_id: Optional[int] = None) -> None:
+        """Freeze the most recently processed round's result as the
+        drift-detection reference point for qubit_id (or every currently
+        monitored qubit, if qubit_id is None).
+
+        CanaryInterleaver sets this automatically the first time each
+        qubit appears in a process()ed round, so calling this explicitly
+        is only needed to re-baseline after a known, intentional change
+        (e.g. a provider recalibration) -- otherwise drift_report() would
+        keep comparing against the pre-recalibration normal.
+        """
+        if not self._history:
+            raise ValueError("set_baseline: no rounds processed yet")
+        latest = self._history[-1]
+        qids = [qubit_id] if qubit_id is not None else list(latest.qubit_results.keys())
+        for qid in qids:
+            if qid not in latest.qubit_results:
+                raise ValueError(f"set_baseline: qubit {qid} not in the most recent round")
+            self._baseline[qid] = latest.qubit_results[qid]
+            self._baseline_round[qid] = latest.round_index
+
+    def drift_report(self, qubit_id: int) -> dict:
+        """Compare qubit_id's most recent InversionResult against its
+        stored baseline, returning a two-sample z-score per parameter --
+        the same z_j = (A-B)/sqrt(sigma_A^2+sigma_B^2) construction used
+        for the IBM Heron r2 A/B stability check in 5_ibm_hardware.py's
+        compare_runs(). |z| > self.drift_z_threshold flags that parameter
+        as drifted.
+
+        This answers a different question than health_summary(): a round
+        can be perfectly well-fit (GREEN) by its own chi2/dof and still
+        be reported here as drifted, if the qubit's true parameters have
+        genuinely moved since baseline -- chi2/dof alone cannot see that,
+        since each round is fit independently with no reference to any
+        other round's data.
+
+        T1, delta_omega, and epsilon_sx sigmas are chi2-scaled before
+        differencing (see chi2_scaled_z) so a round contaminated by
+        non-Markovian noise or coherent gate error doesn't masquerade as
+        drift. T2's combined sigma already carries an equivalent chi2
+        inflation from lindblad_inversion's Ramsey/echo fusion (Eq. 12)
+        and is used as reported.
+
+        Raises ValueError if qubit_id has no baseline yet (call
+        process() at least once, or set_baseline() explicitly).
+        """
+        if qubit_id not in self._baseline:
+            raise ValueError(
+                f"drift_report: no baseline recorded for qubit {qubit_id}; "
+                f"call process() at least once or set_baseline() first")
+        if not self._history or qubit_id not in self._history[-1].qubit_results:
+            raise ValueError(
+                f"drift_report: qubit {qubit_id} not present in the most recent round")
+
+        base = self._baseline[qubit_id]
+        cur = self._history[-1].qubit_results[qubit_id]
+
+        z_scores = {
+            "T1_s": chi2_scaled_z(cur.T1_s - base.T1_s, cur.T1_sigma_s, base.T1_sigma_s,
+                                   cur.t1_chi2_dof, base.t1_chi2_dof),
+            "T2_s": chi2_scaled_z(cur.T2_s - base.T2_s, cur.T2_sigma_s, base.T2_sigma_s),
+            "delta_omega": chi2_scaled_z(
+                cur.delta_omega - base.delta_omega,
+                cur.delta_omega_sigma, base.delta_omega_sigma,
+                cur.ramsey_chi2_dof, base.ramsey_chi2_dof),
+            "epsilon_sx": chi2_scaled_z(
+                cur.epsilon_sx - base.epsilon_sx,
+                cur.epsilon_sx_sigma, base.epsilon_sx_sigma,
+                cur.gate_chi2_dof, base.gate_chi2_dof),
+        }
+        drifted = {k: bool(np.isfinite(v) and abs(v) > self.drift_z_threshold)
+                   for k, v in z_scores.items()}
+        return dict(qubit_id=qubit_id,
+                    round_index=self._history[-1].round_index,
+                    baseline_round_index=self._baseline_round[qubit_id],
+                    z_scores=z_scores, drifted=drifted,
+                    any_drift=any(drifted.values()))
 
     def trajectory(self, qubit_id: int, param: str) -> tuple:
         """Extract a time series for one qubit / one parameter across
@@ -490,24 +624,27 @@ if __name__ == "__main__":
     SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 1000, 500, 500
 
     def simulate_qubit_counts(meta, rng_obj):
+        return simulate_qubit_counts_with(meta, rng_obj, T1_TRUE, T2_TRUE, DW_TRUE, EPS_TRUE)
+
+    def simulate_qubit_counts_with(meta, rng_obj, T1_true, T2_true, dw_true, eps_true):
         t1_delays = meta["t1_delays_s"]
         ramsey_delays = meta["ramsey_delays_s"]
         echo_delays = meta["echo_delays_s"]
         Nv = np.array(meta["gate_rep_N"], dtype=float)
 
-        t1_counts = [c1(rng_obj, spam(float(inv.forward_t1(d, T1_TRUE))), SHOTS_T1)
+        t1_counts = [c1(rng_obj, spam(float(inv.forward_t1(d, T1_true))), SHOTS_T1)
                      for d in t1_delays]
 
         ramsey_counts = []
         for t in ramsey_delays:
-            px, py = inv.forward_ramsey_xy(t, T2_TRUE, DW_TRUE)
+            px, py = inv.forward_ramsey_xy(t, T2_true, dw_true)
             ramsey_counts.append(c1(rng_obj, px, SHOTS_RAMSEY))
             ramsey_counts.append(c1(rng_obj, py, SHOTS_RAMSEY))
 
-        p0_gate = inv.forward_gate(Nv, EPS_TRUE)
+        p0_gate = inv.forward_gate(Nv, eps_true)
         gate_counts = [c0(rng_obj, spam(p), SHOTS_GATE) for p in p0_gate]
 
-        T2_echo_true = min(T2_TRUE, 2.0*T1_TRUE)
+        T2_echo_true = min(T2_true, 2.0*T1_true)
         echo_counts = [c1(rng_obj, spam(float(inv.forward_echo(t, T2_echo_true))), SHOTS_ECHO)
                        for t in echo_delays]
 
@@ -586,6 +723,65 @@ if __name__ == "__main__":
     if green_frac < 0.6:
         failures.append(
             f"only {green_frac*100:.0f}% of qubit-rounds were GREEN, expected >= 60%")
+
+    # 10. drift_report() should mostly NOT flag drift across 5 rounds drawn
+    # from the SAME true parameters (independent shot noise only). At
+    # |z|>2 this is only a ~95% one-sided bound per test, so a rare
+    # false positive by chance is expected and not itself a bug -- this
+    # is a smoke test, not the statistical false-positive calibration
+    # (that belongs to 3_null_nonm.py). We just check flags stay rare.
+    print("\n[6] drift_report() false-positive check "
+          "(same truth every round, shot noise only)")
+    n_checked = 0
+    n_flagged = 0
+    for qid in range(N_QUBITS):
+        dr = canary.drift_report(qid)
+        n_checked += len(dr["drifted"])
+        n_flagged += sum(dr["drifted"].values())
+        print(f"  Q{qid}: z={ {k: round(v, 2) for k, v in dr['z_scores'].items()} }")
+    print(f"  {n_flagged}/{n_checked} (parameter, qubit) pairs flagged as drifted")
+    if n_flagged > n_checked * 0.5:
+        failures.append(
+            f"drift_report() flagged {n_flagged}/{n_checked} pairs on identical-truth "
+            f"data -- expected this to stay rare")
+
+    # 11. drift_report() SHOULD flag a genuine parameter shift: re-run
+    # qubit 0 with T1 dropped 150us -> 90us (a -40% change, well outside
+    # sampling noise at these shot counts) while every other qubit keeps
+    # its original truth. Confirms both true-positive sensitivity and
+    # that set_baseline() correctly resets the reference point.
+    print("\n[7] drift_report() true-positive check "
+          "(Q0 T1 shifted 150us -> 90us; other qubits unchanged)")
+    interleaved_drift, round_map_drift = canary.prepare([])
+    synthetic_drift = [None] * len(interleaved_drift)
+    for qid, meta in canary.canary_metadata.items():
+        T1_this = 90e-6 if qid == 0 else T1_TRUE
+        qubit_counts = simulate_qubit_counts_with(
+            meta, seed_rng, T1_this, T2_TRUE, DW_TRUE, EPS_TRUE)
+        offset = meta["circuit_start_idx"]
+        for j, cd in enumerate(qubit_counts):
+            synthetic_drift[offset + j] = cd
+    canary.process(synthetic_drift, round_map_drift)
+
+    dr0 = canary.drift_report(0)
+    print(f"  Q0 (drifted)  : T1_hat vs baseline z = {dr0['z_scores']['T1_s']:+.2f}  "
+          f"drifted={dr0['drifted']}")
+    if not dr0["drifted"]["T1_s"]:
+        failures.append(
+            f"drift_report(0) did not flag a real 40% T1 drop "
+            f"(z={dr0['z_scores']['T1_s']:.2f}, threshold={canary.drift_z_threshold})")
+
+    dr1 = canary.drift_report(1)
+    print(f"  Q1 (unchanged): T1_hat vs baseline z = {dr1['z_scores']['T1_s']:+.2f}  "
+          f"drifted={dr1['drifted']}")
+
+    canary.set_baseline(0)
+    dr0_reset = canary.drift_report(0)
+    print(f"  Q0 after set_baseline(0): z = {dr0_reset['z_scores']}")
+    if dr0_reset["drifted"]["T1_s"] or abs(dr0_reset["z_scores"]["T1_s"]) > 1e-9:
+        failures.append(
+            f"set_baseline(0) did not reset Q0's drift reference "
+            f"(z={dr0_reset['z_scores']['T1_s']:.2e})")
 
     print("\n" + "=" * 70)
     if not failures:
