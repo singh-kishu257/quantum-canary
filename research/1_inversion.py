@@ -222,7 +222,7 @@ class BackendProfile:
 
     Delay-grid strategy: when prior_confidence == "live", t1_delays_s /
     ramsey_delays_s / echo_delays_s use linear multiples of the prior
-    (0.5x/1.0x/1.5x etc) — this is Fisher-optimal when the prior is close to
+    (0.5x/1.0x/1.5x etc) — this is Fisher-informed when the prior is close to
     the true decay constant. When prior_confidence == "arch_default", the
     prior may be wrong by 10x or more, so delays are instead log-spaced across
     the architecture's full plausible [T1_min_s, T1_max_s] (or T2 equivalent)
@@ -528,8 +528,8 @@ class BackendProfile:
                           dw_max_rad_s: Optional[float] = None,
                           eps_typical: Optional[float] = None,
                           gate_time_ns: Optional[float] = None,
-                          p0_given_1: float = 0.0,
-                          p1_given_0: float = 0.0) -> "BackendProfile":
+                          p0_given_1: Optional[float] = None,
+                          p1_given_0: Optional[float] = None) -> "BackendProfile":
         if architecture == "custom":
             if T1_prior_s is None or T2_prior_s is None:
                 raise ValueError("architecture='custom' requires T1_prior_s and T2_prior_s")
@@ -537,8 +537,8 @@ class BackendProfile:
                                        dw_max_rad_s=dw_max_rad_s,
                                        eps_typical=eps_typical,
                                        gate_time_ns=gate_time_ns,
-                                       p0_given_1=p0_given_1,
-                                       p1_given_0=p1_given_0)
+                                       p0_given_1=p0_given_1 if p0_given_1 is not None else 0.0,
+                                       p1_given_0=p1_given_0 if p1_given_0 is not None else 0.0)
             return cls(architecture="custom", T1_prior_s=custom["T1_s"],
                        T2_prior_s=custom["T2_s"], dt_ns=None,
                        backend_name=backend_name, custom_arch=custom,
@@ -555,9 +555,26 @@ class BackendProfile:
             backend=backend_name,
             spam_source=spam_source, spam_note=spam_note,
         )
-       
+
+        # dw_max_rad_s/eps_typical/gate_time_ns/p0_given_1/p1_given_0 (and
+        # T1/T2 whenever supplied) only take effect via .constants, which
+        # otherwise falls straight through to ARCH_DEFAULTS[architecture]
+        # unchanged -- build a custom_arch overlay so a caller's explicit
+        # override is actually honored rather than silently accepted and
+        # ignored.
+        custom_arch = None
+        overrides = {"T1_s": T1_prior_s, "T2_s": T2_prior_s,
+                     "dw_max_rad_s": dw_max_rad_s, "eps_typical": eps_typical,
+                     "gate_time_ns": gate_time_ns,
+                     "p0_given_1": p0_given_1, "p1_given_0": p1_given_0}
+        if any(v is not None for v in overrides.values()):
+            custom_arch = dict(defaults)
+            custom_arch.update({k: v for k, v in overrides.items() if v is not None})
+            custom_arch["T1_s"], custom_arch["T2_s"] = T1, T2
+
         return cls(architecture=architecture, T1_prior_s=T1, T2_prior_s=T2,
                    dt_ns=defaults["dt_ns"], backend_name=backend_name,
+                   custom_arch=custom_arch,
                    calibration_source=calibration_source,
                    prior_confidence="arch_default")
 
