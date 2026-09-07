@@ -1246,11 +1246,43 @@ def build_noise_model(
     # is installed, and a circuit built that way would otherwise carry zero
     # noise on its trapped-ion gate-repetition probe (see the regression
     # test in _run_validation_tests() that specifically exercises this path).
+    # "rz" is deliberately EXCLUDED: this module injects Rz instructions to
+    # represent coherent detuning evolution during delays
+    # (_inject_detuning_phases) and coherent crosstalk kicks
+    # (_inject_crosstalk_kicks). Those are free precession / coherent
+    # errors, not applied gates, and must not additionally pick up
+    # depolarizing + thermal-relaxation error -- the delay's own
+    # thermal_relaxation_error already accounts for decoherence over that
+    # idle period, so attaching gate noise to the injected Rz would
+    # double-count it. This matches the gate list used by the reference
+    # implementation removed from 1_inversion.py by commit b1a8385, which
+    # likewise omitted "rz". (On real superconducting hardware Rz is a
+    # virtual frame change with no duration and negligible error.)
+    # None of 1_inversion.py's probe circuits contain an Rz of their own.
     gate_names = native_gate_names or ["sx", "sxdg", "x", "h", "s", "sdg", "id",
-                                       "rx", "ry", "rz", "r", "u", "gpi", "gpi2"]
+                                       "rx", "ry", "r", "u", "gpi", "gpi2"]
     nm = NoiseModel()
     gate_dur_s = truth.gate_duration_ns * 1e-9
     arch = truth.architecture
+
+    def _depolarizing_from_eps(eps_value: float):
+        """Convert a gate error in 1_inversion.py's epsilon convention into
+        Qiskit's depolarizing-channel parameter.
+
+        The frozen engine's forward_gate() models per-gate Bloch-vector
+        survival as (1 - 2*epsilon):
+
+            P(0; N) = 0.5 * (1 + (1 - 2*epsilon)^(2N))
+
+        whereas qiskit_aer's depolarizing_error(p, 1) gives survival (1 - p).
+        The depolarizing parameter is therefore p = 2*epsilon, NOT epsilon.
+        Without this factor, DeviceTruth.epsilon_gate and
+        InversionResult.epsilon_sx silently mean different things by 2x and
+        any epsilon benchmark is invalid. This matches the factor used by the
+        reference implementation removed from 1_inversion.py by commit
+        b1a8385 (depolarizing_error(2.0 * eps_sx, 1)).
+        """
+        return depolarizing_error(float(np.clip(2.0 * eps_value, 0.0, 0.75)), 1)
 
     for q in range(truth.n_qubits):
         tv = evaluate_truth_at(truth, q, t_s)
@@ -1279,7 +1311,7 @@ def build_noise_model(
         if arch == "superconducting":
             stoch = eps
             if stoch > 0:
-                nm.add_quantum_error(depolarizing_error(min(stoch, 0.75), 1), gate_names, [q])
+                nm.add_quantum_error(_depolarizing_from_eps(stoch), gate_names, [q])
             if truth.regime == "nisq":
                 coh_rad = truth.architecture_specific.get("coherent_overrotation_rad", 0.0)
                 if coh_rad > 0:
@@ -1291,14 +1323,14 @@ def build_noise_model(
             stoch = eps * (1.0 - coh_frac)
             extra = truth.architecture_specific.get("heating_extra_gate_error", 0.0) if truth.regime == "nisq" else 0.0
             if stoch + extra > 0:
-                nm.add_quantum_error(depolarizing_error(min(stoch + extra, 0.75), 1), gate_names, [q])
+                nm.add_quantum_error(_depolarizing_from_eps(stoch + extra), gate_names, [q])
             if coh_frac > 0:
                 coh_rad = 2.0 * np.sqrt(max(eps * coh_frac, 0.0))
                 nm.add_quantum_error(coherent_unitary_error(_rotation_unitary("x", coh_rad)), gate_names, [q])
 
         elif arch == "neutral_atom":
             if eps > 0:
-                nm.add_quantum_error(depolarizing_error(min(eps, 0.75), 1), gate_names, [q])
+                nm.add_quantum_error(_depolarizing_from_eps(eps), gate_names, [q])
             # Rydberg-specific mechanisms (decay, scattering, dephasing) are
             # explicitly NOT applied here -- Canary's own gate-repetition
             # probe is a single-qubit ground/hyperfine-state rotation that
@@ -1440,20 +1472,84 @@ def _inject_crosstalk_kicks(circuit, truth: DeviceTruth):
     return new_qc
 
 
+def _inject_detuning_phases(circuit, truth: DeviceTruth, t_s: float = 0.0,
+                            dt_ns: Optional[float] = None):
+    """Return a copy of `circuit` with an explicit Rz(delta_omega * delta_t)
+    inserted immediately after every delay instruction, implementing the
+    coherent detuning evolution
+
+        U_delta(t) = exp(-i * delta_omega * t * Z / 2)
+
+    as ACTUAL phase evolution on the simulated circuit, rather than leaving
+    delta_omega as an unused DeviceTruth field. Applied in BOTH regimes:
+    detuning is a fundamental device parameter, not a NISQ-only mechanism.
+
+    Applied uniformly after every delay, which reproduces the correct probe
+    physics without special-casing circuit types:
+      - T1 (x, delay, measure): a Z-rotation cannot change a Z-basis
+        measurement of a state along +/-Z, so T1 is correctly unaffected.
+      - Ramsey X/Y: the phase accumulates and is measured -- this is the
+        probe delta_omega is actually recovered from.
+      - Hahn echo (h, delay/2, x, delay/2, h): the mid-sequence X pulse
+        refocuses static detuning, since Rz(phi) X Rz(phi) = X. The echo is
+        therefore correctly insensitive to static delta_omega, matching
+        1_inversion.py's forward_echo(), which carries no detuning term.
+
+    Mirrors the reference implementation removed from 1_inversion.py by
+    commit b1a8385 (_inject_ramsey_detuning), generalized to apply each
+    qubit's own delta_omega to the delays acting on that qubit rather than
+    hardcoding qubit 0.
+    """
+    if not any(inst.operation.name == "delay" for inst in circuit.data):
+        return circuit
+
+    dw_cache: Dict[int, float] = {}
+    new_qc = circuit.copy_empty_like()
+    for inst in circuit.data:
+        new_qc.append(inst.operation, inst.qubits, inst.clbits)
+        if inst.operation.name != "delay":
+            continue
+        ds = _delay_seconds(inst, dt_ns)
+        if ds <= 0.0:
+            continue
+        for qb in inst.qubits:
+            q_idx = circuit.find_bit(qb).index
+            if q_idx >= truth.n_qubits:
+                continue
+            if q_idx not in dw_cache:
+                dw_cache[q_idx] = evaluate_truth_at(truth, q_idx, t_s)["delta_omega_rad_s"]
+            phase = dw_cache[q_idx] * ds
+            if phase != 0.0:
+                new_qc.rz(phase, new_qc.qubits[q_idx])
+    return new_qc
+
+
 def simulate_circuit(
     circuit, truth: DeviceTruth, shots: int = 1024, t_s: float = 0.0,
     native_gate_names: Optional[List[str]] = None, seed: Optional[int] = None,
+    dt_ns: Optional[float] = None,
 ) -> Dict[str, int]:
     """Simulate one Qiskit QuantumCircuit under `truth` evaluated at time t_s,
-    including circuit-aware coherent crosstalk. Returns raw Aer counts."""
+    including coherent detuning evolution and circuit-aware coherent
+    crosstalk. Returns raw Aer counts.
+
+    `dt_ns` is required to convert delay durations expressed in hardware
+    "dt" units back to seconds (1_inversion.py's _snap() emits dt-unit
+    delays whenever a profile carries a non-None dt_ns, i.e. for
+    superconducting). Pass profile.dt_ns; leaving it None falls back to
+    0.2222 ns, which is only coincidentally correct for superconducting.
+    """
     try:
         from qiskit_aer import AerSimulator
         from qiskit import transpile
     except ImportError as e:
         raise ImportError("qiskit-aer is required for simulate_circuit().") from e
 
-    qc = _inject_crosstalk_kicks(circuit, truth) if truth.regime == "nisq" else circuit
-    nm = build_noise_model(truth, t_s=t_s, native_gate_names=native_gate_names, circuit=qc)
+    qc = _inject_detuning_phases(circuit, truth, t_s=t_s, dt_ns=dt_ns)
+    if truth.regime == "nisq":
+        qc = _inject_crosstalk_kicks(qc, truth)
+    nm = build_noise_model(truth, t_s=t_s, native_gate_names=native_gate_names,
+                           circuit=qc, dt_ns=dt_ns)
     sim_seed = seed if seed is not None else truth.seed
     sim = AerSimulator(noise_model=nm, seed_simulator=sim_seed)
     tqc = transpile(qc, sim, optimization_level=0)
@@ -1464,6 +1560,7 @@ def simulate_circuit(
 def simulate_probe(
     circuits: List[Any], truth: DeviceTruth, shots: Any = 1024, t_s: float = 0.0,
     native_gate_names: Optional[List[str]] = None, seed: Optional[int] = None,
+    dt_ns: Optional[float] = None,
 ) -> SimulationResult:
     """Simulate a list of probe circuits (e.g. from 1_inversion.py's
     build_probe_circuits()) and return counts directly compatible with
@@ -1471,6 +1568,10 @@ def simulate_probe(
 
     `shots` may be a single int (applied to every circuit) or a list of
     per-circuit shot counts matching `circuits`' length.
+
+    `dt_ns` should be the originating profile's dt_ns, so delays emitted in
+    hardware "dt" units are converted to seconds correctly for both the
+    thermal-relaxation channel and the injected detuning phase.
     """
     n = len(circuits)
     shots_list = [shots] * n if isinstance(shots, int) else list(shots)
@@ -1482,7 +1583,8 @@ def simulate_probe(
     for i, (qc, sh) in enumerate(zip(circuits, shots_list)):
         raw = simulate_circuit(qc, truth, shots=sh, t_s=t_s,
                                native_gate_names=native_gate_names,
-                               seed=(seed + i) if seed is not None else None)
+                               seed=(seed + i) if seed is not None else None,
+                               dt_ns=dt_ns)
         norm: Dict[str, int] = {}
         for bitstring, cnt in raw.items():
             b = bitstring.replace(" ", "")[-1]
@@ -1702,6 +1804,57 @@ def _run_validation_tests() -> None:
               f"simul={n_kicks_simul} seq={n_kicks_seq}")
     except ImportError:
         print("[SKIP] crosstalk circuit-awareness (qiskit not installed)")
+
+    # Detuning regression test: varying ONLY delta_omega must actually change
+    # the simulated Ramsey outcomes. Before _inject_detuning_phases() existed,
+    # delta_omega was carried in DeviceTruth, sampled, estimated by the
+    # calibration prior and written to the manifest, but never applied to any
+    # circuit -- so Ramsey counts were bit-for-bit identical across a 50,000
+    # rad/s swing in true detuning and Canary correctly recovered ~0.
+    # Also asserts the physics is right per probe: T1 must be UNaffected (a
+    # Z-rotation cannot change a Z-basis measurement of a state along +/-Z)
+    # and Hahn echo must be UNaffected (the mid-sequence X refocuses static
+    # detuning: Rz(phi) X Rz(phi) = X), matching forward_echo()'s lack of a
+    # detuning term in the frozen engine.
+    try:
+        import importlib.util as _ilu2, pathlib as _pl2, sys as _sys2
+        _spec2 = _ilu2.spec_from_file_location(
+            "inversion_dw", _pl2.Path(__file__).parent / "1_inversion.py")
+        _inv2 = _ilu2.module_from_spec(_spec2)
+        _sys2.modules["inversion_dw"] = _inv2
+        _spec2.loader.exec_module(_inv2)
+
+        _prof = _inv2.BackendProfile(
+            architecture="superconducting", T1_prior_s=150e-6, T2_prior_s=90e-6,
+            dt_ns=_inv2.ARCH_DEFAULTS["superconducting"]["dt_ns"],
+            backend_name="dw_regression", prior_confidence="live")
+        _circs, _meta = _inv2.build_probe_circuits(_prof)
+        _by_kind = {k: [c for c in _circs if c.name.startswith(k)]
+                    for k in ("ramsey", "t1_", "echo")}
+
+        def _probe_p1(kind, dw_value):
+            t = generate_device("superconducting", 1, seed=7, regime="ideal")
+            t.delta_omega_rad_s[:] = dw_value
+            res = simulate_probe(_by_kind[kind], t, shots=[8000] * len(_by_kind[kind]),
+                                 t_s=0.0, seed=123, dt_ns=_prof.dt_ns)
+            return np.array([c.get("1", 0) / 8000 for c in res.counts_list])
+
+        _ram_0 = _probe_p1("ramsey", 0.0)
+        _ram_hi = _probe_p1("ramsey", 3.0e4)
+        _t1_0, _t1_hi = _probe_p1("t1_", 0.0), _probe_p1("t1_", 3.0e4)
+        _ec_0, _ec_hi = _probe_p1("echo", 0.0), _probe_p1("echo", 3.0e4)
+
+        _ram_delta = float(np.max(np.abs(_ram_hi - _ram_0)))
+        _t1_delta = float(np.max(np.abs(_t1_hi - _t1_0)))
+        _ec_delta = float(np.max(np.abs(_ec_hi - _ec_0)))
+        check("detuning: Ramsey outcomes respond to delta_omega",
+              _ram_delta > 0.05, f"max |dP(1)| = {_ram_delta:.4f} (expected >> 0)")
+        check("detuning: T1 probe correctly insensitive to delta_omega",
+              _t1_delta < 0.02, f"max |dP(1)| = {_t1_delta:.4f} (expected ~0)")
+        check("detuning: Hahn echo correctly refocuses static delta_omega",
+              _ec_delta < 0.02, f"max |dP(1)| = {_ec_delta:.4f} (expected ~0)")
+    except ImportError:
+        print("[SKIP] detuning regression (qiskit-aer not installed)")
 
     # F. Regression test: the trapped-ion gate-repetition probe built via the
     # REAL GPI2 native pair (1_inversion.py's _default_trapped_ion_pair emits

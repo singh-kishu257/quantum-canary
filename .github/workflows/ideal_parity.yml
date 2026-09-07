@@ -1,0 +1,144 @@
+name: Ideal Parity Benchmark
+
+# End-to-end parameter-recovery accuracy benchmark (the Figure 2 experiment).
+#
+# Three architectures run as three parallel jobs over reserved, non-overlapping
+# seed ranges, then a fourth job deterministically merges their CSVs into the
+# single output artifact `ideal_parity.csv`.
+#
+# Every step fails loudly: `2_ideal_parity.py` exits non-zero if any of its
+# experimental-integrity checks fail (wrong instance count, non-contiguous
+# instance ids indicating skipped instances, wrong shot budget, missing
+# parameters, duplicate seeds, blank fit_status). No figures are produced here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      n_instances:
+        description: "Instances per architecture"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ideal-parity-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  N_INSTANCES: ${{ github.event.inputs.n_instances || '300' }}
+
+jobs:
+  benchmark:
+    name: ${{ matrix.architecture }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Seed ranges are reserved per architecture and cannot overlap:
+          # superconducting 0..N-1, trapped_ion 100000.., neutral_atom 200000..
+          - architecture: superconducting
+            seed_offset: 0
+          - architecture: trapped_ion
+            seed_offset: 100000
+          - architecture: neutral_atom
+            seed_offset: 200000
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r research/requirements.txt
+
+      - name: Record environment (provenance)
+        run: |
+          python -c "import qiskit, qiskit_aer, numpy, scipy; \
+            print('qiskit', qiskit.__version__); \
+            print('qiskit-aer', qiskit_aer.__version__); \
+            print('numpy', numpy.__version__); \
+            print('scipy', scipy.__version__)"
+
+      - name: Verify frozen modules are unmodified
+        # The benchmark is only meaningful if the inversion engine and the
+        # simulator are exactly what is committed. A dirty tree here would
+        # mean results came from uncommitted code.
+        run: |
+          git diff --exit-code -- research/1_inversion.py research/1c_simulation_models.py
+
+      - name: Self-test the simulation layer
+        # Fail before spending hours of compute if the simulator's own physics
+        # assertions (T1 relaxation, T2<=2T1, detuning response, SPAM bounds,
+        # no truth leakage) do not hold.
+        run: python research/1c_simulation_models.py
+
+      - name: Run benchmark
+        run: |
+          python research/2_ideal_parity.py \
+            --architecture "${{ matrix.architecture }}" \
+            --n-instances "${N_INSTANCES}" \
+            --seed-offset "${{ matrix.seed_offset }}" \
+            --out "ideal_parity_${{ matrix.architecture }}.csv"
+
+      - name: Upload architecture CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: ideal-parity-${{ matrix.architecture }}
+          path: ideal_parity_${{ matrix.architecture }}.csv
+          if-no-files-found: error
+          retention-days: 90
+
+  aggregate:
+    name: aggregate
+    needs: benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r research/requirements.txt
+
+      - name: Download architecture CSVs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ideal-parity-*
+          merge-multiple: true
+          path: parity_inputs
+
+      - name: Show downloaded inputs
+        run: ls -la parity_inputs
+
+      - name: Combine into ideal_parity.csv
+        # Concatenation plus validation only. Re-runs nothing, filters
+        # nothing, and exits non-zero if the aggregate row count or any
+        # per-architecture integrity check fails.
+        run: |
+          python research/2_ideal_parity.py \
+            --combine \
+            --n-instances "${N_INSTANCES}" \
+            --input parity_inputs/ideal_parity_superconducting.csv \
+            --input parity_inputs/ideal_parity_trapped_ion.csv \
+            --input parity_inputs/ideal_parity_neutral_atom.csv \
+            --out ideal_parity.csv
+
+      - name: Upload ideal_parity.csv
+        uses: actions/upload-artifact@v4
+        with:
+          name: ideal-parity-combined
+          path: ideal_parity.csv
+          if-no-files-found: error
+          retention-days: 90
