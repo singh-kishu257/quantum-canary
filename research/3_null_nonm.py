@@ -46,7 +46,7 @@ SH_RAM = max(10, int(round(CANARY_SHOTS_RAMSEY * _budget_scale)))
 SH_GATE = max(10, int(round(CANARY_SHOTS_GATE * _budget_scale)))
 SH_ECHO = max(10, int(round(CANARY_SHOTS_ECHO * _budget_scale)))
 
-ALL_ARCHITECTURES = ["superconducting", "trapped_ion", "neutral_atom"]
+ALL_ARCHITECTURES = ["superconducting", "trapped_ion"]
 ARCH = os.environ.get("ARCH", "superconducting").strip()
 if ARCH not in ALL_ARCHITECTURES:
     sys.exit(f"ARCH env var must be one of {ALL_ARCHITECTURES}, got {ARCH!r}")
@@ -88,11 +88,6 @@ TRUE_PARAM_RANGES = {
         "T1_s": (100.0, 10000.0),
         "T2_s": (0.1, 3.0),
         "eps": (1e-4, 2e-3),
-    },
-    "neutral_atom": {
-        "T1_s": (1.0, 100.0),
-        "T2_s": (0.3, 3.0),
-        "eps": (1e-3, 1e-2),
     },
 }
 

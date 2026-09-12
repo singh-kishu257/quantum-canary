@@ -53,7 +53,7 @@ if _budget_env:
 else:
     SHOT_BUDGETS = _ALL_BUDGETS
 
-ALL_ARCHITECTURES = ["superconducting", "trapped_ion", "neutral_atom"]
+ALL_ARCHITECTURES = ["superconducting", "trapped_ion"]
 ARCH = _os.environ.get("ARCH", "superconducting").strip()
 if ARCH not in ALL_ARCHITECTURES:
     sys.exit(f"ARCH env var must be one of {ALL_ARCHITECTURES}, got {ARCH!r}")
@@ -71,11 +71,6 @@ TRUE_PARAM_RANGES = {
         "T1_s": (100.0,  10000.0),
         "T2_s": (0.1,    3.0),
         "eps":  (1e-4,   2e-3),
-    },
-    "neutral_atom": {
-        "T1_s": (1.0,    100.0),
-        "T2_s": (0.3,    3.0),
-        "eps":  (1e-3,   1e-2),
     },
 }
 
@@ -125,12 +120,6 @@ REALISTIC_NOISE = {
         "sigma_coherent_rad": 0.005,
         "sigma_SPAM_frac":    0.03,
     },
-    "neutral_atom": {
-        "sigma_T1_lognormal": 0.03,
-        "T2_reduction_max":   0.15,
-        "sigma_coherent_rad": 0.015,
-        "sigma_SPAM_frac":    0.08,
-    },
 }
 
 
@@ -149,8 +138,7 @@ def _perturb_instance(arch_name, T1, T2, eps, p0g1_nom, p1g0_nom, rng):
       T1  : log-normal TLS fluctuator (Klimov et al. PRL 2018;
                                         Carroll et al. npj QI 2022)
       T2  : uniform fractional reduction from quasi-static 1/f dephasing
-            (same references; also micromotion for trapped-ion,
-             laser phase noise for neutral-atom)
+            (same references; also micromotion for trapped-ion)
       eps : coherent over-rotation delta ~ N(0, sigma_coh), adds
             eps_coh = delta^2/4 to depolarising (Rol et al. PRL 2019,
             first-order Magnus)

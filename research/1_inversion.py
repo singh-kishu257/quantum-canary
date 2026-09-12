@@ -48,18 +48,6 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "p0_given_1": 0.0005, "p1_given_0": 0.0018,
         "display_unit": "ms", "time_scale": 1e3,
     },
-    "neutral_atom": {
-        "T1_s": 10.0, "T2_s": 1.0,
-        "T1_min_s": 0.001,
-        
-        "T1_max_s": 100000.0, "T2_min_s": 0.001,
-        "dw_max_rad_s": 2*np.pi*100e3, "dw_typical_khz": 2.0,
-        "eps_typical": np.sqrt(1e-3 * 1e-2), "eps_max": 0.5,  # ~3.16e-3
-        "dt_ns": None, "gate_time_ns": 500.0,
-        
-        "p0_given_1": 0.0060, "p1_given_0": 0.0040,
-        "display_unit": "ms", "time_scale": 1e3,
-    },
 }
 ARCH_DEFAULTS["unknown"] = ARCH_DEFAULTS["superconducting"]
 
@@ -181,13 +169,6 @@ def fetch_live_spam(
         return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
                 "IonQ API unavailable or field not found — using Mai et al. "
                 "(2024) defaults")
-
-    if architecture == "neutral_atom":
-        arch = ARCH_DEFAULTS["neutral_atom"]
-        return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
-                "No provider SPAM data available — using Evered et al. (2023) "
-                f"defaults (p0|1={arch['p0_given_1']:.4f}, "
-                f"p1|0={arch['p1_given_0']:.4f})")
 
     arch = ARCH_DEFAULTS.get(architecture, ARCH_DEFAULTS["unknown"])
     return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
@@ -484,43 +465,6 @@ class BackendProfile:
                    backend_name=f"ionq:{backend_name}", custom_arch=custom_arch,
                    calibration_source=calibration_source,
                    prior_confidence=prior_confidence)
-    #Theoretical proof-of-concept as experiment hasn't been tested on neutral atom processors
-    @classmethod
-    def from_braket_backend(cls,
-                            device_arn: str = "arn:aws:braket:us-east-1::device/qpu/quera/Aquila",
-                            qubit_id: int = 0) -> "BackendProfile":
-        arch = ARCH_DEFAULTS["neutral_atom"]
-        try:
-            from braket.aws import AwsDevice
-            try:
-                device = AwsDevice(device_arn)
-                _ = device.properties
-            except Exception:
-                pass
-            print("[Canary] Braket/QuEra: T1/T2/ε priors not available from "
-                  "provider — using neutral_atom arch defaults")
-        except ImportError:
-            pass
-
-        p0_given_1, p1_given_0, spam_source, spam_note = fetch_live_spam(
-            "neutral_atom", qubit_id=qubit_id)
-
-        calibration_source = CalibrationSource(
-            T1_source="arch_default", T2_source="arch_default",
-            eps_source="arch_default", dw_source="arch_default",
-            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            backend=device_arn,
-            spam_source=spam_source, spam_note=spam_note,
-        )
-
-        print(f"[Canary] Braket/QuEra priors — qubit {qubit_id}: "
-              f"SPAM: p0|1={p0_given_1:.4f}, p1|0={p1_given_0:.4f} ({spam_source})")
-
-        return cls(architecture="neutral_atom", T1_prior_s=arch["T1_s"],
-                   T2_prior_s=arch["T2_s"], dt_ns=arch["dt_ns"],
-                   backend_name=device_arn, calibration_source=calibration_source,
-                   prior_confidence="arch_default")
-
     @classmethod
     def from_architecture(cls, architecture: str, backend_name: str = "unknown",
                           T1_prior_s: Optional[float] = None,
@@ -596,9 +540,8 @@ def get_live_profile(backend, qubit_id: int = 0,
       - A Qiskit IBMBackend object    → calls from_ibm_backend()
       - The string "ionq:{backend}"  → calls from_ionq_backend()
         e.g. "ionq:forte-1", requires ionq_token
-      - A Braket Device ARN string   → calls from_braket_backend()
       - An architecture string       → calls from_architecture()
-        e.g. "superconducting", "trapped_ion", "neutral_atom"
+        e.g. "superconducting", "trapped_ion"
     """
     if isinstance(backend, str):
         if backend.startswith("ionq:"):
@@ -608,8 +551,6 @@ def get_live_profile(backend, qubit_id: int = 0,
                     "get_live_profile: 'ionq_token' is required for 'ionq:' backends")
             return BackendProfile.from_ionq_backend(
                 ionq_token, backend_name=ionq_backend_name, qubit_id=qubit_id)
-        if backend.startswith("arn:"):
-            return BackendProfile.from_braket_backend(device_arn=backend, qubit_id=qubit_id)
         if backend in ARCH_DEFAULTS:
             return BackendProfile.from_architecture(backend)
 
@@ -633,7 +574,7 @@ def get_live_profile(backend, qubit_id: int = 0,
     raise ValueError(
         "get_live_profile: unrecognized backend input. Accepted inputs are: "
         "a Qiskit IBMBackend object, a string 'ionq:{backend_name}' "
-        "(with ionq_token), a Braket device ARN string ('arn:...'), or an "
+        "(with ionq_token), or an "
         f"architecture string in {sorted(ARCH_DEFAULTS.keys())}. "
         f"Got: {backend!r}"
     )
@@ -723,7 +664,7 @@ def _default_trapped_ion_pair(qc, q):
 # one native (G, G^-1) pair that nets to identity in the absence of
 # coherent error, isolating the depolarizing/incoherent component that
 # forward_gate() models. Two entries ship built in; third-party backends
-# (QuEra, Quantum Machines, Google, Braket, Rigetti, IQM, etc.) register
+# (Quantum Machines, Google, Rigetti, IQM, etc.) register
 # their own physical self-inverse pair via register_native_pair() below —
 # no change to core inversion logic (forward_gate, _invert_gate,
 # lindblad_inversion) is ever required to add a new architecture.
@@ -747,11 +688,11 @@ def register_native_pair(architecture: str, pair_fn) -> None:
     from coherent over-rotation — see the design note in build_probe_circuits
     and Section IV of the paper.
 
-    Example (hypothetical neutral-atom backend with a native Rx(pi/2)):
+    Example (hypothetical new backend with a native Rx(pi/2)):
         def my_pair(qc, q):
             qc.rx(np.pi / 2, q)
             qc.rx(-np.pi / 2, q)
-        register_native_pair("neutral_atom_myvendor", my_pair)
+        register_native_pair("myvendor_custom", my_pair)
 
     The registered architecture name can then be passed to
     build_custom_arch() / BackendProfile.from_architecture() and to
@@ -764,11 +705,10 @@ def _sqrtx_native_inverse_pair(qc, q, architecture: str):
     """
     Applies one native (G, G^-1) pair on qubit q for the given
     architecture, looked up from NATIVE_INVERSE_PAIRS. Unregistered
-    architectures (including "neutral_atom" and "unknown", which have no
-    confirmed native self-inverse pair yet) fall back to the
-    superconducting sx/sxdg default, preserving prior behaviour exactly —
-    register_native_pair() is the supported way to override this for a
-    specific backend.
+    architectures (including "unknown", which has no confirmed native
+    self-inverse pair yet) fall back to the superconducting sx/sxdg
+    default, preserving prior behaviour exactly — register_native_pair()
+    is the supported way to override this for a specific backend.
     """
     pair_fn = NATIVE_INVERSE_PAIRS.get(architecture, _default_superconducting_pair)
     pair_fn(qc, q)

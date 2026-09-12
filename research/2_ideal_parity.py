@@ -88,13 +88,12 @@ SHOTS_GATE = 500
 SHOTS_ECHO = 500
 SHOTS_TOTAL_EXPECTED = 9900
 
-ARCHITECTURES = ("superconducting", "trapped_ion", "neutral_atom")
+ARCHITECTURES = ("superconducting", "trapped_ion")
 
-# Non-overlapping so the three parallel CI jobs can never collide.
+# Non-overlapping so the parallel CI jobs can never collide.
 ARCH_SEED_OFFSET: Dict[str, int] = {
     "superconducting": 0,
     "trapped_ion": 100_000,
-    "neutral_atom": 200_000,
 }
 
 # The four parameters Canary actually estimates. Order is fixed so rows are
@@ -547,7 +546,7 @@ def main() -> None:
     ap.add_argument("--n-instances", type=int, default=300)
     ap.add_argument("--seed-offset", type=int, default=None,
                     help="Defaults to the architecture's reserved offset "
-                         "(superconducting=0, trapped_ion=100000, neutral_atom=200000).")
+                         "(superconducting=0, trapped_ion=100000).")
     ap.add_argument("--out", required=True, type=pathlib.Path)
     ap.add_argument("--workers", type=int, default=None)
     args = ap.parse_args()

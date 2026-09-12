@@ -2,15 +2,14 @@
 1c_simulation_models.py -- literature-grounded physics simulation layer for
 Quantum Canary's research pipeline.
 
-Models quantum hardware in-silico for superconducting,
-trapped-ion, and neutral-atom qubits under two regimes:
+Models quantum hardware in-silico for superconducting and trapped-ion qubits
+under two regimes:
 
     ideal / model_consistent  -- correctly specified, stationary Markovian
                                  noise (the null baseline for chi2/dof).
     nisq  / model_mismatched  -- adds specific, literature-motivated
                                  violations of that assumption (temporal
-                                 drift, coherent crosstalk, motional heating,
-                                 Rydberg-specific mechanisms, atom loss).
+                                 drift, coherent crosstalk, motional heating).
 
 
 SCOPE (see spec Section 17 for the full list): this module is the physics/
@@ -65,7 +64,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-ARCHITECTURES: Tuple[str, ...] = ("superconducting", "trapped_ion", "neutral_atom")
+ARCHITECTURES: Tuple[str, ...] = ("superconducting", "trapped_ion")
 _REGIME_ALIASES: Dict[str, str] = {
     "ideal": "ideal", "model_consistent": "ideal",
     "nisq": "nisq", "model_mismatched": "nisq",
@@ -369,117 +368,6 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "ions -- 3-5x larger than Q0. Used as the default trapped-"
                   "ion crosstalk magnitude in regime='nisq' since it is the "
                   "reported, not a hypothetical worst case."),
-    },
-    # ---------------- Neutral atom ----------------
-    "na.T1.baseline_s": {
-        "value": 10.0, "unit": "s", "evidence_class": "C",
-        "source": "Consistent with 1_inversion.py ARCH_DEFAULTS['neutral_atom']['T1_s']",
-        "location": "n/a (engine-compatibility default)",
-        "notes": ("Ground/hyperfine-state qubit lifetime (trap lifetime, "
-                  "background-gas collisions) -- explicitly NOT the Rydberg "
-                  "state lifetime, which is a separate, much shorter, gate-"
-                  "level quantity (see na.rydberg.*)."),
-    },
-    "na.T2.baseline_s": {
-        "value": 1.0, "unit": "s", "evidence_class": "C",
-        "source": "Consistent with 1_inversion.py ARCH_DEFAULTS['neutral_atom']['T2_s']",
-        "location": "n/a (engine-compatibility default)",
-        "notes": "Ground-state coherence time, limited by laser phase noise / magnetic field gradients.",
-    },
-    "na.gate_2q.duration_s": {
-        "value": 262e-9, "unit": "s", "evidence_class": "A",
-        "source": "Evered et al., Nature 622, 268 (2023)",
-        "location": "derived from reported Omega*T/(2*pi)=1.215 with Omega/2pi=4.6 MHz",
-        "notes": ("This is the two-QUBIT Rydberg-mediated entangling gate "
-                  "duration, not a single-qubit gate. See the scoping note "
-                  "in build_noise_model()/RYDBERG MECHANISM SCOPING below: "
-                  "1_inversion.py's Canary gate-repetition probe uses a "
-                  "single-qubit native gate pair on all three architectures "
-                  "(NATIVE_INVERSE_PAIRS falls back to sx/sxdg for "
-                  "unregistered architectures, including neutral_atom), which "
-                  "does not invoke Rydberg excitation. The Rydberg-specific "
-                  "mechanisms below are therefore applied only to circuit "
-                  "instructions explicitly identified as 2-qubit Rydberg "
-                  "gates, never to Canary's own single-qubit probes, unless "
-                  "the caller explicitly opts in."),
-    },
-    "na.gate_2q.total_infidelity": {
-        "value": 0.0048, "unit": "dimensionless", "evidence_class": "A",
-        "source": "Evered et al., Nature 622, 268 (2023)",
-        "location": "abstract / Extended Data Fig. 4 (99.52% fidelity -> 0.48% infidelity)",
-        "notes": "Two-qubit parallel Rydberg CZ gate, up to 60 atoms in parallel.",
-    },
-    "na.rydberg.lifetime_effective_us": {
-        "value": 88.0, "unit": "us", "evidence_class": "A",
-        "source": "Evered et al., Nature 622, 268 (2023)",
-        "location": "reported radiative lifetime 170us (n=53), blackbody-limited "
-                   "128us, combined effective 88us after subtracting the "
-                   "1013nm scattering contribution",
-        "notes": "Used as tau_eff in p_decay = 1 - exp(-t_gate/tau_eff) for the Rydberg-decay channel.",
-    },
-    "na.rydberg.scattering_rate_per_s": {
-        "value": 6800.0, "unit": "1/s", "evidence_class": "B",
-        "source": "Derived from Evered et al., Nature 622, 268 (2023)",
-        "location": "back-calculated from the reported ~0.15-0.20% intermediate-"
-                   "state-scattering infidelity contribution over the 262ns gate",
-        "notes": ("gamma_e = -ln(1 - p_sc) / t_gate with p_sc ~ 0.0018 "
-                  "(midpoint of the reported 0.15-0.20% range) and "
-                  "t_gate=262ns gives gamma_e ~ 6.8e3 /s. Used as "
-                  "p_scatter = 1 - exp(-gamma_e * t_gate) for the "
-                  "intermediate-state-scattering channel."),
-    },
-    "na.rydberg.dephasing_T2star_us": {
-        "value": 3.0, "unit": "us", "evidence_class": "A",
-        "source": "Evered et al., Nature 622, 268 (2023)",
-        "location": "reported ground-Rydberg coherence time T2*, dominated by laser light-shift fluctuations",
-        "notes": "Applied as a dephasing channel during Rydberg-state occupation only.",
-    },
-    "na.atom_loss.rate_per_s": {
-        "value": 0.5, "unit": "1/s", "evidence_class": "C",
-        "source": "Mechanism per Evered et al. (2023) and neutral-atom tweezer-"
-                 "array literature generally (finite atom-survival probability "
-                 "per shot); no single per-second loss rate for this specific "
-                 "gate/device was independently confirmed for this audit",
-        "location": "n/a -- phenomenological",
-        "notes": ("Atom loss is architecturally an ERASURE channel (the qubit "
-                  "leaves the computational subspace entirely), fundamentally "
-                  "different from depolarizing noise, and is kept as a "
-                  "distinguishable mechanism in DeviceTruth.architecture_specific "
-                  "and in the simulated counts' metadata rather than folded "
-                  "into a generic error rate."),
-    },
-    "na.gate_1q.error": {
-        "value": 1e-3, "unit": "dimensionless", "evidence_class": "C",
-        "source": "Consistent with a Raman/microwave-driven ground-state "
-                 "rotation, order-of-magnitude only; not derived from Evered "
-                 "et al.'s 2-qubit Rydberg gate budget (which is a distinct "
-                 "physical mechanism, see na.gate_2q.* above)",
-        "location": "n/a -- phenomenological, chosen order-of-magnitude "
-                   "consistent with 1_inversion.py's eps_typical for neutral_atom",
-        "notes": ("This is the number actually used for Canary's own single-"
-                  "qubit gate-repetition probe. Kept explicitly and "
-                  "deliberately separate from the Rydberg mechanisms so that "
-                  "a 2-qubit-gate error budget is never silently applied to a "
-                  "1-qubit gate."),
-    },
-    "na.spam.p0_given_1": {
-        "value": 0.0060, "unit": "dimensionless", "evidence_class": "C",
-        "source": "Consistent with 1_inversion.py ARCH_DEFAULTS['neutral_atom'] "
-                 "(engine attributes this to Evered et al. (2023))",
-        "location": "n/a (engine-compatibility default)",
-        "notes": "Kept identical to the frozen engine.",
-    },
-    "na.spam.p1_given_0": {
-        "value": 0.0040, "unit": "dimensionless", "evidence_class": "C",
-        "source": "Consistent with 1_inversion.py ARCH_DEFAULTS['neutral_atom']",
-        "location": "n/a (engine-compatibility default)",
-        "notes": "See na.spam.p0_given_1.",
-    },
-    "na.gate_1q.duration_ns": {
-        "value": 500.0, "unit": "ns", "evidence_class": "C",
-        "source": "Consistent with 1_inversion.py ARCH_DEFAULTS['neutral_atom']['gate_time_ns']",
-        "location": "n/a (engine-compatibility default)",
-        "notes": "Order-of-magnitude typical single-qubit gate duration; not independently sourced from Evered et al. (whose reported timing is for the 2-qubit gate; see na.gate_2q.duration_s).",
     },
 }
 
@@ -870,23 +758,6 @@ def get_architecture_profile(architecture: str) -> ArchitectureProfile:
                 "T2_record_s": P["ti.T2.record_s"]["value"],
             },
         )
-    if architecture == "neutral_atom":
-        return ArchitectureProfile(
-            architecture="neutral_atom",
-            T1_s=P["na.T1.baseline_s"]["value"], T2_s=P["na.T2.baseline_s"]["value"],
-            gate_duration_ns=P["na.gate_1q.duration_ns"]["value"],
-            spam_p0_given_1=P["na.spam.p0_given_1"]["value"],
-            spam_p1_given_0=P["na.spam.p1_given_0"]["value"],
-            gate_error_total=P["na.gate_1q.error"]["value"],
-            extra={
-                "gate_2q_duration_s": P["na.gate_2q.duration_s"]["value"],
-                "gate_2q_total_infidelity": P["na.gate_2q.total_infidelity"]["value"],
-                "rydberg_lifetime_eff_us": P["na.rydberg.lifetime_effective_us"]["value"],
-                "rydberg_scattering_rate_per_s": P["na.rydberg.scattering_rate_per_s"]["value"],
-                "rydberg_dephasing_T2star_us": P["na.rydberg.dephasing_T2star_us"]["value"],
-                "atom_loss_rate_per_s": P["na.atom_loss.rate_per_s"]["value"],
-            },
-        )
     raise ValueError(f"Unknown architecture: {architecture!r}; must be one of {ARCHITECTURES}")
 
 
@@ -903,7 +774,6 @@ def get_architecture_profile(architecture: str) -> ArchitectureProfile:
 _TRUTH_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     "superconducting": {"T1_s": (80e-6, 400e-6), "T2_s": (40e-6, 200e-6), "eps": (1e-4, 2e-3)},
     "trapped_ion":     {"T1_s": (100.0, 10_000.0), "T2_s": (0.1, 3.0),   "eps": (1e-4, 2e-3)},
-    "neutral_atom":    {"T1_s": (1.0, 100.0),      "T2_s": (0.3, 3.0),  "eps": (1e-3, 1e-2)},
 }
 
 
@@ -988,13 +858,6 @@ def generate_device(
                 heating_axial * profile.extra["heating_to_gate_error_coeff"])
             arch_specific["heating_axial_quanta_per_s"] = heating_axial
             arch_specific["coherent_fraction"] = profile.extra["coherent_fraction"]
-
-        elif architecture == "neutral_atom":
-            arch_specific["rydberg_lifetime_eff_us"] = profile.extra["rydberg_lifetime_eff_us"]
-            arch_specific["rydberg_scattering_rate_per_s"] = profile.extra["rydberg_scattering_rate_per_s"]
-            arch_specific["rydberg_dephasing_T2star_us"] = profile.extra["rydberg_dephasing_T2star_us"]
-            arch_specific["atom_loss_rate_per_s"] = profile.extra["atom_loss_rate_per_s"]
-            drift["atom_loss"] = DriftProcess("stationary", {"std": 0.0}, seed_salt="atom_loss")
 
     return DeviceTruth(
         architecture=architecture, n_qubits=n_qubits, seed=seed, regime=regime,
@@ -1328,17 +1191,6 @@ def build_noise_model(
                 coh_rad = 2.0 * np.sqrt(max(eps * coh_frac, 0.0))
                 nm.add_quantum_error(coherent_unitary_error(_rotation_unitary("x", coh_rad)), gate_names, [q])
 
-        elif arch == "neutral_atom":
-            if eps > 0:
-                nm.add_quantum_error(_depolarizing_from_eps(eps), gate_names, [q])
-            # Rydberg-specific mechanisms (decay, scattering, dephasing) are
-            # explicitly NOT applied here -- Canary's own gate-repetition
-            # probe is a single-qubit ground/hyperfine-state rotation that
-            # never invokes Rydberg excitation (see na.gate_2q.duration_s's
-            # provenance note). They are applied only inside
-            # apply_rydberg_gate_noise(), for callers building circuits with
-            # an explicit 2-qubit Rydberg-mediated gate.
-
         p00, p11 = 1.0 - p10, 1.0 - p01
         nm.add_readout_error(ReadoutError([[p00, p10], [p01, p11]]), [q])
 
@@ -1355,42 +1207,6 @@ def _rotation_unitary(axis: str, angle_rad: float) -> np.ndarray:
     if axis == "z":
         return np.array([[np.exp(-1j * angle_rad / 2.0), 0], [0, np.exp(1j * angle_rad / 2.0)]])
     raise ValueError(f"axis must be 'x','y','z', got {axis!r}")
-
-
-def apply_rydberg_gate_noise(circuit, qubits: Tuple[int, int], truth: DeviceTruth):
-    """Attach Evered et al.-derived Rydberg decay/scattering/dephasing noise
-    to an explicit 2-qubit Rydberg-mediated gate on `qubits`. Only meaningful
-    for architecture='neutral_atom' and only for a caller's circuit that
-    actually contains a real 2-qubit entangling gate (e.g. a future VQE/QAOA
-    circuit in 4_online_application.py) -- never applied to Canary's own
-    single-qubit gate-repetition probe. Returns a NoiseModel fragment
-    (a list of (QuantumError, qubits) pairs) the caller composes into their
-    own NoiseModel; kept separate from build_noise_model() so the single-
-    qubit/two-qubit mechanism boundary stays explicit and cannot be applied
-    by accident.
-    """
-    try:
-        from qiskit_aer.noise import thermal_relaxation_error, depolarizing_error
-    except ImportError as e:
-        raise ImportError("qiskit-aer is required for apply_rydberg_gate_noise().") from e
-
-    if truth.architecture != "neutral_atom":
-        raise ValueError("apply_rydberg_gate_noise is only defined for architecture='neutral_atom'")
-    prof = get_architecture_profile("neutral_atom")
-    t_g = prof.extra["gate_2q_duration_s"]
-    tau_eff = prof.extra["rydberg_lifetime_eff_us"] * 1e-6
-    gamma_e = prof.extra["rydberg_scattering_rate_per_s"]
-    t2star = prof.extra["rydberg_dephasing_T2star_us"] * 1e-6
-
-    p_decay = 1.0 - np.exp(-t_g / tau_eff)
-    p_scatter = 1.0 - np.exp(-gamma_e * t_g)
-    errors = []
-    for q in qubits:
-        decay_err = depolarizing_error(min(p_decay, 0.75), 1)
-        scatter_err = depolarizing_error(min(p_scatter, 0.75), 1)
-        dephase_err = thermal_relaxation_error(1e12, t2star, t_g)  # T1>>t_g: pure dephasing
-        errors.append((decay_err.compose(scatter_err).compose(dephase_err), [q]))
-    return errors
 
 
 # =============================================================================
@@ -1646,7 +1462,7 @@ __all__ = [
     "CalibrationObservation", "CalibrationPrior", "SimulationResult", "SimulationManifest",
     "get_architecture_profile", "generate_device", "evaluate_truth_at",
     "run_synthetic_calibration_experiment", "generate_calibration_prior",
-    "build_noise_model", "apply_rydberg_gate_noise",
+    "build_noise_model",
     "simulate_circuit", "simulate_probe", "make_manifest",
     "sample_trajectory", "evaluate_at",
 ]
@@ -1719,9 +1535,8 @@ def _run_validation_tests() -> None:
     # 6. Architecture-specific distinction
     sc = generate_device("superconducting", 1, seed=1, regime="nisq")
     ti = generate_device("trapped_ion", 1, seed=1, regime="nisq")
-    na = generate_device("neutral_atom", 1, seed=1, regime="nisq")
     check("6. architectures produce distinct mechanisms",
-          set(sc.drift_processes) != set(ti.drift_processes) or set(sc.architecture_specific) != set(na.architecture_specific))
+          set(sc.drift_processes) != set(ti.drift_processes) or set(sc.architecture_specific) != set(ti.architecture_specific))
 
     # 7. Ideal vs NISQ
     ideal = generate_device("superconducting", 2, seed=99, regime="ideal")
