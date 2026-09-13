@@ -19,36 +19,57 @@ __all__ = [
     "split_qubits_for_op_limit",
 ]
 
-_MAI_2024_P0_GIVEN_1 = 0.0005
-_MAI_2024_P1_GIVEN_0 = 0.0018
-
+# Fallback priors when live provider calibration is unavailable.
+# All values sourced from CLOUD-DEPLOYED device measurements (vendor specs or
+# independent papers reporting real cloud-hardware calibration), NOT from
+# best-case laboratory demonstrations. See README_PARAMS.md for full citations.
+# --- Trapped-ion readout asymmetry -------------------------------------
+# RATIO ONLY, from Mai et al., arXiv:2402.18868 (2024). Their absolute
+# magnitudes (5e-4 / 1.8e-3) are a best-case Yb-171 shelving demonstration
+# and must NEVER be used as operational defaults -- they are ~4x more
+# optimistic than IonQ's published ~0.5% combined SPAM for Aria/Forte.
+# NOTE: this ratio is unvalidated against per-state IonQ measurements;
+# IonQ publishes only a combined SPAM figure, so any p0|1 / p1|0 pair we
+# report for IonQ inherits this ratio by construction and cannot be used
+# as evidence supporting it.
+_TI_SPAM_RATIO_P0_OVER_P1 = 0.0005 / 0.0018   # = 0.2778  (p1|0 ~3.6x p0|1)
 
 ARCH_DEFAULTS: dict[str, dict] = {
     "superconducting": {
-        "T1_s": 150e-6, "T2_s": 90e-6,
-        "T1_min_s": 100e-9,
-        
-        "T1_max_s": 1e-3, "T2_min_s": 100e-9,
-        "dw_max_rad_s": 2*np.pi*500e3, "dw_typical_khz": 5.0,
-        "eps_typical": 3.5e-4, "eps_max": 0.5,
+        # PRIORS: Heron-class medians 167.7 / 130.2 us [arXiv:2402.19293].
+        "T1_s": 165e-6, "T2_s": 130e-6,
+        # BOUNDS (deliberately generous -- these only clamp the optimizer;
+        # clipping biases a fit silently, so err wide). Highest single-qubit
+        # T1 in IBM's own docs example is 488 us; 5 ms is ~10x that.
+        "T1_min_s": 100e-9, "T1_max_s": 5e-3, "T2_min_s": 100e-9,
+        "dw_max_rad_s": 2*np.pi*2e6,          # widened from 500 kHz
+        "dw_typical_khz": 5.0,                 # WEAKLY CONSTRAINED
+        "eps_typical": 3.0e-4, "eps_max": 0.5,
         "dt_ns": 0.2222, "gate_time_ns": 50.0,
-        
-        "p0_given_1": 0.0092, "p1_given_0": 0.0009,
+        "p0_given_1": 0.030, "p1_given_0": 0.008,
         "display_unit": "µs", "time_scale": 1e6,
     },
     "trapped_ion": {
-        "T1_s": 1000.0, "T2_s": 1.0,
-        "T1_min_s": 0.01,
-        
-        "T1_max_s": 100000.0, "T2_min_s": 0.001,
-        "dw_max_rad_s": 2*np.pi*10e3, "dw_typical_khz": 0.5,
-        "eps_typical": 5e-4, "eps_max": 0.5,
+        # PRIORS: IonQ Aria spec T1 10-100 s, T2 ~1 s; confirmed on Aria via
+        # Braket [arXiv:2402.16944].
+        "T1_s": 100.0, "T2_s": 1.0,
+        # BOUNDS: 10,000 s is ~2x Wang et al.'s 5500 s lab record, so even a
+        # record-setting device cannot clip. Previous 1e5 s was ~18x the
+        # record with no justification; this is generous but bounded by a
+        # real physical measurement.
+        "T1_min_s": 1e-3, "T1_max_s": 1e4, "T2_min_s": 1e-4,
+        "dw_max_rad_s": 2*np.pi*100e3,        # widened from 10 kHz
+        "dw_typical_khz": 0.5,                 # WEAKLY CONSTRAINED
+        "eps_typical": 3.0e-4, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 135_000.0,
-        
-        "p0_given_1": 0.0005, "p1_given_0": 0.0018,
+        # IonQ publishes ~0.5% combined SPAM [ionq.com/.../forte-enterprise],
+        # split via _TI_SPAM_RATIO_P0_OVER_P1. Opposite asymmetry direction
+        # to superconducting (p1|0 > p0|1).
+        "p0_given_1": 0.0022, "p1_given_0": 0.0078,
         "display_unit": "ms", "time_scale": 1e3,
     },
 }
+
 ARCH_DEFAULTS["unknown"] = ARCH_DEFAULTS["superconducting"]
 
 class _DeprecatedGateRepN(list):
@@ -154,15 +175,15 @@ def fetch_live_spam(
                         break
                 except Exception:
                     continue
-
+    
             if spam_error is not None and spam_error > 0:
-                ratio = _MAI_2024_P0_GIVEN_1 / _MAI_2024_P1_GIVEN_0
+                ratio = _TI_SPAM_RATIO_P0_OVER_P1
                 p0 = spam_error * 2.0 * ratio / (1.0 + ratio)
                 p1 = spam_error * 2.0 / (1.0 + ratio)
-                return (p0, p1, "live_scaled_from_combined",
-                        f"IonQ: spam_error={spam_error:.6f} rescaled using "
-                        f"Mai et al. (2024) ratio "
-                        f"{_MAI_2024_P0_GIVEN_1}/{_MAI_2024_P1_GIVEN_0}")
+                return (p0, p1, "live_magnitude_literature_ratio",
+                        f"IonQ: live combined spam_error={spam_error:.6f} split using "
+                        f"asymmetry ratio {ratio:.4f} from Mai et al. (2024). "
+                        f"Magnitude is live; asymmetry is literature-derived, not measured.")
         except Exception:
             pass
         arch = ARCH_DEFAULTS["trapped_ion"]
