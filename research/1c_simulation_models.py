@@ -514,36 +514,19 @@ class DeviceTruth:
 
 
 @dataclass
-class CalibrationObservation:
-    """Raw synthetic measurement counts from a coarse calibration experiment
-    at time t0 -- an intermediate stage between DeviceTruth and
-    CalibrationPrior. Never contains DeviceTruth's exact values, only shot
-    counts sampled from truth's forward probability at t0."""
-    qubit: int
-    t0_s: float
-    t1_delay_s: float
-    t1_counts: Tuple[int, int]        # (n0, n1)
-    echo_delay_s: float
-    echo_counts: Tuple[int, int]
-    ramsey_delay_s: float
-    ramsey_x_counts: Tuple[int, int]
-    ramsey_y_counts: Tuple[int, int]
-    gate_N: Tuple[int, int]
-    gate_counts: Tuple[Tuple[int, int], Tuple[int, int]]
-    spam_shots: int
-    spam_counts_prep0: Tuple[int, int]
-    spam_counts_prep1: Tuple[int, int]
-
-
-@dataclass
 class CalibrationPrior:
-    """What Canary is allowed to know: a point estimate derived from
-    CalibrationObservation via simple closed-form estimators (deliberately
-    cruder than 1_inversion.py's own bounded/weighted fits -- this module
-    must not duplicate that inversion mathematics), plus a staleness age."""
+    """What Canary is allowed to know before it measures anything: the values
+    a provider's calibration log would report for this qubit, plus the age of
+    that report.
+
+    There is deliberately NO delta_omega field. Drive detuning is not a
+    parameter providers calibrate and publish -- it is actively nulled by
+    frequency locking -- and 1_inversion.py recovers it in closed form from
+    the shortest Ramsey delay, so it needs no warm-start value. Only the
+    parameters that seed a fit (T1, T2, epsilon) or enter the forward model
+    as known constants (SPAM) appear here."""
     T1_prior_s: float
     T2_prior_s: float
-    delta_omega_prior_rad_s: float
     epsilon_prior: float
     spam_p0_given_1_prior: float
     spam_p1_given_0_prior: float
@@ -765,15 +748,24 @@ def get_architecture_profile(architecture: str) -> ArchitectureProfile:
 # 6. DEVICE TRUTH GENERATION
 # =============================================================================
 
-# Log-uniform truth-sampling ranges. Deliberately independent of
-# 1_inversion.py's ARCH_DEFAULTS bounds (no truth leakage into the prior
-# construction), but chosen to overlap them so a downstream BackendProfile's
-# delay grids remain sensible. Order-of-magnitude consistent with the ranges
-# already used in 3_null_nonm.py's TRUE_PARAM_RANGES (Class C: representative
-# operating envelope, not a literature-measured distribution).
+# Log-uniform truth-sampling ranges: the population of devices a cloud user
+# could plausibly be assigned. These are the RANGE OF TRUE VALUES, and are a
+# separate concept from 1_inversion.py's ARCH_DEFAULTS T1_min_s/T1_max_s,
+# which are optimizer safety bounds (deliberately generous, so a fit is never
+# silently clipped). The two must not be conflated: sampling truth across an
+# optimizer bound's full span generates devices that do not exist.
+#
+# superconducting: consistent with published medians on cloud-deployed IBM
+#   hardware (Heron ~168/130 us, Eagle ~268/183 us, ibm_washington ~100/95 us),
+#   widened modestly for per-qubit spread.
+# trapped_ion: IonQ's published Aria specification states T1 10-100 s and
+#   T2 ~1 s; upper bound widened to 200 s for per-qubit spread. The previous
+#   (100, 10_000) s range had no citation and put its upper end 50-100x above
+#   any measured cloud trapped-ion T1 -- it is what produced true-T1 ~ 100 s
+#   paired with a ~10,000 s prior.
 _TRUTH_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     "superconducting": {"T1_s": (80e-6, 400e-6), "T2_s": (40e-6, 200e-6), "eps": (1e-4, 2e-3)},
-    "trapped_ion":     {"T1_s": (100.0, 10_000.0), "T2_s": (0.1, 3.0),   "eps": (1e-4, 2e-3)},
+    "trapped_ion":     {"T1_s": (10.0, 200.0),   "T2_s": (0.1, 3.0),      "eps": (1e-4, 2e-3)},
 }
 
 
@@ -817,8 +809,17 @@ def generate_device(
     T2 = np.minimum(1.0 / (1.0 / (2.0 * T1) + 1.0 / T_phi), 2.0 * T1)
     eps = _log_uniform(eps_lo, eps_hi, n_qubits)
 
-    dw_max = dw_max_rad_s if dw_max_rad_s is not None else 0.9 * np.pi / (0.5 * float(np.median(T2)))
-    dw = rng.choice([-1.0, 1.0], size=n_qubits) * rng.uniform(0.2 * dw_max, dw_max, size=n_qubits)
+    # Detuning is drawn below each qubit's OWN aliasing ceiling. 1_inversion.py
+    # recovers delta_omega unambiguously only for |dw| <= 0.9*pi/t1, where t1 is
+    # the shortest Ramsey delay (~0.5*T2 for that qubit). Using a single
+    # median-T2 ceiling for the whole register would hand any qubit with a
+    # shorter-than-median T2 a detuning it cannot resolve even in principle,
+    # which shows up as an estimator failure that is really a construction
+    # artifact.
+    dw_max_per_q = (np.full(n_qubits, float(dw_max_rad_s)) if dw_max_rad_s is not None
+                    else 0.9 * np.pi / (0.5 * T2))
+    dw = rng.choice([-1.0, 1.0], size=n_qubits) * rng.uniform(
+        0.2 * dw_max_per_q, dw_max_per_q, size=n_qubits)
 
     p01 = np.full(n_qubits, profile.spam_p0_given_1)
     p10 = np.full(n_qubits, profile.spam_p1_given_0)
@@ -919,133 +920,67 @@ def evaluate_truth_at(truth: DeviceTruth, qubit: int, t_s: float) -> Dict[str, f
 
 
 # =============================================================================
-# 7. CALIBRATION: OBSERVATION -> ESTIMATOR -> PRIOR (no truth leakage)
+# 7. CALIBRATION PRIOR (no truth leakage, no inversion mathematics)
 # =============================================================================
-#
-# true device -> synthetic calibration observation (binomial shot noise at a
-# few fixed, architecture-typical delays a real calibrator would pick without
-# knowing this specific device instance) -> a crude closed-form estimator
-# (deliberately simpler than 1_inversion.py's bounded/weighted fits, so this
-# module never duplicates that inversion mathematics) -> CalibrationPrior.
-# No step ever computes truth * noise_factor.
-
-def _binomial(rng: np.random.Generator, shots: int, p: float) -> Tuple[int, int]:
-    n1 = int(rng.binomial(shots, float(np.clip(p, 0.0, 1.0))))
-    return shots - n1, n1
-
-
-def run_synthetic_calibration_experiment(
-    truth: DeviceTruth, qubit: int, t0_s: float = 0.0,
-    shots: int = 200, calibration_seed: Optional[int] = None,
-) -> CalibrationObservation:
-    """Simulate a coarse, fixed-delay calibration measurement at time t0_s.
-
-    Delays/N are chosen from the ARCHITECTURE PROFILE (what a calibrator
-    would guess for this device type), not from this instance's true T1/T2 --
-    that is exactly the boundary that keeps this a real observation rather
-    than truth leaking through a suspiciously well-chosen probe point.
-    """
-    seed = calibration_seed if calibration_seed is not None else (truth.seed + 9_000_000)
-    rng = _sub_rng(seed, "calib_obs", qubit, t0_s)
-    profile = get_architecture_profile(truth.architecture)
-    tv = evaluate_truth_at(truth, qubit, t0_s)
-    T1, T2, dw = tv["T1_s"], tv["T2_s"], tv["delta_omega_rad_s"]
-    p01, p10, eps = tv["spam_p0_given_1"], tv["spam_p1_given_0"], tv["epsilon_gate"]
-
-    t1_delay = profile.T1_s
-    p_t1 = np.exp(-t1_delay / T1) * (1 - p01) + (1 - np.exp(-t1_delay / T1)) * p10
-    t1_counts = _binomial(rng, shots, p_t1)
-
-    echo_delay = profile.T2_s
-    p_echo = 0.5 * (1 - np.exp(-echo_delay / T2)) * (1 - p01) + 0.5 * (1 + np.exp(-echo_delay / T2)) * p10
-    echo_counts = _binomial(rng, shots, p_echo)
-
-    ramsey_delay = 0.5 * profile.T2_s
-    decay = np.exp(-ramsey_delay / T2)
-    p_x_ideal = 0.5 * (1 - decay * np.cos(dw * ramsey_delay))
-    p_y_ideal = 0.5 * (1 - decay * np.sin(dw * ramsey_delay))
-    p_x = p_x_ideal * (1 - p01) + (1 - p_x_ideal) * p10
-    p_y = p_y_ideal * (1 - p01) + (1 - p_y_ideal) * p10
-    ramsey_x_counts = _binomial(rng, shots, p_x)
-    ramsey_y_counts = _binomial(rng, shots, p_y)
-
-    N_lo = max(1, int(round(1.0 / (8.0 * profile.gate_error_total))))
-    N_hi = max(2, 2 * N_lo)
-    gate_probs = []
-    for N in (N_lo, N_hi):
-        p_ideal = 0.5 * (1 + (1 - 2 * eps) ** (2 * N))
-        p0 = p_ideal * (1 - p10) + (1 - p_ideal) * p01
-        gate_probs.append(_binomial(rng, shots, 1.0 - p0))  # (n0,n1) with n0 the "0" bucket via 1-p
-    # store as (n0,n1) pairs matching forward_gate's P(measure 0) convention
-    gate_counts = tuple((shots - c[1], c[1]) for c in gate_probs)
-
-    spam_shots = max(shots, 1000)
-    spam_prep0 = _binomial(rng, spam_shots, p10)   # prepared 0, measure 1 w.p. p10
-    spam_prep1 = _binomial(rng, spam_shots, 1 - p01)  # prepared 1, measure 1 w.p. 1-p01
-
-    return CalibrationObservation(
-        qubit=qubit, t0_s=t0_s,
-        t1_delay_s=t1_delay, t1_counts=t1_counts,
-        echo_delay_s=echo_delay, echo_counts=echo_counts,
-        ramsey_delay_s=ramsey_delay, ramsey_x_counts=ramsey_x_counts, ramsey_y_counts=ramsey_y_counts,
-        gate_N=(N_lo, N_hi), gate_counts=gate_counts,
-        spam_shots=spam_shots, spam_counts_prep0=spam_prep0, spam_counts_prep1=spam_prep1,
-    )
-
-
-def _estimate_prior_from_observation(obs: CalibrationObservation) -> CalibrationPrior:
-    """Crude, closed-form point estimates from raw calibration counts.
-    Deliberately simpler than 1_inversion.py's bounded/weighted curve_fit
-    machinery (no chi2 diagnostics, no SPAM-aware joint fit) -- this is a
-    coarse calibration estimate, not a Canary inversion."""
-    n0, n1 = obs.spam_counts_prep1
-    p1_given_1 = n1 / max(n0 + n1, 1)
-    p0_given_1 = 1.0 - p1_given_1
-    n0b, n1b = obs.spam_counts_prep0
-    p1_given_0 = n1b / max(n0b + n1b, 1)
-
-    n0t, n1t = obs.t1_counts
-    p1_t1 = n1t / max(n0t + n1t, 1)
-    p1_t1_corrected = float(np.clip((p1_t1 - p1_given_0) / max(1e-6, (1 - p0_given_1) - p1_given_0), 1e-6, 1 - 1e-6))
-    T1_hat = -obs.t1_delay_s / np.log(1.0 - p1_t1_corrected) if p1_t1_corrected < 1.0 else obs.t1_delay_s
-
-    n0e, n1e = obs.echo_counts
-    p1_echo = n1e / max(n0e + n1e, 1)
-    p_echo_corrected = float(np.clip((p1_echo - p1_given_0) / max(1e-6, (1 - p0_given_1) - p1_given_0), 1e-6, 1 - 1e-6))
-    T2_hat = -obs.echo_delay_s / np.log(max(1e-6, 1.0 - 2.0 * p_echo_corrected)) if p_echo_corrected < 0.5 else T1_hat
-
-    xn0, xn1 = obs.ramsey_x_counts
-    yn0, yn1 = obs.ramsey_y_counts
-    x_bar = 1.0 - 2.0 * xn1 / max(xn0 + xn1, 1)
-    y_bar = 1.0 - 2.0 * yn1 / max(yn0 + yn1, 1)
-    dw_hat = float(np.arctan2(y_bar, x_bar) / max(obs.ramsey_delay_s, 1e-12))
-
-    (n0_lo, n1_lo), (n0_hi, n1_hi) = obs.gate_counts
-    N_lo, N_hi = obs.gate_N
-    p0_lo = n0_lo / max(n0_lo + n1_lo, 1)
-    p0_hi = n0_hi / max(n0_hi + n1_hi, 1)
-    ratio = float(np.clip(2 * p0_hi - 1, -0.999, 0.999))
-    eps_hat = 0.5 * (1.0 - abs(ratio) ** (1.0 / max(2 * N_hi, 1))) if abs(ratio) > 0 else 1e-3
-    eps_hat = float(np.clip(eps_hat, 1e-6, 0.5))
-
-    return CalibrationPrior(
-        T1_prior_s=max(T1_hat, 1e-9), T2_prior_s=max(min(T2_hat, 2 * T1_hat), 1e-9),
-        delta_omega_prior_rad_s=dw_hat, epsilon_prior=eps_hat,
-        spam_p0_given_1_prior=float(np.clip(p0_given_1, 0.0, 1.0)),
-        spam_p1_given_0_prior=float(np.clip(p1_given_0, 0.0, 1.0)),
-        t0_s=obs.t0_s,
-    )
-
 
 def generate_calibration_prior(
     truth: DeviceTruth, qubit: int = 0, t0_s: float = 0.0,
-    shots: int = 200, calibration_seed: Optional[int] = None,
+    perturbation_frac: float = 0.10,
+    calibration_seed: Optional[int] = None,
 ) -> CalibrationPrior:
-    """true device -> synthetic calibration observation -> estimator -> prior.
-    This is the only sanctioned path from DeviceTruth to a prior; it never
-    computes truth * noise_factor."""
-    obs = run_synthetic_calibration_experiment(truth, qubit, t0_s, shots, calibration_seed)
-    return _estimate_prior_from_observation(obs)
+    """Produce what a provider's calibration log would report for this qubit.
+
+    A real calibration value is measured at some earlier time and is already
+    stale by the time a job runs: T1, T2 and gate error drift between
+    calibration cycles, so the reported number is close to -- but not equal
+    to -- the parameter that is true right now. That gap is the entire reason
+    a prior is not the same thing as ground truth, and it is what keeps an
+    ideal-regime experiment from being circular: an inversion handed its own
+    answer as a starting point has not been tested.
+
+    The gap is modelled directly as a bounded multiplicative envelope: each
+    parameter is independently drawn uniform in
+    [1 - perturbation_frac, 1 + perturbation_frac] times its true value.
+
+    This is a STRESS-TEST envelope, not a fit to a measured staleness
+    distribution. No published dataset quantifies calibration-log staleness
+    for cloud-deployed hardware, because measuring it requires exactly the
+    independent ground truth that cloud users do not have. Callers should
+    therefore SWEEP perturbation_frac (e.g. 0.02-0.15) and report that their
+    result is insensitive to it, rather than treating any single value as
+    correct. The 10% default represents a healthy, recently recalibrated
+    device; the far larger excursions that occur when a TLS defect moves into
+    resonance with a qubit belong to regime='nisq', not here.
+
+    SPAM is passed through unperturbed. Readout error is read from the
+    provider at run time rather than inherited from a stale calibration
+    record, and 1_inversion.py treats it as a known constant in its forward
+    models. Perturbing it here would inject a forward-model misspecification,
+    which is precisely what the ideal regime is defined to exclude.
+    """
+    if not 0.0 <= perturbation_frac < 1.0:
+        raise ValueError(f"perturbation_frac must be in [0,1), got {perturbation_frac}")
+
+    seed = calibration_seed if calibration_seed is not None else (truth.seed + 9_000_000)
+    rng = _sub_rng(seed, "calib_prior", qubit, t0_s)
+    tv = evaluate_truth_at(truth, qubit, t0_s)
+
+    lo, hi = 1.0 - perturbation_frac, 1.0 + perturbation_frac
+
+    T1_prior = float(tv["T1_s"] * rng.uniform(lo, hi))
+    # The prior must itself be physically admissible: a T2 prior above 2*T1
+    # would seed 1_inversion.py with a delay grid its own hard bound rejects.
+    T2_prior = float(min(tv["T2_s"] * rng.uniform(lo, hi), 2.0 * T1_prior))
+    eps_prior = float(np.clip(tv["epsilon_gate"] * rng.uniform(lo, hi), 1e-9, 0.5))
+
+    return CalibrationPrior(
+        T1_prior_s=T1_prior,
+        T2_prior_s=T2_prior,
+        epsilon_prior=eps_prior,
+        spam_p0_given_1_prior=float(tv["spam_p0_given_1"]),
+        spam_p1_given_0_prior=float(tv["spam_p1_given_0"]),
+        t0_s=t0_s,
+    )
 
 
 # =============================================================================
@@ -1439,7 +1374,6 @@ def make_manifest(
         },
         calibration={
             "T1_prior_s": prior.T1_prior_s, "T2_prior_s": prior.T2_prior_s,
-            "delta_omega_prior_rad_s": prior.delta_omega_prior_rad_s,
             "epsilon_prior": prior.epsilon_prior,
             "spam_p0_given_1_prior": prior.spam_p0_given_1_prior,
             "spam_p1_given_0_prior": prior.spam_p1_given_0_prior,
@@ -1459,9 +1393,9 @@ __all__ = [
     "ARCHITECTURES",
     "MODEL_PROVENANCE", "get_parameter_provenance", "validate_parameter_provenance",
     "ArchitectureProfile", "DriftProcess", "CrosstalkMechanism", "DeviceTruth",
-    "CalibrationObservation", "CalibrationPrior", "SimulationResult", "SimulationManifest",
+    "CalibrationPrior", "SimulationResult", "SimulationManifest",
     "get_architecture_profile", "generate_device", "evaluate_truth_at",
-    "run_synthetic_calibration_experiment", "generate_calibration_prior",
+    "generate_calibration_prior",
     "build_noise_model",
     "simulate_circuit", "simulate_probe", "make_manifest",
     "sample_trajectory", "evaluate_at",
@@ -1544,16 +1478,29 @@ def _run_validation_tests() -> None:
     check("7a. ideal has no drift/crosstalk", len(ideal.drift_processes) == 0 and len(ideal.crosstalk) == 0)
     check("7b. nisq has drift and crosstalk", len(nisq.drift_processes) > 0 and any(m.enabled for m in nisq.crosstalk))
 
-    # 8. No truth leakage: prior must differ from truth, but correlate with it
+    # 8. Calibration prior: bounded, non-degenerate, physically admissible
     truth8 = generate_device("superconducting", 1, seed=77, regime="ideal")
-    priors = [generate_calibration_prior(truth8, qubit=0, calibration_seed=s, shots=150) for s in range(30)]
-    T1_priors = np.array([p.T1_prior_s for p in priors])
-    check("8a. prior varies under independent calibration noise (not a deterministic copy)",
-          bool(np.std(T1_priors) > 0))
-    check("8b. prior is in the right ballpark of truth (not decoupled nonsense)",
-          bool(abs(np.median(T1_priors) - truth8.T1_s[0]) / truth8.T1_s[0] < 1.0))
-    check("8c. CalibrationPrior dataclass has no field that is a verbatim copy of a DeviceTruth array",
-          not hasattr(priors[0], "T1_s"))  # structural: CalibrationPrior has no truth-shaped field at all
+    FRAC = 0.10
+    priors = [generate_calibration_prior(truth8, qubit=0, calibration_seed=s,
+                                         perturbation_frac=FRAC) for s in range(200)]
+    T1_true = float(truth8.T1_s[0])
+    ratios = np.array([p.T1_prior_s / T1_true for p in priors])
+    check("8a. prior is never a verbatim copy of truth", bool(np.all(ratios != 1.0)))
+    check("8b. prior stays inside the +/-10% envelope (no unbounded blowups)",
+          bool(np.all(ratios >= 1 - FRAC - 1e-9) and np.all(ratios <= 1 + FRAC + 1e-9)),
+          f"observed ratio range [{ratios.min():.4f}, {ratios.max():.4f}]")
+    check("8c. prior actually varies with the calibration seed", bool(np.std(ratios) > 0))
+    check("8d. prior respects T2 <= 2*T1 (physically admissible seed)",
+          all(p.T2_prior_s <= 2 * p.T1_prior_s * (1 + 1e-9) for p in priors))
+    check("8e. no delta_omega prior is produced (detuning is not a calibrated parameter)",
+          not hasattr(priors[0], "delta_omega_prior_rad_s"))
+    check("8f. SPAM passes through unperturbed (read live, not inherited from a stale record)",
+          priors[0].spam_p0_given_1_prior == truth8.spam_p0_given_1[0]
+          and priors[0].spam_p1_given_0_prior == truth8.spam_p1_given_0[0])
+    check("8g. perturbation_frac=0 reproduces truth exactly (sweepable down to the no-gap limit)",
+          generate_calibration_prior(truth8, 0, perturbation_frac=0.0).T1_prior_s == T1_true)
+    check("8h. rejects an out-of-range perturbation_frac",
+          _raises(lambda: generate_calibration_prior(truth8, 0, perturbation_frac=1.5)))
 
     # 3. SPAM bounds
     ok = True
