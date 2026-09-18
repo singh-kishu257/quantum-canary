@@ -17,6 +17,33 @@ data-generation layer only. It does not compute R^2, chi2/dof, shot-budget
 benchmarks, or run VQE/QAOA/QEC/plotting -- those live in 2_*, 3_*, 4_*.
 
 -----------------------------------------------------------------------------
+SENSITIVITY SWEEP PARAMETERS (must be swept and reported, not fixed)
+-----------------------------------------------------------------------------
+The following generate_device() knobs have no single defensible literature
+value. Each is either explicitly phenomenological (Class C) or spans a wide,
+device-dependent physical range with no universal "typical" figure. Any
+manuscript figure built on the NISQ regime must report results across a
+swept range of each and demonstrate the conclusion is insensitive to the
+specific value chosen -- picking one point value and treating it as ground
+truth would misrepresent a stress-test parameter as a measurement.
+
+  perturbation_frac (generate_calibration_prior): calibration-observation
+      staleness/imperfection. No literature value pins how far a live
+      calibration prior should legitimately be allowed to drift from the
+      device's true state at measurement time.
+  crosstalk_scale (generate_device): multiplies every crosstalk kick angle.
+      Default 1.0 reproduces the cited literature magnitude as-is (see
+      sc.crosstalk.zz_coupling_mean_mhz, ti.crosstalk.coherent_angle_rad_high);
+      sweeping toward 0 tests how much of any reported effect is
+      crosstalk-driven versus intrinsic to the other mechanisms.
+  alpha (generate_device(detuning_1_over_f=True), sc.detuning_1_over_f.alpha):
+      Class C -- the specific value 0.57 could not be independently verified
+      against its originally-cited source (see that entry's notes for what
+      was actually found) and must not be treated as a measurement. Sweep
+      across a plausible range (e.g. 0.5-1.5) instead of relying on one
+      point value.
+
+-----------------------------------------------------------------------------
 EVIDENCE CLASSES (see MODEL_PROVENANCE)
 -----------------------------------------------------------------------------
   A = directly measured/reported in the cited paper (number or range).
@@ -237,6 +264,103 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "since Quantum Canary's whole premise is characterizing "
                   "hardware as it actually runs)."),
     },
+    "sc.crosstalk.zz_coupling_mean_mhz": {
+        "value": 0.623, "unit": "MHz", "evidence_class": "A",
+        "source": "Alghadeer et al., 'Low Crosstalk in a Scalable Superconducting "
+                 "Quantum Lattice', arXiv:2505.22276 / EPJ Quantum Technology "
+                 "s40507-026-00465-3",
+        "location": "Crosstalk Characterization: verified by direct fetch of the "
+                   "arXiv PDF -- 'The estimated couplings have maximum and "
+                   "minimum values at 1.064 MHz and 0.401 MHz, respectively. "
+                   "The mean mu of 0.623 MHz and standard deviation sigma of "
+                   "0.173 MHz lead to a relative spread sigma/mu of about "
+                   "0.269 in different values of the coupling J across the "
+                   "lattice.'",
+        "notes": ("Nearest-neighbor static exchange coupling J across a 4x4, "
+                  "16-fixed-frequency-transmon lattice (Ji,j in the paper's "
+                  "Eq. 1), measured via both ZZ-shift and AC-Stark-shift "
+                  "anticrossing methods. This is a coupling RATE (MHz), not a "
+                  "rotation angle: generate_device() samples one per-pair J "
+                  "from Normal(mean, std) clipped to the paper's own reported "
+                  "[min, max] range (sc.crosstalk.zz_coupling_range_mhz), then "
+                  "converts it to a coherent Rz kick angle via "
+                  "angle = 2*pi*J*gate_duration_s for use in "
+                  "_inject_crosstalk_kicks() -- replacing the single "
+                  "worst-case Rudinger angle previously assigned to every "
+                  "pair uniformly. Rudinger et al.'s coherent-vs-stochastic "
+                  "structural finding (crosstalk is predominantly coherent, "
+                  "not stochastic) is retained via "
+                  "sc.crosstalk.coherent_angle_rad_uncompensated, since this "
+                  "paper characterizes coupling magnitude, not that split."),
+    },
+    "sc.crosstalk.zz_coupling_std_mhz": {
+        "value": 0.173, "unit": "MHz", "evidence_class": "A",
+        "source": "Alghadeer et al., arXiv:2505.22276 / EPJ Quantum Technology s40507-026-00465-3",
+        "location": "Same sentence as sc.crosstalk.zz_coupling_mean_mhz.",
+        "notes": "See sc.crosstalk.zz_coupling_mean_mhz.",
+    },
+    "sc.crosstalk.zz_coupling_range_mhz": {
+        "value": (0.401, 1.064), "unit": "MHz", "evidence_class": "A",
+        "source": "Alghadeer et al., arXiv:2505.22276 / EPJ Quantum Technology s40507-026-00465-3",
+        "location": "Same sentence as sc.crosstalk.zz_coupling_mean_mhz "
+                   "('maximum and minimum values at 1.064 MHz and 0.401 MHz').",
+        "notes": ("Used as hard clip bounds when sampling per-pair J, so a "
+                  "sampled value can never exceed the range this specific "
+                  "device actually exhibited. Two named outlier pairs in the "
+                  "paper (Q9-Q16, Q14-Q15) were explicitly excluded by the "
+                  "authors as lying near the edge of the straddling regime; "
+                  "this module does not attempt to reproduce that exclusion "
+                  "mechanism, only the resulting reported statistics."),
+    },
+    "sc.detuning_1_over_f.psd_reference_hz": {
+        "value": 1.0, "unit": "Hz", "evidence_class": "A",
+        "source": "Confirmed by direct fetch of arXiv:2404.02989 (Dephasing in "
+                 "Fluxonium Qubits from Coherent Quantum Phase Slips), Appendix B",
+        "location": "Appendix B, Eq. B1, confirmed verbatim: "
+                   "S_Phi(omega) = A_Phi^2 * (2*pi*1Hz / |omega|)",
+        "notes": ("This confirms the standard 1/f power-spectral-density "
+                  "FORM used by _proc_one_over_f() (the value stored here is "
+                  "the reference frequency in that equation, 1 Hz, not a "
+                  "measured device parameter). The paper's reported flux-"
+                  "noise amplitude (A_Phi ~ 3-5 uPhi0/sqrt(Hz) across 6 "
+                  "qubits, Q6 specifically at ~5.9 uPhi0/sqrt(Hz)) is for Q6, "
+                  "an explicitly FLUX-TUNABLE qubit operated away from its "
+                  "half-flux sweet spot to enhance flux-noise sensitivity -- "
+                  "cited here ONLY for the spectral form and the sum-of-"
+                  "Lorentzians generation method, never as a flux-noise claim "
+                  "about fixed-frequency transmons (e.g. IBM Heron), which "
+                  "are dominated by photon shot noise and TLS instead. The "
+                  "amplitude actually used for fixed-frequency superconducting "
+                  "detuning drift remains sc.detuning_drift.amplitude_rad_s, "
+                  "unchanged by this entry."),
+    },
+    "sc.detuning_1_over_f.alpha": {
+        "value": 0.57, "unit": "dimensionless", "evidence_class": "C",
+        "source": "UNVERIFIED CITATION -- originally specified as 'measured "
+                 "alpha=0.57 from arXiv:1206.6946, fitted to 90 min of "
+                 "repeated Ramsey fringes.' Direct fetch of arXiv:1206.6946 "
+                 "('Measurement-induced qubit state mixing in circuit QED "
+                 "from up-converted dephasing noise') does not contain this "
+                 "value or this experiment: that paper extracts an "
+                 "equivalent flux-noise PSD from the qubit's measurement-"
+                 "induced transition rate at ~1 GHz and compares it to a "
+                 "1/f^alpha extrapolation of separately measured sub-1-Hz "
+                 "flux-noise data, without stating a specific alpha in the "
+                 "retrievable text, and does not describe a 90-minute "
+                 "repeated-Ramsey experiment at all.",
+        "location": "n/a -- citation could not be confirmed; not used as fact",
+        "notes": ("This number is NOT Class A and must not be cited as "
+                  "arXiv:1206.6946's result. It is retained only as a "
+                  "phenomenological default -- sub-1 exponents for near-1/f "
+                  "dephasing are qualitatively common in the superconducting-"
+                  "qubit literature, but this specific value was not "
+                  "independently verified for this audit. Treated as a "
+                  "required sensitivity-sweep parameter (see the module "
+                  "docstring's Sensitivity Sweep Parameters section and "
+                  "generate_device()'s alpha kwarg): the manuscript should "
+                  "report insensitivity to alpha across a swept range, not "
+                  "rely on this single value."),
+    },
     # ---------------- Trapped ion ----------------
     "ti.T1.baseline_s": {
         "value": 1000.0, "unit": "s", "evidence_class": "C",
@@ -269,17 +393,69 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "the operational default above."),
     },
     "ti.detuning_drift.amplitude_rad_s": {
-        "value": 2 * np.pi * 100.0, "unit": "rad/s", "evidence_class": "C",
-        "source": "Mechanism per Wang et al. (2021) (limiting factors: magnetic "
-                 "field fluctuation, microwave frequency instability); no "
-                 "specific pre-mitigation frequency-noise spectrum for a "
-                 "*typical* (non-record) device was independently confirmed",
-        "location": "n/a -- phenomenological",
-        "notes": ("100 Hz*2pi is order-of-magnitude consistent with "
-                  "1_inversion.py's dw_typical_khz=0.5 default for trapped "
-                  "ions. Used to exercise the mechanism (slow OU drift in "
-                  "detuning from magnetic-field/laser noise), not as a "
-                  "measured spectral density."),
+        "value": 2 * np.pi * 30.0, "unit": "rad/s", "evidence_class": "A",
+        "source": "'Characterization and cancellation of power-line-induced "
+                 "motional-mode frequency noise in a trapped-ion system', "
+                 "Scientific Reports (2026), 171Yb+, Seoul National University "
+                 "-- https://www.nature.com/articles/s41598-026-49820-5",
+        "location": "Discussion, confirmed by direct fetch: 'the remaining "
+                   "noise is well described by a slow stochastic frequency "
+                   "drift with a characteristic scale on the order of tens "
+                   "of hertz' (secular motional-mode frequency, after "
+                   "subtracting the paper's characterized periodic 60 Hz "
+                   "component -- see ti.detuning_drift.powerline_hz).",
+        "notes": ("The paper measures secular MOTIONAL-mode frequency, not "
+                  "qubit-transition detuning directly, but is the closest "
+                  "literature anchor found for a trapped-ion frequency-drift "
+                  "amplitude and is used as a proxy. The cited text states an "
+                  "order-of-magnitude ('tens of hertz'), not one precise "
+                  "number; 30 Hz*2pi is chosen as a representative point "
+                  "within that stated range and is Class A only for the "
+                  "order-of-magnitude claim, not for the specific digit. "
+                  "Replaces the previous Class C default (100 Hz*2pi, no "
+                  "measurement). Modelled as the sigma of the stochastic OU "
+                  "detuning-drift process; the paper's own periodic 60 Hz "
+                  "finding is modelled separately and deterministically, see "
+                  "ti.detuning_drift.powerline_hz."),
+    },
+    "ti.detuning_drift.powerline_hz": {
+        "value": 60.0, "unit": "Hz", "evidence_class": "A",
+        "source": "Same Scientific Reports (2026) paper as ti.detuning_drift.amplitude_rad_s",
+        "location": "Confirmed by direct fetch: 'a systematic investigation "
+                   "of 60-Hz power-line noise and its effect on the secular "
+                   "frequencies of a single 171Yb+ ion... sinusoidally "
+                   "modulates the secular frequency... Best-fit parameters "
+                   "are A ~ 2.0 Hz' (modulation amplitude at 60 Hz).",
+        "notes": ("Modelled as a deterministic sinusoidal component added "
+                  "alongside the stochastic OU drift (see "
+                  "evaluate_truth_at()), per the paper's own central finding "
+                  "that this component is PERIODIC and phase-referenced to "
+                  "the mains supply, not a stationary stochastic process -- "
+                  "a PSD/OU model alone cannot represent it. Only 60 Hz (this "
+                  "lab's, Korean, supply frequency) was directly measured; "
+                  "the paper does not mention 50 Hz at all. A second citation "
+                  "originally proposed here for a 204 Hz magnetic-field-"
+                  "modulation claim (arXiv:2001.02176) was checked by direct "
+                  "fetch and dropped entirely: that paper is an unrelated "
+                  "study of quantum-information scrambling in a trapped-ion "
+                  "simulator and contains no mention of 204 Hz, magnetic "
+                  "fields, or motional-mode noise. Callers targeting a "
+                  "50 Hz-grid lab should override this value explicitly; "
+                  "1_inversion.py's ARCH_DEFAULTS is not changed by this "
+                  "module and carries no opinion on mains frequency."),
+    },
+    "ti.detuning_drift.powerline_amplitude_hz": {
+        "value": 2.0, "unit": "Hz", "evidence_class": "A",
+        "source": "Same Scientific Reports (2026) paper as ti.detuning_drift.powerline_hz",
+        "location": "Confirmed by direct fetch: 'Best-fit parameters are "
+                   "A ~ 2.0 Hz' for the 60 Hz secular-frequency modulation "
+                   "(radial motional mode).",
+        "notes": ("The sinusoid's amplitude, kept as its own entry (rather "
+                  "than folded into ti.detuning_drift.powerline_hz, which is "
+                  "a frequency) so every numeric constant used in code has "
+                  "its own traceable MODEL_PROVENANCE key. Applied as "
+                  "delta_omega += 2*pi*amplitude_hz*sin(2*pi*powerline_hz*t) "
+                  "on top of the stochastic OU component."),
     },
     "ti.gate.error_total": {
         "value": 5e-4, "unit": "dimensionless", "evidence_class": "C",
@@ -444,11 +620,11 @@ class ArchitectureProfile:
 @dataclass
 class DriftProcess:
     """Specification for one temporal stochastic process (not the trajectory itself)."""
-    process_type: str  # "stationary" | "ou" | "telegraph" | "random_walk" | "lowpass_filtered"
+    process_type: str  # "stationary"|"ou"|"telegraph"|"random_walk"|"lowpass_filtered"|"one_over_f"
     params: Dict[str, Any] = field(default_factory=dict)
     seed_salt: str = ""
 
-    _VALID = ("stationary", "ou", "telegraph", "random_walk", "lowpass_filtered")
+    _VALID = ("stationary", "ou", "telegraph", "random_walk", "lowpass_filtered", "one_over_f")
 
     def __post_init__(self) -> None:
         if self.process_type not in self._VALID:
@@ -665,6 +841,38 @@ def _proc_lowpass_filtered(rng: np.random.Generator, n: int, amplitude: float,
     return y * (amplitude / std) if std > 0 else y
 
 
+def _proc_one_over_f(rng: np.random.Generator, n: int, amplitude: float,
+                     dt: float, alpha: float = 1.0, n_lorentzians: int = 20) -> np.ndarray:
+    """Genuine 1/f^alpha noise via a sum of Lorentzians (distributed
+    relaxators), the standard construction for approximating a 1/f^alpha
+    power spectral density from a finite sum of first-order (OU/Lorentzian)
+    processes -- see e.g. Kogan, "Electronic Noise and Fluctuations in
+    Solids" and the community parameterization convention documented for
+    scqubits' dephasing noise generators. Each component i is a
+    _proc_lowpass_filtered() draw (PSD ~ 1/(1+(f/f_i)^2)) with its own
+    corner frequency f_i, log-spaced across the resolvable band
+    [1/(n*dt), 1/(2*dt)]. Equal-variance log-spaced Lorentzians already sum
+    to 1/f (the density of corner frequencies is ~dlog(f), i.e. ~df/f);
+    scaling each component's variance by an additional f_i^(1-alpha) factor
+    generalizes this to 1/f^alpha. Unlike _proc_lowpass_filtered (a SINGLE
+    Lorentzian: flat below one cutoff, 1/f^2 above it), this reproduces a
+    1/f^alpha rolloff across the whole resolvable band, at the cost of
+    needing n_lorentzians component draws instead of one.
+    """
+    if n < 2:
+        return np.zeros(n)
+    f_nyquist = 0.5 / dt
+    f_min = 1.0 / (n * dt)
+    corner_freqs = np.logspace(np.log10(f_min), np.log10(f_nyquist), n_lorentzians)
+    weights = corner_freqs ** ((1.0 - alpha) / 2.0)
+    weights = weights / np.sqrt(np.sum(weights ** 2))  # unit total variance
+    y = np.zeros(n)
+    for f_i, w_i in zip(corner_freqs, weights):
+        y += w_i * _proc_lowpass_filtered(rng, n, amplitude=1.0, cutoff_hz=f_i, dt=dt)
+    std = np.std(y)
+    return y * (amplitude / std) if std > 0 else y
+
+
 def sample_trajectory(process: DriftProcess, master_seed: int, salt: Any,
                       n_steps: int, dt_s: float, base_value: float) -> np.ndarray:
     """Materialize n_steps samples of `process`, spaced dt_s apart, centered
@@ -686,6 +894,10 @@ def sample_trajectory(process: DriftProcess, master_seed: int, salt: Any,
     if pt == "lowpass_filtered":
         return _proc_lowpass_filtered(rng, n_steps, amplitude=p.get("amplitude", 0.0),
                                       cutoff_hz=p.get("cutoff_hz", 1e-3), dt=dt_s)
+    if pt == "one_over_f":
+        return _proc_one_over_f(rng, n_steps, amplitude=p.get("amplitude", 0.0),
+                                dt=dt_s, alpha=p.get("alpha", 1.0),
+                                n_lorentzians=p.get("n_lorentzians", 20))
     raise ValueError(f"Unknown process_type {pt!r}")
 
 
@@ -720,6 +932,10 @@ def get_architecture_profile(architecture: str) -> ArchitectureProfile:
                 "T1_drift_amplitude_frac": P["sc.T1_drift.amplitude_frac"]["value"],
                 "detuning_drift_amplitude_rad_s": P["sc.detuning_drift.amplitude_rad_s"]["value"],
                 "crosstalk_angle_rad": P["sc.crosstalk.coherent_angle_rad_uncompensated"]["value"],
+                "crosstalk_zz_mean_mhz": P["sc.crosstalk.zz_coupling_mean_mhz"]["value"],
+                "crosstalk_zz_std_mhz": P["sc.crosstalk.zz_coupling_std_mhz"]["value"],
+                "crosstalk_zz_range_mhz": P["sc.crosstalk.zz_coupling_range_mhz"]["value"],
+                "detuning_1_over_f_alpha": P["sc.detuning_1_over_f.alpha"]["value"],
             },
         )
     if architecture == "trapped_ion":
@@ -733,6 +949,8 @@ def get_architecture_profile(architecture: str) -> ArchitectureProfile:
             extra={
                 "coherent_fraction": P["ti.gate.coherent_fraction"]["value"],
                 "detuning_drift_amplitude_rad_s": P["ti.detuning_drift.amplitude_rad_s"]["value"],
+                "detuning_powerline_hz": P["ti.detuning_drift.powerline_hz"]["value"],
+                "detuning_powerline_amplitude_hz": P["ti.detuning_drift.powerline_amplitude_hz"]["value"],
                 "heating_axial_quanta_per_s": P["ti.heating.baseline_axial_quanta_per_s"]["value"],
                 "heating_radial_quanta_per_s": P["ti.heating.baseline_radial_quanta_per_s"]["value"],
                 "heating_distance_exponent": P["ti.heating.distance_scaling_exponent"]["value"],
@@ -776,6 +994,9 @@ def generate_device(
     regime: str = "ideal",
     dw_max_rad_s: Optional[float] = None,
     overrides: Optional[Dict[str, Any]] = None,
+    crosstalk_scale: float = 1.0,
+    detuning_1_over_f: bool = False,
+    enable_heating_gate_error: bool = False,
 ) -> DeviceTruth:
     """Sample a complete, hidden DeviceTruth.
 
@@ -783,9 +1004,30 @@ def generate_device(
     (T2 additionally capped at 2*T1 via the standard 1/T2=1/(2T1)+1/Tphi
     decomposition); delta_omega is drawn uniform in [-dw_max, dw_max] with
     random sign. regime='ideal' attaches no drift/crosstalk processes at all
-    (stationary Markovian noise -- the chi2/dof null baseline); regime='nisq'
-    attaches the architecture-specific mechanisms in Sections 6-8 of the
-    module spec, each traceable to MODEL_PROVENANCE.
+    (stationary Markovian noise -- the chi2/dof null baseline) and is
+    unaffected by every parameter below; regime='nisq' attaches the
+    architecture-specific mechanisms in Sections 6-8 of the module spec,
+    each traceable to MODEL_PROVENANCE.
+
+    crosstalk_scale: multiplies every crosstalk kick angle (both
+        architectures). Default 1.0 reproduces the literature-grounded
+        magnitude as-is; pass e.g. 0.5 or 0.0 to re-run a NISQ experiment at
+        reduced/zero crosstalk as an explicit sensitivity check (see the
+        module docstring's Sensitivity Sweep Parameters section).
+    detuning_1_over_f: superconducting only. When False (default), the
+        detuning-drift mechanism is unchanged from before this feature was
+        added (a single-pole low-frequency-colored process, see
+        _proc_lowpass_filtered). When True, uses the genuine 1/f^alpha
+        generator (_proc_one_over_f) instead, with alpha from
+        sc.detuning_1_over_f.alpha (itself Class C -- see that entry's
+        notes -- so alpha should be swept, not fixed, when this is enabled).
+    enable_heating_gate_error: trapped-ion only, default False. When False,
+        Hite et al.'s (Class A) motional-heating rates are still recorded in
+        DeviceTruth.architecture_specific for reference, but the ungrounded
+        heating-to-gate-error mapping (Class C, self-documented as "not a
+        validated physical prediction") contributes zero extra gate error.
+        Set True only for an explicitly-labelled ablation study, never in a
+        headline figure.
     """
     if architecture not in ARCHITECTURES:
         raise ValueError(f"Invalid architecture: {architecture!r}")
@@ -835,14 +1077,37 @@ def generate_device(
                 "sigma": profile.extra["T1_drift_amplitude_frac"],  # fractional units on log(T1)
                 "theta": 1.0 / profile.extra["T1_drift_timescale_s"],
             }, seed_salt="T1_ou")
-            drift["detuning"] = DriftProcess("lowpass_filtered", {
-                "amplitude": profile.extra["detuning_drift_amplitude_rad_s"],
-                "cutoff_hz": 1.0 / profile.extra["T1_drift_timescale_s"],
-            }, seed_salt="detuning_lpf")
+            if detuning_1_over_f:
+                drift["detuning"] = DriftProcess("one_over_f", {
+                    "amplitude": profile.extra["detuning_drift_amplitude_rad_s"],
+                    "alpha": profile.extra["detuning_1_over_f_alpha"],
+                    # Reference frequency only, for evaluate_truth_at()'s
+                    # resolution choice -- _proc_one_over_f() derives its own
+                    # [f_min, f_nyquist] band internally from n_steps*dt.
+                    "cutoff_hz": 1.0 / profile.extra["T1_drift_timescale_s"],
+                }, seed_salt="detuning_1overf")
+            else:
+                drift["detuning"] = DriftProcess("lowpass_filtered", {
+                    "amplitude": profile.extra["detuning_drift_amplitude_rad_s"],
+                    "cutoff_hz": 1.0 / profile.extra["T1_drift_timescale_s"],
+                }, seed_salt="detuning_lpf")
             if n_qubits >= 2:
-                crosstalk.append(CrosstalkMechanism(
-                    enabled=True, angle_rad=profile.extra["crosstalk_angle_rad"], axis="z",
-                    affected_pairs=[(i, i + 1) for i in range(n_qubits - 1)]))
+                # Per-pair ZZ coupling J is drawn from the measured
+                # distribution (Alghadeer et al., arXiv:2505.22276), not
+                # assigned a single worst-case value for every pair -- see
+                # sc.crosstalk.zz_coupling_mean_mhz.
+                pairs = [(i, i + 1) for i in range(n_qubits - 1)]
+                j_lo, j_hi = profile.extra["crosstalk_zz_range_mhz"]
+                j_mhz = np.clip(
+                    rng.normal(profile.extra["crosstalk_zz_mean_mhz"],
+                              profile.extra["crosstalk_zz_std_mhz"], size=len(pairs)),
+                    j_lo, j_hi)
+                gate_duration_s = profile.gate_duration_ns * 1e-9
+                for (a, b), j in zip(pairs, j_mhz):
+                    angle = crosstalk_scale * 2.0 * np.pi * (j * 1e6) * gate_duration_s
+                    crosstalk.append(CrosstalkMechanism(
+                        enabled=True, angle_rad=float(angle), axis="z",
+                        affected_pairs=[(a, b)]))
             arch_specific["coherent_overrotation_rad"] = profile.extra["coherent_overrotation_rad"]
 
         elif architecture == "trapped_ion":
@@ -850,14 +1115,23 @@ def generate_device(
                 "mean": 0.0, "sigma": profile.extra["detuning_drift_amplitude_rad_s"],
                 "theta": 1.0 / 100.0,
             }, seed_salt="detuning_ou")
+            # Coherent power-line component: periodic and phase-referenced to
+            # the mains supply, per the cited paper's own central finding --
+            # NOT representable by a stationary PSD/OU process, so it is
+            # applied separately as a deterministic sinusoid in
+            # evaluate_truth_at(). See ti.detuning_drift.powerline_hz.
+            arch_specific["detuning_powerline_hz"] = profile.extra["detuning_powerline_hz"]
+            arch_specific["detuning_powerline_amplitude_hz"] = profile.extra["detuning_powerline_amplitude_hz"]
             if n_qubits >= 2:
                 crosstalk.append(CrosstalkMechanism(
-                    enabled=True, angle_rad=profile.extra["crosstalk_angle_rad"], axis="x",
+                    enabled=True,
+                    angle_rad=crosstalk_scale * profile.extra["crosstalk_angle_rad"], axis="x",
                     affected_pairs=[(i, j) for i in range(n_qubits) for j in range(i + 1, n_qubits)]))
             heating_axial = profile.extra["heating_axial_quanta_per_s"]
-            arch_specific["heating_extra_gate_error"] = float(
-                heating_axial * profile.extra["heating_to_gate_error_coeff"])
             arch_specific["heating_axial_quanta_per_s"] = heating_axial
+            arch_specific["heating_extra_gate_error"] = float(
+                heating_axial * profile.extra["heating_to_gate_error_coeff"]
+            ) if enable_heating_gate_error else 0.0
             arch_specific["coherent_fraction"] = profile.extra["coherent_fraction"]
 
     return DeviceTruth(
@@ -903,14 +1177,25 @@ def evaluate_truth_at(truth: DeviceTruth, qubit: int, t_s: float) -> Dict[str, f
         T1 = float(np.exp(walked))
     if "detuning" in truth.drift_processes:
         proc = truth.drift_processes["detuning"]
-        if proc.process_type == "lowpass_filtered":
+        if proc.process_type in ("lowpass_filtered", "one_over_f"):
             cutoff_hz = proc.params.get("cutoff_hz", 1e-3)
             dt_fixed = max(1.0, (1.0 / max(cutoff_hz, 1e-9)) / 20.0)
         else:
             theta_dw = proc.params.get("theta", 1.0)
             dt_fixed = max(1.0, (1.0 / theta_dw) / 20.0) if theta_dw > 0 else 1.0
         walked = evaluate_at(proc, truth.seed, ("detuning", qubit), t_s, dw, dt_s=dt_fixed)
-        dw = dw + walked if proc.process_type == "lowpass_filtered" else walked
+        dw = dw + walked if proc.process_type in ("lowpass_filtered", "one_over_f") else walked
+
+    # Coherent, deterministic power-line component (trapped ion only): NOT
+    # representable by a stationary PSD/OU process since it is phase-
+    # referenced to the mains supply, not a stochastic drift -- see
+    # ti.detuning_drift.powerline_hz's provenance note. Present in
+    # architecture_specific only when regime='nisq' and architecture=
+    # 'trapped_ion' (see generate_device()), so this is a no-op otherwise.
+    if "detuning_powerline_hz" in truth.architecture_specific:
+        f_line = truth.architecture_specific["detuning_powerline_hz"]
+        a_line_hz = truth.architecture_specific["detuning_powerline_amplitude_hz"]
+        dw += 2.0 * np.pi * a_line_hz * np.sin(2.0 * np.pi * f_line * t_s)
 
     T2 = min(T2, 2.0 * T1)
     return {"T1_s": T1, "T2_s": T2, "delta_omega_rad_s": dw,
@@ -1644,6 +1929,81 @@ def _run_validation_tests() -> None:
               f"uses_gpi2={uses_gpi2} p0(N=5)={p0_lo:.3f} p0(N=100)={p0_hi:.3f}")
     except ImportError:
         print("[SKIP] F. trapped-ion gpi2 gate-repetition decay (qiskit-aer/qiskit_ionq not installed)")
+
+    # G. Crosstalk is now a per-pair distribution, not one worst-case constant.
+    # Sampling many independent devices with >2 qubits must produce more than
+    # one distinct angle across pairs, and the observed mean/std must land
+    # close to the cited Alghadeer et al. values (converted from the sampled
+    # J in MHz to a kick angle via the SAME formula generate_device() uses,
+    # so this checks the actual code path, not just the raw provenance number).
+    all_angles = []
+    for s in range(60):
+        t = generate_device("superconducting", 4, seed=100_000 + s, regime="nisq")
+        all_angles.extend(m.angle_rad for m in t.crosstalk)
+    all_angles = np.array(all_angles)
+    check("G1. crosstalk angles are a distribution, not one repeated constant",
+          len(set(np.round(all_angles, 12))) > 5,
+          f"{len(set(np.round(all_angles, 12)))} distinct values across {len(all_angles)} samples")
+    gate_dur_s = get_architecture_profile("superconducting").gate_duration_ns * 1e-9
+    implied_j_mhz = all_angles / (2.0 * np.pi * gate_dur_s) / 1e6
+    j_mean_expected = MODEL_PROVENANCE["sc.crosstalk.zz_coupling_mean_mhz"]["value"]
+    check("G2. sampled crosstalk J distribution matches Alghadeer et al. mean within 15%",
+          abs(np.mean(implied_j_mhz) - j_mean_expected) / j_mean_expected < 0.15,
+          f"sampled mean J = {np.mean(implied_j_mhz):.3f} MHz, expected ~{j_mean_expected} MHz")
+    t_scaled_half = generate_device("superconducting", 2, seed=100_000, regime="nisq", crosstalk_scale=0.5)
+    t_scaled_full = generate_device("superconducting", 2, seed=100_000, regime="nisq", crosstalk_scale=1.0)
+    check("G3. crosstalk_scale linearly scales the kick angle",
+          bool(np.isclose(t_scaled_half.crosstalk[0].angle_rad,
+                          0.5 * t_scaled_full.crosstalk[0].angle_rad)),
+          f"scale=0.5 angle={t_scaled_half.crosstalk[0].angle_rad:.6f} "
+          f"scale=1.0 angle={t_scaled_full.crosstalk[0].angle_rad:.6f}")
+
+    # H. _proc_one_over_f() produces a genuine 1/f^alpha spectrum (checked via
+    # periodogram slope, not just "the function runs"). Tolerance is loose
+    # (+/-0.25) because a finite sum of n_lorentzians Lorentzians only
+    # approximates the target exponent, with a small consistent bias
+    # verified empirically before writing this test.
+    for alpha_test in (0.57, 1.0):
+        rng_h = np.random.default_rng(3)
+        n_h = 32768
+        y_h = _proc_one_over_f(rng_h, n_h, amplitude=1.0, dt=1.0, alpha=alpha_test, n_lorentzians=20)
+        freqs_h = np.fft.rfftfreq(n_h, d=1.0)[1:]
+        psd_h = (np.abs(np.fft.rfft(y_h)) ** 2)[1:]
+        lo_h, hi_h = int(0.01 * len(freqs_h)), int(0.5 * len(freqs_h))
+        slope_h, _ = np.polyfit(np.log10(freqs_h[lo_h:hi_h]), np.log10(psd_h[lo_h:hi_h]), 1)
+        check(f"H. one_over_f(alpha={alpha_test}) periodogram slope matches -alpha within 0.25",
+              abs(slope_h - (-alpha_test)) < 0.25,
+              f"fitted slope={slope_h:+.3f}, expected~{-alpha_test:+.2f}")
+    check("H2. 'one_over_f' registered and reachable via sample_trajectory()",
+          bool(np.any(sample_trajectory(
+              DriftProcess("one_over_f", {"amplitude": 1.0, "alpha": 1.0}),
+              master_seed=1, salt="t", n_steps=100, dt_s=1.0, base_value=0.0) != 0.0)))
+
+    # I. Trapped-ion power-line component is a genuine deterministic sinusoid
+    # at the cited frequency, not folded into the stochastic OU drift: two
+    # devices differing ONLY in query time t_s must show delta_omega
+    # oscillating at 60 Hz, and setting amplitude/frequency to zero must
+    # remove the effect entirely (isolating it from the separate OU term).
+    t_pl = generate_device("trapped_ion", 1, seed=5, regime="nisq")
+    period_s = 1.0 / t_pl.architecture_specific["detuning_powerline_hz"]
+    dw_t0 = evaluate_truth_at(t_pl, 0, 0.0)["delta_omega_rad_s"]
+    dw_quarter = evaluate_truth_at(t_pl, 0, period_s / 4.0)["delta_omega_rad_s"]
+    expected_swing = 2.0 * np.pi * t_pl.architecture_specific["detuning_powerline_amplitude_hz"]
+    check("I. trapped-ion power-line component oscillates at the cited 60 Hz period",
+          abs((dw_quarter - dw_t0) - expected_swing) < 0.2 * expected_swing,
+          f"delta(dw) over quarter-period = {dw_quarter - dw_t0:.3f} rad/s, "
+          f"expected ~{expected_swing:.3f} rad/s (a quarter-sine step)")
+
+    # J. enable_heating_gate_error defaults OFF (Change 4): the Class-C,
+    # self-documented-as-unvalidated heating-to-gate-error mapping must
+    # contribute exactly zero unless explicitly opted into.
+    t_heat_off = generate_device("trapped_ion", 1, seed=9, regime="nisq")
+    t_heat_on = generate_device("trapped_ion", 1, seed=9, regime="nisq", enable_heating_gate_error=True)
+    check("J. heating-to-gate-error mapping is opt-in and defaults to zero",
+          t_heat_off.architecture_specific["heating_extra_gate_error"] == 0.0
+          and t_heat_on.architecture_specific["heating_extra_gate_error"] > 0.0,
+          f"off={t_heat_off.architecture_specific['heating_extra_gate_error']} "
+          f"on={t_heat_on.architecture_specific['heating_extra_gate_error']}")
 
     # End-to-end chain into the frozen engine: DeviceTruth -> simulate_probe -> lindblad_inversion
     try:
