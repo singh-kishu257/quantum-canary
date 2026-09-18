@@ -62,7 +62,7 @@ ARCH_DEFAULTS: dict[str, dict] = {
         "dw_typical_khz": 0.5,                 # WEAKLY CONSTRAINED
         "eps_typical": 3.0e-4, "eps_max": 0.5,
         "dt_ns": None, "gate_time_ns": 135_000.0,
-        # IonQ publishes ~0.5% combined SPAM [ionq.com/.../forte-enterprise],
+        # IonQ publishes ~0.5% combined SPAM [arXiv:2308.05071] for Forte,
         # split via _TI_SPAM_RATIO_P0_OVER_P1. Opposite asymmetry direction
         # to superconducting (p1|0 > p0|1).
         "p0_given_1": 0.0022, "p1_given_0": 0.0078,
