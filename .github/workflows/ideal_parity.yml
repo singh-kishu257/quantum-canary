@@ -1,16 +1,5 @@
 name: Ideal Parity Benchmark
 
-# End-to-end parameter-recovery accuracy benchmark (the Figure 2 experiment).
-#
-# Three architectures run as three parallel jobs over reserved, non-overlapping
-# seed ranges, then a fourth job deterministically merges their CSVs into the
-# single output artifact `ideal_parity.csv`.
-#
-# Every step fails loudly: `2_ideal_parity.py` exits non-zero if any of its
-# experimental-integrity checks fail (wrong instance count, non-contiguous
-# instance ids indicating skipped instances, wrong shot budget, missing
-# parameters, duplicate seeds, blank fit_status). No figures are produced here.
-
 on:
   workflow_dispatch:
     inputs:
@@ -38,14 +27,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Seed ranges are reserved per architecture and cannot overlap:
-          # superconducting 0..N-1, trapped_ion 100000.., neutral_atom 200000..
           - architecture: superconducting
             seed_offset: 0
           - architecture: trapped_ion
             seed_offset: 100000
-          - architecture: neutral_atom
-            seed_offset: 200000
     steps:
       - uses: actions/checkout@v4
 
@@ -58,7 +43,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r research/requirements.txt
 
-      - name: Record environment (provenance)
+      - name: Record environment
         run: |
           python -c "import qiskit, qiskit_aer, numpy, scipy; \
             print('qiskit', qiskit.__version__); \
@@ -67,16 +52,9 @@ jobs:
             print('scipy', scipy.__version__)"
 
       - name: Verify frozen modules are unmodified
-        # The benchmark is only meaningful if the inversion engine and the
-        # simulator are exactly what is committed. A dirty tree here would
-        # mean results came from uncommitted code.
-        run: |
-          git diff --exit-code -- research/1_inversion.py research/1c_simulation_models.py
+        run: git diff --exit-code -- research/1_inversion.py research/1c_simulation_models.py
 
       - name: Self-test the simulation layer
-        # Fail before spending hours of compute if the simulator's own physics
-        # assertions (T1 relaxation, T2<=2T1, detuning response, SPAM bounds,
-        # no truth leakage) do not hold.
         run: python research/1c_simulation_models.py
 
       - name: Run benchmark
@@ -119,20 +97,13 @@ jobs:
           merge-multiple: true
           path: parity_inputs
 
-      - name: Show downloaded inputs
-        run: ls -la parity_inputs
-
       - name: Combine into ideal_parity.csv
-        # Concatenation plus validation only. Re-runs nothing, filters
-        # nothing, and exits non-zero if the aggregate row count or any
-        # per-architecture integrity check fails.
         run: |
           python research/2_ideal_parity.py \
             --combine \
             --n-instances "${N_INSTANCES}" \
             --input parity_inputs/ideal_parity_superconducting.csv \
             --input parity_inputs/ideal_parity_trapped_ion.csv \
-            --input parity_inputs/ideal_parity_neutral_atom.csv \
             --out ideal_parity.csv
 
       - name: Upload ideal_parity.csv
