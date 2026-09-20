@@ -30,10 +30,13 @@ truth would misrepresent a stress-test parameter as a measurement.
   perturbation_frac (generate_calibration_prior): calibration-observation
       staleness/imperfection. No literature value pins how far a live
       calibration prior should legitimately be allowed to drift from the
-      device's true state at measurement time.
+      device's true state at measurement time. Defaults are now resolved per
+      (architecture, regime) from _CALIB_PERTURBATION (0.10/0.25 sc
+      ideal/nisq, 0.05/0.15 ti ideal/nisq) rather than one flat 0.10, but all
+      four entries remain Class C and must still be swept.
   crosstalk_scale (generate_device): multiplies every crosstalk kick angle.
       Default 1.0 reproduces the cited literature magnitude as-is (see
-      sc.crosstalk.zz_coupling_mean_mhz, ti.crosstalk.coherent_angle_rad_high);
+      sc.crosstalk.zz_shift_khz_min/_max, ti.crosstalk.coherent_angle_rad_high);
       sweeping toward 0 tests how much of any reported effect is
       crosstalk-driven versus intrinsic to the other mechanisms.
   alpha (generate_device(detuning_1_over_f=True), sc.detuning_1_over_f.alpha):
@@ -264,53 +267,229 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "since Quantum Canary's whole premise is characterizing "
                   "hardware as it actually runs)."),
     },
-    "sc.crosstalk.zz_coupling_mean_mhz": {
-        "value": 0.623, "unit": "MHz", "evidence_class": "A",
-        "source": "Alghadeer et al., 'Low Crosstalk in a Scalable Superconducting "
-                 "Quantum Lattice', arXiv:2505.22276 / EPJ Quantum Technology "
-                 "s40507-026-00465-3",
-        "location": "Crosstalk Characterization: verified by direct fetch of the "
-                   "arXiv PDF -- 'The estimated couplings have maximum and "
-                   "minimum values at 1.064 MHz and 0.401 MHz, respectively. "
-                   "The mean mu of 0.623 MHz and standard deviation sigma of "
-                   "0.173 MHz lead to a relative spread sigma/mu of about "
-                   "0.269 in different values of the coupling J across the "
-                   "lattice.'",
-        "notes": ("Nearest-neighbor static exchange coupling J across a 4x4, "
-                  "16-fixed-frequency-transmon lattice (Ji,j in the paper's "
-                  "Eq. 1), measured via both ZZ-shift and AC-Stark-shift "
-                  "anticrossing methods. This is a coupling RATE (MHz), not a "
-                  "rotation angle: generate_device() samples one per-pair J "
-                  "from Normal(mean, std) clipped to the paper's own reported "
-                  "[min, max] range (sc.crosstalk.zz_coupling_range_mhz), then "
-                  "converts it to a coherent Rz kick angle via "
-                  "angle = 2*pi*J*gate_duration_s for use in "
-                  "_inject_crosstalk_kicks() -- replacing the single "
-                  "worst-case Rudinger angle previously assigned to every "
-                  "pair uniformly. Rudinger et al.'s coherent-vs-stochastic "
-                  "structural finding (crosstalk is predominantly coherent, "
-                  "not stochastic) is retained via "
-                  "sc.crosstalk.coherent_angle_rad_uncompensated, since this "
-                  "paper characterizes coupling magnitude, not that split."),
+    # -- Always-on ZZ shift (CHANGE 1) ------------------------------------
+    # The quantity that produces a COHERENT conditional phase on an idling
+    # neighbor is the LONGITUDINAL always-on ZZ shift (zeta / beta), not the
+    # TRANSVERSE exchange coupling J. A previous version of this module
+    # sampled J ~ 0.4-1.1 MHz (Alghadeer et al.) and fed it straight into
+    # angle = 2*pi*J*t_gate. That is a category error: J is the bare
+    # qubit-qubit exchange rate, and the residual static ZZ it induces in the
+    # dispersive regime is 1-2 orders of magnitude smaller. The result was a
+    # ~174 mrad mean kick, an order of magnitude above the largest directly
+    # measured coherent crosstalk angle in the literature (Rudinger et al.,
+    # 14.4 mrad). The entries below replace it with a measured always-on
+    # interaction strength in kHz.
+    "sc.crosstalk.zz_shift_khz_min": {
+        "value": 15.0, "unit": "kHz", "evidence_class": "A",
+        "source": "Mueller (Muller) et al., 'Towards a Digital Twin of Noisy "
+                 "Quantum Computers: Calibration-Driven Emulation of Transmon "
+                 "Qubits', arXiv:2504.08313",
+        "location": "Table I, row 'Always-on interaction-strength [kHz]'. "
+                   "Verified by direct text extraction from the arXiv PDF: the "
+                   "row reads '15.0  22.2  19.2  65.7' for qubit pairs "
+                   "0-2, 1-2, 3-2, 4-2 respectively. 15.0 kHz is the smallest.",
+        "notes": ("Smallest of the four fitted always-on interaction strengths "
+                  "for the tested QPU. Used as the LOWER bound of a uniform "
+                  "per-pair sampling distribution in generate_device(); the "
+                  "angle formula angle = 2*pi*zeta*t_gate is unchanged, only "
+                  "the magnitude fed into it. At the module's 50 ns gate "
+                  "duration this is 2*pi*15.0e3*50e-9 = 4.7 mrad. "
+                  "THREE CAVEATS, stated so a reviewer does not have to find "
+                  "them: "
+                  "(1) INTERPRETATION. Table I's caption says 'the Always-on "
+                  "interaction strength corresponds to J in Eq. (10)', where "
+                  "Eq. (10) is H_ZZ = beta*Z_u*Z_v with "
+                  "beta = J^2*(1/(Delta-alpha_u) - 1/(Delta-alpha_v)). Taking "
+                  "the tabulated kHz values as beta directly (as done here) is "
+                  "an INTERPRETATION, not a verbatim claim of the paper. It is "
+                  "adopted because Eq. (10) as printed is self-inconsistent: "
+                  "it yields beta = 0 identically whenever alpha_u == alpha_v, "
+                  "and Sec. IV of the very same paper states that this "
+                  "device's 'qubit anharmonicities are approximately 200 MHz' "
+                  "for all qubits -- i.e. the printed formula predicts zero "
+                  "crosstalk on the device it was fitted to. It is also "
+                  "dimensionally implausible at these magnitudes: with J = 15 "
+                  "kHz and Delta - alpha of order 1e8 Hz, beta would be ~1 Hz, "
+                  "far too small to matter in the exp(-i*beta*d) crosstalk "
+                  "operator of their Eq. (11) over a 45 ns layer. The "
+                  "tabulated kHz values are therefore treated as the always-on "
+                  "ZZ shift itself. EQ. (10) IS NOT IMPLEMENTED. "
+                  "(2) FITTED, NOT SPECTROSCOPIC. These are free parameters "
+                  "found by Differential Evolution against shot-distribution "
+                  "TVD, and the paper says so explicitly: 'The fidelity and "
+                  "crosstalk interaction strength differ from the values "
+                  "expected from a purely physical analysis. This freedom was "
+                  "intentionally granted to the optimizer, allowing these "
+                  "parameters to account for errors that are not captured by "
+                  "our model.' They are measured in the sense of being fitted "
+                  "to real hardware data over 33 hours, not in the sense of "
+                  "being read off a spectroscopy trace. "
+                  "(3) DEVICE MISMATCH. Sec. IV: the device is a five-qubit "
+                  "'Soprano-D QPU from QuantWare, featuring flux-tunable "
+                  "transmon qubits' in a star topology with fixed couplers -- "
+                  "NOT a fixed-frequency IBM-style cloud transmon, which is "
+                  "the platform Quantum Canary otherwise targets. The paper "
+                  "itself flags this contrast in its Discussion. Treat the "
+                  "resulting angles as order-of-magnitude anchors."),
     },
-    "sc.crosstalk.zz_coupling_std_mhz": {
-        "value": 0.173, "unit": "MHz", "evidence_class": "A",
-        "source": "Alghadeer et al., arXiv:2505.22276 / EPJ Quantum Technology s40507-026-00465-3",
-        "location": "Same sentence as sc.crosstalk.zz_coupling_mean_mhz.",
-        "notes": "See sc.crosstalk.zz_coupling_mean_mhz.",
+    "sc.crosstalk.zz_shift_khz_max": {
+        "value": 65.7, "unit": "kHz", "evidence_class": "A",
+        "source": "Mueller (Muller) et al., arXiv:2504.08313",
+        "location": "Table I, row 'Always-on interaction-strength [kHz]', "
+                   "largest of the four verbatim values 15.0 / 22.2 / 19.2 / "
+                   "65.7 (the 65.7 kHz entry is the Q4-Q2 pair, retained in "
+                   "the model because Q4 'remains coupled to the active "
+                   "qubits' despite being excluded from the experiments).",
+        "notes": ("Upper bound of the uniform per-pair sampling distribution. "
+                  "At 50 ns this is 2*pi*65.7e3*50e-9 = 20.6 mrad. Same three "
+                  "caveats as sc.crosstalk.zz_shift_khz_min. "
+                  "TRIANGULATION (the reason this replacement is trusted): the "
+                  "sampled range [15.0, 65.7] kHz maps to kick angles of "
+                  "4.7-20.6 mrad at 50 ns, which BRACKETS the 14.4 mrad "
+                  "coherent rotation-axis error that Rudinger et al. measured "
+                  "directly by simultaneous gate set tomography on an entirely "
+                  "different transmon platform "
+                  "(sc.crosstalk.coherent_angle_rad_uncompensated). Two "
+                  "independent devices, two independent measurement "
+                  "techniques, one order of magnitude. The superseded J-based "
+                  "model produced ~174 mrad, which agrees with neither."),
     },
-    "sc.crosstalk.zz_coupling_range_mhz": {
-        "value": (0.401, 1.064), "unit": "MHz", "evidence_class": "A",
-        "source": "Alghadeer et al., arXiv:2505.22276 / EPJ Quantum Technology s40507-026-00465-3",
-        "location": "Same sentence as sc.crosstalk.zz_coupling_mean_mhz "
-                   "('maximum and minimum values at 1.064 MHz and 0.401 MHz').",
-        "notes": ("Used as hard clip bounds when sampling per-pair J, so a "
-                  "sampled value can never exceed the range this specific "
-                  "device actually exhibited. Two named outlier pairs in the "
-                  "paper (Q9-Q16, Q14-Q15) were explicitly excluded by the "
-                  "authors as lying near the edge of the straddling regime; "
-                  "this module does not attempt to reproduce that exclusion "
-                  "mechanism, only the resulting reported statistics."),
+    "sc.crosstalk.zz_shift_khz_typical": {
+        "value": 30.5, "unit": "kHz", "evidence_class": "B",
+        "source": "Derived from Mueller (Muller) et al., arXiv:2504.08313, Table I",
+        "location": "Arithmetic mean of the four tabulated always-on "
+                   "interaction strengths.",
+        "notes": ("DERIVATION, stated in full: "
+                  "(15.0 + 22.2 + 19.2 + 65.7) / 4 = 122.1 / 4 = 30.525 kHz, "
+                  "rounded to 30.5 kHz. The paper does NOT report this mean; "
+                  "it is computed here, hence Class B rather than Class A. "
+                  "Reported for interpretability only (it corresponds to a "
+                  "9.6 mrad kick at 50 ns, close to Rudinger's 14.4 mrad). "
+                  "generate_device() does NOT use it: per-pair values are "
+                  "drawn UNIFORMLY on [min, max], because with only four "
+                  "measured pairs -- one of which (65.7) is a clear outlier "
+                  "driven by a single strongly coupled spectator qubit -- "
+                  "there is no basis for asserting a Gaussian shape, and a "
+                  "uniform draw over the measured support makes no "
+                  "distributional claim the data cannot carry."),
+    },
+    # -- Calibration-prior staleness envelope (CHANGE 3) -------------------
+    # These four numbers set the DEFAULT half-width of the bounded
+    # multiplicative envelope in generate_calibration_prior() -- see
+    # _CALIB_PERTURBATION. They are ALL CLASS C. No published dataset measures
+    # calibration-log staleness for cloud-deployed hardware, because doing so
+    # requires exactly the independent ground truth a cloud user does not
+    # have. The cited papers bound the SCALE of the underlying parameter
+    # wander; converting that into a staleness envelope is this module's
+    # inference, not theirs.
+    "calib.perturbation.sc_nisq": {
+        "value": 0.25, "unit": "dimensionless (envelope half-width)", "evidence_class": "C",
+        "source": "Scale bounded by Burnett et al., npj Quantum Information 5, "
+                 "54 (2019), 'Decoherence benchmarking of superconducting qubits'",
+        "location": "Fig. 1b and Fig. 4d-f, verified by direct text extraction "
+                   "from the Chalmers open-access PDF of the published paper: "
+                   "Gaussian fits to T1 histograms give Qubit A mu = 46.18 us, "
+                   "sigma = 10.24 us (Fig. 1b, cooldown 6); Qubit B "
+                   "mu = 70.72 us, sigma = 14.31 us (Fig. 1b); and across "
+                   "separate cooldowns of qubit A, mu/sigma = 57.95/12.26 "
+                   "(C2), 44.49/11.7 (C5), 46.68/10.24 (C6).",
+        "notes": ("DERIVATION, stated in full so it can be disagreed with: the "
+                  "sigma/mu ratios implied by the measured pairs above are "
+                  "22.2%, 20.2%, 21.2%, 26.3% and 21.9% -- i.e. T1 on a real "
+                  "fixed-frequency transmon wanders by roughly 20-26% (1 "
+                  "sigma) about its own mean over hours, reproducibly, across "
+                  "thermal cycles. Those PERCENTAGES ARE COMPUTED HERE; the "
+                  "paper reports mu and sigma, not their ratio. 0.25 is chosen "
+                  "as a uniform-envelope half-width at the top of that "
+                  "measured band, on the reasoning that a stale calibration "
+                  "record can be anywhere in the wander, not near its centre. "
+                  "A uniform half-width of 0.25 has standard deviation "
+                  "0.25/sqrt(3) = 14.4%, so this is if anything CONSERVATIVE "
+                  "relative to a 20-26% Gaussian sigma.\n"
+                  "Burnett et al. also report structure a symmetric envelope "
+                  "cannot represent and which this module does NOT claim to "
+                  "capture: T1 switches telegraphically ('approximately 3% of "
+                  "the iterations' show a jump mid-trace), roughly 5% of decay "
+                  "profiles show TLS revivals, and the switching is Lorentzian "
+                  "with rates 'ranging from 71.4 uHz to 1.9 mHz' -- i.e. dwell "
+                  "times of hours. That non-Gaussian, non-stationary structure "
+                  "is the reason this entry is Class C: the envelope is a "
+                  "stress-test envelope calibrated to the right order of "
+                  "magnitude, not "
+                  "a fit."),
+    },
+    "calib.perturbation.sc_ideal": {
+        "value": 0.10, "unit": "dimensionless (envelope half-width)", "evidence_class": "C",
+        "source": "No direct source. Set by construction as the "
+                 "recently-recalibrated counterpart of calib.perturbation.sc_nisq.",
+        "location": "n/a -- phenomenological",
+        "notes": ("DERIVATION: the ideal regime is defined as a device whose "
+                  "calibration record is fresh, so the prior-truth gap should "
+                  "be a fraction of the full nisq wander. 0.10 is ~40% of the "
+                  "0.25 nisq envelope and preserves the historical default of "
+                  "this function, so existing sweeps remain comparable.\n"
+                  "TWO CANDIDATE ANCHORS WERE CONSIDERED AND WITHDRAWN. Both "
+                  "withdrawals are recorded because a reviewer might otherwise "
+                  "expect to see them cited:\n"
+                  "  (a) arXiv:2402.19293 -- does not itself measure "
+                  "calibration staleness; it defers to its own Ref. [36] for "
+                  "the figure. Citing it would be citing a citation.\n"
+                  "  (b) arXiv:2505.22276 (Alghadeer et al., 'Low Crosstalk in "
+                  "a Scalable Superconducting Quantum Lattice') -- a "
+                  "purpose-built laboratory 4x4 lattice characterised by its "
+                  "own authors under controlled conditions, NOT a "
+                  "cloud-deployed device running a public queue between "
+                  "calibration cycles. Its coherence figures (T1/T2 of order "
+                  "71+/-5, 51+/-4 and 78+/-5 us) describe how good a lab "
+                  "lattice can be, which is the opposite of the quantity "
+                  "wanted here. It must not be used as a cloud "
+                  "calibration-drift anchor.\n"
+                  "Supporting (not anchoring) evidence that extreme staleness "
+                  "is not the common case: Mueller et al., arXiv:2504.08313, "
+                  "Fig. 7 tracks TVD between emulator and QPU 'over time since "
+                  "the last calibration' across 33 hours of data and reports a "
+                  "'mean TVD value over all data of the full model' of 0.15, "
+                  "with no dramatic monotonic degradation across that window. "
+                  "That argues against modelling day-scale staleness as "
+                  "catastrophic, but it measures whole-model agreement on shot "
+                  "distributions, not per-parameter drift, so it cannot set "
+                  "this number."),
+    },
+    "calib.perturbation.ti_nisq": {
+        "value": 0.15, "unit": "dimensionless (envelope half-width)", "evidence_class": "C",
+        "source": "No direct source. Inferred by contrast with "
+                 "calib.perturbation.sc_nisq.",
+        "location": "n/a -- phenomenological",
+        "notes": ("DERIVATION: trapped-ion qubit frequencies are set by atomic "
+                  "structure and magnetic field rather than by a fabricated "
+                  "Josephson junction, so the TLS bath that drives the "
+                  "hours-scale T1 telegraph noise Burnett et al. measured in "
+                  "transmons (see calib.perturbation.sc_nisq) has no "
+                  "counterpart. What does drift on an ion trap is the gate "
+                  "CALIBRATION -- laser power and beam pointing, motional-mode "
+                  "frequencies, magnetic-field-induced qubit frequency -- "
+                  "which is why ion systems recalibrate gates periodically "
+                  "rather than continuously re-measuring coherence. 0.15 is "
+                  "set to 60% of the superconducting nisq envelope to encode "
+                  "'meaningfully more stable, but not stable enough to "
+                  "ignore'. THE RATIO IS A JUDGEMENT CALL, NOT A MEASUREMENT. "
+                  "No paper was found that reports the distribution of "
+                  "trapped-ion calibration-log error for a queued, "
+                  "cloud-accessed device; if one exists, this entry should be "
+                  "replaced by it."),
+    },
+    "calib.perturbation.ti_ideal": {
+        "value": 0.05, "unit": "dimensionless (envelope half-width)", "evidence_class": "C",
+        "source": "No direct source. Set by construction, same reasoning as "
+                 "calib.perturbation.sc_ideal applied to "
+                 "calib.perturbation.ti_nisq.",
+        "location": "n/a -- phenomenological",
+        "notes": ("DERIVATION: one third of the trapped-ion nisq envelope, "
+                  "mirroring the sc_ideal/sc_nisq contraction, giving the "
+                  "tightest prior in the table. This is the correct place for "
+                  "the tightest value: a freshly calibrated ion trap is the "
+                  "most predictable of the four cases modelled here. It is "
+                  "still Class C."),
     },
     "sc.detuning_1_over_f.psd_reference_hz": {
         "value": 1.0, "unit": "Hz", "evidence_class": "A",
@@ -403,60 +582,51 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                    "drift with a characteristic scale on the order of tens "
                    "of hertz' (secular motional-mode frequency, after "
                    "subtracting the paper's characterized periodic 60 Hz "
-                   "component -- see ti.detuning_drift.powerline_hz).",
-        "notes": ("The paper measures secular MOTIONAL-mode frequency, not "
-                  "qubit-transition detuning directly, but is the closest "
-                  "literature anchor found for a trapped-ion frequency-drift "
-                  "amplitude and is used as a proxy. The cited text states an "
-                  "order-of-magnitude ('tens of hertz'), not one precise "
-                  "number; 30 Hz*2pi is chosen as a representative point "
-                  "within that stated range and is Class A only for the "
-                  "order-of-magnitude claim, not for the specific digit. "
-                  "Replaces the previous Class C default (100 Hz*2pi, no "
-                  "measurement). Modelled as the sigma of the stochastic OU "
-                  "detuning-drift process; the paper's own periodic 60 Hz "
-                  "finding is modelled separately and deterministically, see "
-                  "ti.detuning_drift.powerline_hz."),
+                   "component).",
+        "notes": ("PROXY, not a direct measurement of the modelled quantity. "
+                  "The paper measures secular MOTIONAL-mode frequency, not "
+                  "qubit-transition detuning -- the same category distinction "
+                  "this module already draws for "
+                  "ti.heating.baseline_axial_quanta_per_s ('motional heating "
+                  "rate, NOT computational T1'). It is retained only as the "
+                  "closest available order-of-magnitude anchor for a "
+                  "trapped-ion frequency-drift amplitude, and is Class A "
+                  "ONLY for the paper's 'tens of hertz' order-of-magnitude "
+                  "statement, never for the specific digit: 30 Hz*2pi is a "
+                  "representative point chosen within that stated range. "
+                  "Replaces an earlier Class C default (100 Hz*2pi, no "
+                  "measurement at all). Used as the sigma of the stochastic "
+                  "OU detuning-drift process. NOTE: the same paper's periodic "
+                  "60 Hz component was previously ALSO modelled here as a "
+                  "deterministic sinusoid on qubit detuning; that term has "
+                  "been removed -- see the 'REMOVED' note below for why."),
     },
-    "ti.detuning_drift.powerline_hz": {
-        "value": 60.0, "unit": "Hz", "evidence_class": "A",
-        "source": "Same Scientific Reports (2026) paper as ti.detuning_drift.amplitude_rad_s",
-        "location": "Confirmed by direct fetch: 'a systematic investigation "
-                   "of 60-Hz power-line noise and its effect on the secular "
-                   "frequencies of a single 171Yb+ ion... sinusoidally "
-                   "modulates the secular frequency... Best-fit parameters "
-                   "are A ~ 2.0 Hz' (modulation amplitude at 60 Hz).",
-        "notes": ("Modelled as a deterministic sinusoidal component added "
-                  "alongside the stochastic OU drift (see "
-                  "evaluate_truth_at()), per the paper's own central finding "
-                  "that this component is PERIODIC and phase-referenced to "
-                  "the mains supply, not a stationary stochastic process -- "
-                  "a PSD/OU model alone cannot represent it. Only 60 Hz (this "
-                  "lab's, Korean, supply frequency) was directly measured; "
-                  "the paper does not mention 50 Hz at all. A second citation "
-                  "originally proposed here for a 204 Hz magnetic-field-"
-                  "modulation claim (arXiv:2001.02176) was checked by direct "
-                  "fetch and dropped entirely: that paper is an unrelated "
-                  "study of quantum-information scrambling in a trapped-ion "
-                  "simulator and contains no mention of 204 Hz, magnetic "
-                  "fields, or motional-mode noise. Callers targeting a "
-                  "50 Hz-grid lab should override this value explicitly; "
-                  "1_inversion.py's ARCH_DEFAULTS is not changed by this "
-                  "module and carries no opinion on mains frequency."),
-    },
-    "ti.detuning_drift.powerline_amplitude_hz": {
-        "value": 2.0, "unit": "Hz", "evidence_class": "A",
-        "source": "Same Scientific Reports (2026) paper as ti.detuning_drift.powerline_hz",
-        "location": "Confirmed by direct fetch: 'Best-fit parameters are "
-                   "A ~ 2.0 Hz' for the 60 Hz secular-frequency modulation "
-                   "(radial motional mode).",
-        "notes": ("The sinusoid's amplitude, kept as its own entry (rather "
-                  "than folded into ti.detuning_drift.powerline_hz, which is "
-                  "a frequency) so every numeric constant used in code has "
-                  "its own traceable MODEL_PROVENANCE key. Applied as "
-                  "delta_omega += 2*pi*amplitude_hz*sin(2*pi*powerline_hz*t) "
-                  "on top of the stochastic OU component."),
-    },
+    # ---------------------------------------------------------------------
+    # REMOVED (deliberately, do not reintroduce): ti.detuning_drift.powerline_hz
+    # (60.0 Hz) and ti.detuning_drift.powerline_amplitude_hz (2.0 Hz).
+    #
+    # Both numbers were correctly transcribed from the Scientific Reports
+    # (2026) paper, but were being applied to the wrong physical quantity and
+    # on the wrong timescale:
+    #
+    # (a) CATEGORY ERROR. The paper measures 60 Hz modulation of the
+    #     MOTIONAL-MODE SECULAR FREQUENCY (radial mode), not the qubit drive
+    #     detuning that delta_omega represents. This module already draws
+    #     exactly this distinction for the Hite et al. heating rates
+    #     ("motional heating rate, NOT computational T1"); it was missed here.
+    #
+    # (b) TIMESCALE ERROR. 60 Hz is a 16.7 ms period, while trapped-ion Ramsey
+    #     delays span T2 ~ 0.1-3 s (see _TRUTH_RANGES) -- i.e. 6 to 180 full
+    #     cycles within a single delay. Evaluating the sinusoid at one instant
+    #     t_s and holding it fixed across such a delay is not physical: a fast
+    #     oscillation averaged over a long delay integrates toward zero and
+    #     manifests as CONTRAST DECAY, not as a static frequency offset. The
+    #     previous implementation produced a static offset.
+    #
+    # Neither digital-twin reference modelling qubit detuning
+    # (arXiv:2504.08313, arXiv:2603.14607) includes a power-line term on
+    # detuning. The stochastic OU drift above is kept.
+    # ---------------------------------------------------------------------
     "ti.gate.error_total": {
         "value": 5e-4, "unit": "dimensionless", "evidence_class": "C",
         "source": "Consistent with 1_inversion.py ARCH_DEFAULTS['trapped_ion']['eps_typical']",
@@ -932,9 +1102,9 @@ def get_architecture_profile(architecture: str) -> ArchitectureProfile:
                 "T1_drift_amplitude_frac": P["sc.T1_drift.amplitude_frac"]["value"],
                 "detuning_drift_amplitude_rad_s": P["sc.detuning_drift.amplitude_rad_s"]["value"],
                 "crosstalk_angle_rad": P["sc.crosstalk.coherent_angle_rad_uncompensated"]["value"],
-                "crosstalk_zz_mean_mhz": P["sc.crosstalk.zz_coupling_mean_mhz"]["value"],
-                "crosstalk_zz_std_mhz": P["sc.crosstalk.zz_coupling_std_mhz"]["value"],
-                "crosstalk_zz_range_mhz": P["sc.crosstalk.zz_coupling_range_mhz"]["value"],
+                "crosstalk_zz_shift_khz_min": P["sc.crosstalk.zz_shift_khz_min"]["value"],
+                "crosstalk_zz_shift_khz_max": P["sc.crosstalk.zz_shift_khz_max"]["value"],
+                "crosstalk_zz_shift_khz_typical": P["sc.crosstalk.zz_shift_khz_typical"]["value"],
                 "detuning_1_over_f_alpha": P["sc.detuning_1_over_f.alpha"]["value"],
             },
         )
@@ -949,8 +1119,6 @@ def get_architecture_profile(architecture: str) -> ArchitectureProfile:
             extra={
                 "coherent_fraction": P["ti.gate.coherent_fraction"]["value"],
                 "detuning_drift_amplitude_rad_s": P["ti.detuning_drift.amplitude_rad_s"]["value"],
-                "detuning_powerline_hz": P["ti.detuning_drift.powerline_hz"]["value"],
-                "detuning_powerline_amplitude_hz": P["ti.detuning_drift.powerline_amplitude_hz"]["value"],
                 "heating_axial_quanta_per_s": P["ti.heating.baseline_axial_quanta_per_s"]["value"],
                 "heating_radial_quanta_per_s": P["ti.heating.baseline_radial_quanta_per_s"]["value"],
                 "heating_distance_exponent": P["ti.heating.distance_scaling_exponent"]["value"],
@@ -1092,19 +1260,22 @@ def generate_device(
                     "cutoff_hz": 1.0 / profile.extra["T1_drift_timescale_s"],
                 }, seed_salt="detuning_lpf")
             if n_qubits >= 2:
-                # Per-pair ZZ coupling J is drawn from the measured
-                # distribution (Alghadeer et al., arXiv:2505.22276), not
-                # assigned a single worst-case value for every pair -- see
-                # sc.crosstalk.zz_coupling_mean_mhz.
+                # Per-pair ALWAYS-ON ZZ SHIFT (zeta), drawn uniformly over the
+                # span of the four values measured by Mueller et al.
+                # (arXiv:2504.08313, Table I). This is the longitudinal shift
+                # that actually generates a conditional phase; it is NOT the
+                # transverse exchange coupling J, which an earlier version of
+                # this module used by mistake and which is 1-2 orders of
+                # magnitude larger. Uniform rather than Gaussian because four
+                # measured pairs (one of them a clear outlier) cannot support a
+                # shape claim -- see sc.crosstalk.zz_shift_khz_typical.
                 pairs = [(i, i + 1) for i in range(n_qubits - 1)]
-                j_lo, j_hi = profile.extra["crosstalk_zz_range_mhz"]
-                j_mhz = np.clip(
-                    rng.normal(profile.extra["crosstalk_zz_mean_mhz"],
-                              profile.extra["crosstalk_zz_std_mhz"], size=len(pairs)),
-                    j_lo, j_hi)
+                zz_khz = rng.uniform(profile.extra["crosstalk_zz_shift_khz_min"],
+                                     profile.extra["crosstalk_zz_shift_khz_max"],
+                                     size=len(pairs))
                 gate_duration_s = profile.gate_duration_ns * 1e-9
-                for (a, b), j in zip(pairs, j_mhz):
-                    angle = crosstalk_scale * 2.0 * np.pi * (j * 1e6) * gate_duration_s
+                for (a, b), zz in zip(pairs, zz_khz):
+                    angle = crosstalk_scale * 2.0 * np.pi * (zz * 1e3) * gate_duration_s
                     crosstalk.append(CrosstalkMechanism(
                         enabled=True, angle_rad=float(angle), axis="z",
                         affected_pairs=[(a, b)]))
@@ -1115,13 +1286,11 @@ def generate_device(
                 "mean": 0.0, "sigma": profile.extra["detuning_drift_amplitude_rad_s"],
                 "theta": 1.0 / 100.0,
             }, seed_salt="detuning_ou")
-            # Coherent power-line component: periodic and phase-referenced to
-            # the mains supply, per the cited paper's own central finding --
-            # NOT representable by a stationary PSD/OU process, so it is
-            # applied separately as a deterministic sinusoid in
-            # evaluate_truth_at(). See ti.detuning_drift.powerline_hz.
-            arch_specific["detuning_powerline_hz"] = profile.extra["detuning_powerline_hz"]
-            arch_specific["detuning_powerline_amplitude_hz"] = profile.extra["detuning_powerline_amplitude_hz"]
+            # No power-line term on detuning: the cited 60 Hz measurement is of
+            # the MOTIONAL-mode secular frequency, not qubit detuning, and a
+            # 16.7 ms period sampled once per Ramsey delay (6-180 cycles long)
+            # would produce a static offset where the real effect is contrast
+            # decay. See the REMOVED note in MODEL_PROVENANCE.
             if n_qubits >= 2:
                 crosstalk.append(CrosstalkMechanism(
                     enabled=True,
@@ -1186,17 +1355,6 @@ def evaluate_truth_at(truth: DeviceTruth, qubit: int, t_s: float) -> Dict[str, f
         walked = evaluate_at(proc, truth.seed, ("detuning", qubit), t_s, dw, dt_s=dt_fixed)
         dw = dw + walked if proc.process_type in ("lowpass_filtered", "one_over_f") else walked
 
-    # Coherent, deterministic power-line component (trapped ion only): NOT
-    # representable by a stationary PSD/OU process since it is phase-
-    # referenced to the mains supply, not a stochastic drift -- see
-    # ti.detuning_drift.powerline_hz's provenance note. Present in
-    # architecture_specific only when regime='nisq' and architecture=
-    # 'trapped_ion' (see generate_device()), so this is a no-op otherwise.
-    if "detuning_powerline_hz" in truth.architecture_specific:
-        f_line = truth.architecture_specific["detuning_powerline_hz"]
-        a_line_hz = truth.architecture_specific["detuning_powerline_amplitude_hz"]
-        dw += 2.0 * np.pi * a_line_hz * np.sin(2.0 * np.pi * f_line * t_s)
-
     T2 = min(T2, 2.0 * T1)
     return {"T1_s": T1, "T2_s": T2, "delta_omega_rad_s": dw,
             "epsilon_gate": float(truth.epsilon_gate[qubit]),
@@ -1208,9 +1366,33 @@ def evaluate_truth_at(truth: DeviceTruth, qubit: int, t_s: float) -> Dict[str, f
 # 7. CALIBRATION PRIOR (no truth leakage, no inversion mathematics)
 # =============================================================================
 
+# Default staleness-envelope half-width, resolved per (architecture, regime).
+# All four values are Class C -- see the calib.perturbation.* entries in
+# MODEL_PROVENANCE for the full derivation of each and for the two candidate
+# anchors that were considered and withdrawn. An explicit perturbation_frac
+# argument always overrides this table.
+_CALIB_PERTURBATION: Dict[Tuple[str, str], float] = {
+    ("superconducting", "ideal"): 0.10,
+    ("superconducting", "nisq"):  0.25,
+    ("trapped_ion",     "ideal"): 0.05,
+    ("trapped_ion",     "nisq"):  0.15,
+}
+
+# Used when a (architecture, regime) pair is somehow absent from the table.
+# Falling back to the historical flat default is safer than raising, because
+# this function sits on the path of every experiment in the repository.
+_CALIB_PERTURBATION_FALLBACK = 0.10
+
+
+def resolve_calibration_perturbation(architecture: str, regime: str) -> float:
+    """Default envelope half-width for one (architecture, regime) pair."""
+    return _CALIB_PERTURBATION.get((architecture, _canonical_regime(regime)),
+                                   _CALIB_PERTURBATION_FALLBACK)
+
+
 def generate_calibration_prior(
     truth: DeviceTruth, qubit: int = 0, t0_s: float = 0.0,
-    perturbation_frac: float = 0.10,
+    perturbation_frac: Optional[float] = None,
     calibration_seed: Optional[int] = None,
 ) -> CalibrationPrior:
     """Produce what a provider's calibration log would report for this qubit.
@@ -1227,15 +1409,27 @@ def generate_calibration_prior(
     parameter is independently drawn uniform in
     [1 - perturbation_frac, 1 + perturbation_frac] times its true value.
 
+    perturbation_frac defaults to None, in which case the half-width is looked
+    up in _CALIB_PERTURBATION by (truth.architecture, truth.regime): 0.10 /
+    0.25 for superconducting ideal/nisq and 0.05 / 0.15 for trapped ion. A
+    single flat default was wrong in both directions at once -- it understated
+    how stale a superconducting calibration record gets between cycles (real
+    transmon T1 wanders 20-26% over hours; Burnett et al., npj QI 5, 54) while
+    overstating the gap on an ion trap, which has no TLS bath to drive it.
+    Passing an explicit float overrides the table, and 0.0 still reproduces
+    truth exactly, so sweeps are unaffected.
+
     This is a STRESS-TEST envelope, not a fit to a measured staleness
-    distribution. No published dataset quantifies calibration-log staleness
-    for cloud-deployed hardware, because measuring it requires exactly the
-    independent ground truth that cloud users do not have. Callers should
-    therefore SWEEP perturbation_frac (e.g. 0.02-0.15) and report that their
-    result is insensitive to it, rather than treating any single value as
-    correct. The 10% default represents a healthy, recently recalibrated
-    device; the far larger excursions that occur when a TLS defect moves into
-    resonance with a qubit belong to regime='nisq', not here.
+    distribution. ALL FOUR DEFAULTS ARE CLASS C. No published dataset
+    quantifies calibration-log staleness for cloud-deployed hardware, because
+    measuring it requires exactly the independent ground truth that cloud
+    users do not have; the cited work bounds the scale of the underlying
+    parameter wander, and the conversion into an envelope is this module's
+    own. Callers should therefore SWEEP perturbation_frac and report that
+    their result is insensitive to it, rather than treating any single value
+    as correct. See the calib.perturbation.* entries in MODEL_PROVENANCE for
+    each derivation, including the two candidate anchors that were considered
+    and withdrawn.
 
     SPAM is passed through unperturbed. Readout error is read from the
     provider at run time rather than inherited from a stale calibration
@@ -1243,6 +1437,9 @@ def generate_calibration_prior(
     models. Perturbing it here would inject a forward-model misspecification,
     which is precisely what the ideal regime is defined to exclude.
     """
+    if perturbation_frac is None:
+        perturbation_frac = resolve_calibration_perturbation(truth.architecture,
+                                                             truth.regime)
     if not 0.0 <= perturbation_frac < 1.0:
         raise ValueError(f"perturbation_frac must be in [0,1), got {perturbation_frac}")
 
@@ -1787,6 +1984,49 @@ def _run_validation_tests() -> None:
     check("8h. rejects an out-of-range perturbation_frac",
           _raises(lambda: generate_calibration_prior(truth8, 0, perturbation_frac=1.5)))
 
+    # 8i-8k. The default envelope half-width is resolved per
+    # (architecture, regime), and an explicit argument still wins. Each of the
+    # four cases is checked through the actual sampling path -- the observed
+    # spread of 400 priors must fill its own table entry's envelope and must
+    # not exceed it -- so this cannot pass if the table is read but ignored.
+    expected_table = {
+        ("superconducting", "ideal"): 0.10,
+        ("superconducting", "nisq"):  0.25,
+        ("trapped_ion",     "ideal"): 0.05,
+        ("trapped_ion",     "nisq"):  0.15,
+    }
+    resolve_ok, sample_ok, detail = True, True, []
+    for (arch_k, regime_k), frac_k in expected_table.items():
+        resolve_ok &= resolve_calibration_perturbation(arch_k, regime_k) == frac_k
+        t_k = generate_device(arch_k, 1, seed=4242, regime=regime_k)
+        r_k = np.array([generate_calibration_prior(t_k, 0, calibration_seed=s).T1_prior_s
+                        / evaluate_truth_at(t_k, 0, 0.0)["T1_s"] for s in range(400)])
+        within = bool(np.all(r_k >= 1 - frac_k - 1e-9) and np.all(r_k <= 1 + frac_k + 1e-9))
+        # Fills at least 85% of its own envelope: rules out a narrower default
+        # silently being applied (e.g. the old flat 0.10 under a nisq key).
+        fills = bool((r_k.max() - r_k.min()) > 0.85 * 2 * frac_k)
+        sample_ok &= within and fills
+        detail.append(f"{arch_k[:2]}/{regime_k}:{frac_k:.2f}"
+                      f"[{r_k.min():.3f},{r_k.max():.3f}]")
+    check("8i. _CALIB_PERTURBATION resolves per (architecture, regime)",
+          resolve_ok, str(expected_table))
+    check("8j. the resolved default is the envelope actually sampled from",
+          sample_ok, "  ".join(detail))
+    # Override: a trapped-ion nisq device defaults to 0.15, so forcing 0.25
+    # must widen it past what the table alone could ever produce.
+    t_ov = generate_device("trapped_ion", 1, seed=4242, regime="nisq")
+    T1_ov = evaluate_truth_at(t_ov, 0, 0.0)["T1_s"]
+    r_def = np.array([generate_calibration_prior(t_ov, 0, calibration_seed=s).T1_prior_s / T1_ov
+                      for s in range(400)])
+    r_ov = np.array([generate_calibration_prior(t_ov, 0, calibration_seed=s,
+                                                perturbation_frac=0.25).T1_prior_s / T1_ov
+                     for s in range(400)])
+    check("8k. an explicit perturbation_frac overrides the table",
+          bool(r_def.max() <= 1.15 + 1e-9 and r_ov.max() > 1.15
+               and np.all(r_ov <= 1.25 + 1e-9)),
+          f"default max ratio {r_def.max():.4f} (table 0.15) vs "
+          f"explicit-0.25 max ratio {r_ov.max():.4f}")
+
     # 3. SPAM bounds
     ok = True
     for arch in ARCHITECTURES:
@@ -1930,12 +2170,9 @@ def _run_validation_tests() -> None:
     except ImportError:
         print("[SKIP] F. trapped-ion gpi2 gate-repetition decay (qiskit-aer/qiskit_ionq not installed)")
 
-    # G. Crosstalk is now a per-pair distribution, not one worst-case constant.
-    # Sampling many independent devices with >2 qubits must produce more than
-    # one distinct angle across pairs, and the observed mean/std must land
-    # close to the cited Alghadeer et al. values (converted from the sampled
-    # J in MHz to a kick angle via the SAME formula generate_device() uses,
-    # so this checks the actual code path, not just the raw provenance number).
+    # G. Crosstalk is a per-pair distribution, not one worst-case constant,
+    # AND its magnitude agrees with an independent measurement of the same
+    # physical quantity on different hardware.
     all_angles = []
     for s in range(60):
         t = generate_device("superconducting", 4, seed=100_000 + s, regime="nisq")
@@ -1944,12 +2181,34 @@ def _run_validation_tests() -> None:
     check("G1. crosstalk angles are a distribution, not one repeated constant",
           len(set(np.round(all_angles, 12))) > 5,
           f"{len(set(np.round(all_angles, 12)))} distinct values across {len(all_angles)} samples")
-    gate_dur_s = get_architecture_profile("superconducting").gate_duration_ns * 1e-9
-    implied_j_mhz = all_angles / (2.0 * np.pi * gate_dur_s) / 1e6
-    j_mean_expected = MODEL_PROVENANCE["sc.crosstalk.zz_coupling_mean_mhz"]["value"]
-    check("G2. sampled crosstalk J distribution matches Alghadeer et al. mean within 15%",
-          abs(np.mean(implied_j_mhz) - j_mean_expected) / j_mean_expected < 0.15,
-          f"sampled mean J = {np.mean(implied_j_mhz):.3f} MHz, expected ~{j_mean_expected} MHz")
+
+    # G2 is a CROSS-VALIDATION, deliberately not a self-consistency check. The
+    # test it replaces compared the sampled distribution back against the same
+    # provenance number that generated it, so it passed happily on a model
+    # that was off by an order of magnitude. Instead: the ZZ shifts come from
+    # Mueller et al. (fitted digital twin, QuantWare flux-tunable device);
+    # Rudinger et al. measured a coherent crosstalk ANGLE directly by
+    # simultaneous gate set tomography on a completely different transmon
+    # platform. Two sources, two techniques, one number -- so the mean kick
+    # angle this module produces must land near Rudinger's 14.4 mrad. The
+    # second assertion is the regression guard against the J-vs-ZZ category
+    # error, whose signature was a ~174 mrad mean.
+    mean_angle_mrad = float(np.mean(all_angles)) * 1e3
+    rudinger_mrad = MODEL_PROVENANCE[
+        "sc.crosstalk.coherent_angle_rad_uncompensated"]["value"] * 1e3
+    buggy_j_model_mrad = 174.0
+    check("G2. mean crosstalk kick cross-validates against Rudinger et al. "
+          "(within a factor of 2 of 14.4 mrad)",
+          0.5 * rudinger_mrad <= mean_angle_mrad <= 2.0 * rudinger_mrad,
+          f"mean angle = {mean_angle_mrad:.2f} mrad vs Rudinger "
+          f"{rudinger_mrad:.1f} mrad (allowed {0.5 * rudinger_mrad:.1f}-"
+          f"{2.0 * rudinger_mrad:.1f})")
+    check("G2b. mean crosstalk kick is NOT within an order of magnitude of the "
+          "superseded J-based value (regression guard)",
+          mean_angle_mrad < buggy_j_model_mrad / 10.0,
+          f"mean angle = {mean_angle_mrad:.2f} mrad; the J-vs-ZZ category "
+          f"error produced {buggy_j_model_mrad:.0f} mrad, so anything above "
+          f"{buggy_j_model_mrad / 10.0:.1f} mrad means it is back")
     t_scaled_half = generate_device("superconducting", 2, seed=100_000, regime="nisq", crosstalk_scale=0.5)
     t_scaled_full = generate_device("superconducting", 2, seed=100_000, regime="nisq", crosstalk_scale=1.0)
     check("G3. crosstalk_scale linearly scales the kick angle",
@@ -1979,20 +2238,20 @@ def _run_validation_tests() -> None:
               DriftProcess("one_over_f", {"amplitude": 1.0, "alpha": 1.0}),
               master_seed=1, salt="t", n_steps=100, dt_s=1.0, base_value=0.0) != 0.0)))
 
-    # I. Trapped-ion power-line component is a genuine deterministic sinusoid
-    # at the cited frequency, not folded into the stochastic OU drift: two
-    # devices differing ONLY in query time t_s must show delta_omega
-    # oscillating at 60 Hz, and setting amplitude/frequency to zero must
-    # remove the effect entirely (isolating it from the separate OU term).
-    t_pl = generate_device("trapped_ion", 1, seed=5, regime="nisq")
-    period_s = 1.0 / t_pl.architecture_specific["detuning_powerline_hz"]
-    dw_t0 = evaluate_truth_at(t_pl, 0, 0.0)["delta_omega_rad_s"]
-    dw_quarter = evaluate_truth_at(t_pl, 0, period_s / 4.0)["delta_omega_rad_s"]
-    expected_swing = 2.0 * np.pi * t_pl.architecture_specific["detuning_powerline_amplitude_hz"]
-    check("I. trapped-ion power-line component oscillates at the cited 60 Hz period",
-          abs((dw_quarter - dw_t0) - expected_swing) < 0.2 * expected_swing,
-          f"delta(dw) over quarter-period = {dw_quarter - dw_t0:.3f} rad/s, "
-          f"expected ~{expected_swing:.3f} rad/s (a quarter-sine step)")
+    # I. (removed) -- previously asserted that a deterministic 60 Hz power-line
+    # sinusoid modulated trapped-ion detuning. That mechanism was deleted as a
+    # category error (the cited measurement is of the MOTIONAL-mode secular
+    # frequency, not qubit detuning) compounded by a timescale error (a 16.7 ms
+    # period held static across a 0.1-3 s Ramsey delay). Its replacement is the
+    # regression guard below, which asserts the term is GONE.
+    t_nopl = generate_device("trapped_ion", 1, seed=5, regime="nisq")
+    dw_a = evaluate_truth_at(t_nopl, 0, 0.0)["delta_omega_rad_s"]
+    dw_b = evaluate_truth_at(t_nopl, 0, 1.0 / (4.0 * 60.0))["delta_omega_rad_s"]
+    check("I. no power-line sinusoid on trapped-ion detuning (regression guard)",
+          "detuning_powerline_hz" not in t_nopl.architecture_specific
+          and "detuning_powerline_amplitude_hz" not in t_nopl.architecture_specific
+          and abs(dw_b - dw_a) < 1e-9,
+          f"quarter-60Hz-period change in dw = {abs(dw_b - dw_a):.3e} rad/s (must be ~0)")
 
     # J. enable_heating_gate_error defaults OFF (Change 4): the Class-C,
     # self-documented-as-unvalidated heating-to-gate-error mapping must
