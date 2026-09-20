@@ -89,6 +89,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+import warnings
 from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -255,18 +256,28 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "the same simultaneous circuit layer -- see "
                   "_inject_crosstalk_kicks()."),
     },
-    "sc.crosstalk.coherent_angle_rad_compensated": {
-        "value": 0.016e-3 * 1000, "unit": "rad", "evidence_class": "A",
-        "source": "Rudinger et al., PRX Quantum 2, 040338 (2021)",
-        "location": "reported Q6 context-to-context error with crosstalk compensation applied",
-        "notes": ("0.016(8)% context-to-context error variation after the "
-                  "paper's own crosstalk compensation -- i.e. compensation "
-                  "reduces (not eliminates) coherent crosstalk. Exposed for "
-                  "callers who want to model a compensated device; not used "
-                  "by default (regime='nisq' uses the uncompensated value, "
-                  "since Quantum Canary's whole premise is characterizing "
-                  "hardware as it actually runs)."),
-    },
+    # REMOVED (deliberately, do not reintroduce):
+    #   sc.crosstalk.coherent_angle_rad_compensated
+    #
+    # It held 0.016e-3 * 1000 = 0.016 rad = 16.0 mrad, which is 1.11x LARGER
+    # than sc.crosstalk.coherent_angle_rad_uncompensated (14.4 mrad). That is
+    # backwards on its face: compensation must reduce crosstalk, never
+    # increase it, so the entry falsified itself.
+    #
+    # The arithmetic error: Rudinger et al. report 0.016(8)% residual
+    # context-to-context error after their compensation. 0.016% = 1.6e-4, but
+    # the expression above reads the 0.016 as already-in-percent AND then
+    # multiplies by 1000, landing 100x too high.
+    #
+    # It is deleted rather than corrected to 1.6e-4 because a PERCENTAGE ERROR
+    # cannot be converted into a ROTATION ANGLE without an extra assumption
+    # about the error's geometry, and this module does not have grounds to
+    # pick one. Reading 1.6e-4 as a small-angle radian proxy would be an
+    # invention dressed as a citation. Nothing referenced this entry: it was
+    # never used by generate_device(), get_architecture_profile(), or any
+    # experiment script, so removing it changes no result. If a compensated
+    # device ever needs modelling, derive the angle explicitly and document
+    # the assumption rather than restoring this value.
     # -- Always-on ZZ shift (CHANGE 1) ------------------------------------
     # The quantity that produces a COHERENT conditional phase on an idling
     # neighbor is the LONGITUDINAL always-on ZZ shift (zeta / beta), not the
@@ -490,6 +501,40 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "the tightest value: a freshly calibrated ion trap is the "
                   "most predictable of the four cases modelled here. It is "
                   "still Class C."),
+    },
+    "spam.per_qubit_spread_frac": {
+        "value": 0.0, "unit": "dimensionless (fractional half-width)", "evidence_class": "C",
+        "source": "No single literature value. Readout-error spread across a "
+                 "register is device-, layout- and calibration-specific: it "
+                 "is reported per-qubit in provider calibration data rather "
+                 "than as a population statistic anyone has published for "
+                 "cloud hardware generally.",
+        "location": "n/a -- phenomenological stress-test knob",
+        "notes": ("Default 0.0, which makes SPAM homogeneous across the "
+                  "register and reproduces every result generated before this "
+                  "knob existed BIT-FOR-BIT (at 0.0 the sampler consumes no "
+                  "random numbers, so no downstream draw shifts). Set "
+                  "generate_device(spam_spread_frac=f) with f > 0 to draw each "
+                  "qubit's p0|1 and p1|0 independently log-uniform in "
+                  "[(1-f)*base, (1+f)*base], clipped to [0,1].\n"
+                  "WHY IT EXISTS: real registers are heterogeneous in readout "
+                  "error -- epsilon_gate in this module already varies "
+                  "per-qubit while SPAM did not, so any multi-qubit claim, and "
+                  "qubit-routing arguments in particular, were being made "
+                  "against an unrealistically uniform register.\n"
+                  "THIS IS A SWEEP PARAMETER, NOT A MEASUREMENT. No value of "
+                  "f is endorsed here. Any figure that switches it on must "
+                  "report results across a swept range and show the "
+                  "conclusion does not depend on the point chosen.\n"
+                  "INTERACTION WITH regime='ideal': generate_calibration_prior() "
+                  "passes SPAM through unperturbed, and the ideal regime is "
+                  "DEFINED as a correctly-specified forward model, so ideal-"
+                  "regime devices must stay homogeneous. The 0.0 default "
+                  "guarantees that. An explicit f > 0 is still honoured in the "
+                  "ideal regime -- callers keep control -- but doing so makes "
+                  "the register heterogeneous in a parameter the inversion "
+                  "treats as known, which is a deliberate departure from the "
+                  "ideal regime's definition and should be labelled as such."),
     },
     "sc.detuning_1_over_f.psd_reference_hz": {
         "value": 1.0, "unit": "Hz", "evidence_class": "A",
@@ -1141,17 +1186,34 @@ def get_architecture_profile(architecture: str) -> ArchitectureProfile:
 # silently clipped). The two must not be conflated: sampling truth across an
 # optimizer bound's full span generates devices that do not exist.
 #
-# superconducting: consistent with published medians on cloud-deployed IBM
-#   hardware (Heron ~168/130 us, Eagle ~268/183 us, ibm_washington ~100/95 us),
-#   widened modestly for per-qubit spread.
+# WHICH QUANTITY IS SAMPLED: T1 and eps are sampled directly. The second
+# coherence key is "T_phi_s" -- the PURE DEPHASING time -- and NOT T2. T2 is
+# DERIVED from it via the standard Lindblad decomposition
+#     1/T2 = 1/(2*T1) + 1/T_phi,
+# then capped at 2*T1. The decomposition is correct and is not being changed;
+# the key was simply misnamed "T2_s", which made the declared range a claim
+# about a quantity the sampler never draws. Concretely, for superconducting
+# the old key declared 40-200 us while the T2 values actually produced span
+# ~32-159 us, with 8.2% of qubits landing BELOW the declared minimum. The
+# literature anchoring below therefore describes T_phi, and the derived T2
+# span is recorded alongside it so the distribution that experiments actually
+# see is documented rather than inferred.
+#
+# superconducting: T_phi 40-200 us is consistent with published medians on
+#   cloud-deployed IBM hardware (Heron ~168/130 us, Eagle ~268/183 us,
+#   ibm_washington ~100/95 us) once those reported T2 figures are read back
+#   through the decomposition above, widened modestly for per-qubit spread.
+#   DERIVED T2, measured over 2000 sampled qubits: ~32-159 us.
 # trapped_ion: IonQ's published Aria specification states T1 10-100 s and
-#   T2 ~1 s; upper bound widened to 200 s for per-qubit spread. The previous
-#   (100, 10_000) s range had no citation and put its upper end 50-100x above
-#   any measured cloud trapped-ion T1 -- it is what produced true-T1 ~ 100 s
-#   paired with a ~10,000 s prior.
+#   T2 ~1 s; T1's upper bound widened to 200 s for per-qubit spread. The
+#   previous (100, 10_000) s range had no citation and put its upper end
+#   50-100x above any measured cloud trapped-ion T1 -- it is what produced
+#   true-T1 ~ 100 s paired with a ~10,000 s prior. Because T1 >> T_phi here,
+#   the 1/(2*T1) term is negligible and T2 ~ T_phi to within ~1%.
+#   DERIVED T2, measured over 2000 sampled qubits: ~0.100-2.94 s.
 _TRUTH_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
-    "superconducting": {"T1_s": (80e-6, 400e-6), "T2_s": (40e-6, 200e-6), "eps": (1e-4, 2e-3)},
-    "trapped_ion":     {"T1_s": (10.0, 200.0),   "T2_s": (0.1, 3.0),      "eps": (1e-4, 2e-3)},
+    "superconducting": {"T1_s": (80e-6, 400e-6), "T_phi_s": (40e-6, 200e-6), "eps": (1e-4, 2e-3)},
+    "trapped_ion":     {"T1_s": (10.0, 200.0),   "T_phi_s": (0.1, 3.0),      "eps": (1e-4, 2e-3)},
 }
 
 
@@ -1165,13 +1227,18 @@ def generate_device(
     crosstalk_scale: float = 1.0,
     detuning_1_over_f: bool = False,
     enable_heating_gate_error: bool = False,
+    spam_spread_frac: float = 0.0,
 ) -> DeviceTruth:
     """Sample a complete, hidden DeviceTruth.
 
-    Per-qubit T1, T2, epsilon are drawn log-uniform from _TRUTH_RANGES
-    (T2 additionally capped at 2*T1 via the standard 1/T2=1/(2T1)+1/Tphi
-    decomposition); delta_omega is drawn uniform in [-dw_max, dw_max] with
-    random sign. regime='ideal' attaches no drift/crosstalk processes at all
+    Per-qubit T1, T_phi and epsilon are drawn log-uniform from _TRUTH_RANGES
+    (keys "T1_s", "T_phi_s", "eps"). T2 is NOT sampled -- it is DERIVED from
+    the sampled T1 and T_phi via 1/T2 = 1/(2*T1) + 1/T_phi and then capped at
+    2*T1, so the T2 values a caller sees are narrower than, and shifted below,
+    the declared T_phi range (superconducting: T_phi 40-200 us in, T2 ~32-159
+    us out). delta_omega is drawn uniform in [-dw_max, dw_max] with random
+    sign, below an aliasing ceiling that accounts for prior inflation (see
+    the comment at the sampling site). regime='ideal' attaches no drift/crosstalk processes at all
     (stationary Markovian noise -- the chi2/dof null baseline) and is
     unaffected by every parameter below; regime='nisq' attaches the
     architecture-specific mechanisms in Sections 6-8 of the module spec,
@@ -1196,6 +1263,15 @@ def generate_device(
         validated physical prediction") contributes zero extra gate error.
         Set True only for an explicitly-labelled ablation study, never in a
         headline figure.
+    spam_spread_frac: per-qubit readout-error heterogeneity, default 0.0.
+        At 0.0 every qubit gets the architecture's single base SPAM pair and
+        NO random numbers are consumed, so all pre-existing results are
+        bit-for-bit unchanged. At f > 0 each qubit's p0|1 and p1|0 are drawn
+        independently log-uniform in [(1-f)*base, (1+f)*base] and clipped to
+        [0,1]. Class C stress-test knob with no literature value -- sweep it,
+        do not fix it (see spam.per_qubit_spread_frac). Leave it at 0.0 for
+        regime='ideal', which is defined as a correctly-specified forward
+        model and whose prior passes SPAM through unperturbed.
     """
     if architecture not in ARCHITECTURES:
         raise ValueError(f"Invalid architecture: {architecture!r}")
@@ -1211,28 +1287,76 @@ def generate_device(
         return 10.0 ** rng.uniform(np.log10(lo), np.log10(hi), size=size)
 
     T1_lo, T1_hi = ov.get("T1_range_s", ranges["T1_s"])
-    T2_lo, T2_hi = ov.get("T2_range_s", ranges["T2_s"])
+    # "T2_range_s" is a DEPRECATED ALIAS for "T_phi_range_s". It always bounded
+    # T_phi, never T2 -- the name was wrong, the behaviour was not -- so it is
+    # still honoured (identical numerics) but warns, rather than breaking
+    # existing callers silently or, worse, being silently ignored.
+    if "T2_range_s" in ov and "T_phi_range_s" not in ov:
+        warnings.warn(
+            "generate_device(overrides={'T2_range_s': ...}) is deprecated: the "
+            "key bounds the PURE DEPHASING time T_phi, not T2 (T2 is derived "
+            "as 1/T2 = 1/(2*T1) + 1/T_phi and capped at 2*T1). Rename it to "
+            "'T_phi_range_s'; the numerical behaviour is unchanged.",
+            DeprecationWarning, stacklevel=2)
+    T_phi_lo, T_phi_hi = ov.get("T_phi_range_s",
+                                ov.get("T2_range_s", ranges["T_phi_s"]))
     eps_lo, eps_hi = ov.get("eps_range", ranges["eps"])
 
     T1 = _log_uniform(T1_lo, T1_hi, n_qubits)
-    T_phi = _log_uniform(T2_lo, T2_hi, n_qubits)
+    T_phi = _log_uniform(T_phi_lo, T_phi_hi, n_qubits)
     T2 = np.minimum(1.0 / (1.0 / (2.0 * T1) + 1.0 / T_phi), 2.0 * T1)
     eps = _log_uniform(eps_lo, eps_hi, n_qubits)
 
     # Detuning is drawn below each qubit's OWN aliasing ceiling. 1_inversion.py
     # recovers delta_omega unambiguously only for |dw| <= 0.9*pi/t1, where t1 is
-    # the shortest Ramsey delay (~0.5*T2 for that qubit). Using a single
-    # median-T2 ceiling for the whole register would hand any qubit with a
-    # shorter-than-median T2 a detuning it cannot resolve even in principle,
-    # which shows up as an estimator failure that is really a construction
-    # artifact.
-    dw_max_per_q = (np.full(n_qubits, float(dw_max_rad_s)) if dw_max_rad_s is not None
-                    else 0.9 * np.pi / (0.5 * T2))
+    # the shortest Ramsey delay. Using a single median-T2 ceiling for the whole
+    # register would hand any qubit with a shorter-than-median T2 a detuning it
+    # cannot resolve even in principle, which shows up as an estimator failure
+    # that is really a construction artifact.
+    #
+    # THE CEILING MUST ACCOUNT FOR PRIOR INFLATION. The engine builds its delay
+    # grid from T2_PRIOR, not T2_TRUE, so the shortest Ramsey delay is
+    # 0.5*T2_prior. Accumulated phase is then bounded by
+    #     |dw| * 0.5*T2_prior  <=  0.9*pi * (T2_prior / T2_true),
+    # which exceeds pi -- i.e. aliases -- whenever the prior/truth ratio
+    # exceeds 1/0.9 = 1.111. generate_calibration_prior() draws that ratio
+    # uniform in [1-frac, 1+frac], so the failure mode switches on exactly when
+    # frac > 0.111: measured over 400 seeds, superconducting/nisq (frac=0.25)
+    # put 29.0% of instances above the 1.111 ratio and 2.0% into actual
+    # aliasing, while superconducting/ideal (frac=0.10) gave 0.0% of both --
+    # structurally, not by luck, since 1.10 < 1.111.
+    #
+    # Dividing the ceiling by the worst-case inflation (1+frac) makes the bound
+    # hold for every draw the prior can produce, so no instance is
+    # unrecoverable by construction. An explicit dw_max_rad_s still overrides
+    # this entirely.
+    if dw_max_rad_s is not None:
+        dw_max_per_q = np.full(n_qubits, float(dw_max_rad_s))
+    else:
+        _prior_frac = resolve_calibration_perturbation(architecture, regime)
+        dw_max_per_q = 0.9 * np.pi / (0.5 * T2) / (1.0 + _prior_frac)
     dw = rng.choice([-1.0, 1.0], size=n_qubits) * rng.uniform(
         0.2 * dw_max_per_q, dw_max_per_q, size=n_qubits)
 
-    p01 = np.full(n_qubits, profile.spam_p0_given_1)
-    p10 = np.full(n_qubits, profile.spam_p1_given_0)
+    if not 0.0 <= spam_spread_frac < 1.0:
+        raise ValueError(f"spam_spread_frac must be in [0,1), got {spam_spread_frac}")
+    if spam_spread_frac > 0.0:
+        # Log-uniform, matching how every other per-qubit truth parameter in
+        # this function is drawn. Clipped to [0,1] because these are
+        # probabilities; with the base values and f < 1 the clip never binds,
+        # but it is cheap insurance against an override that pushes the base
+        # near 1.
+        def _spam_draw(base: float) -> np.ndarray:
+            return np.clip(_log_uniform((1.0 - spam_spread_frac) * base,
+                                        (1.0 + spam_spread_frac) * base,
+                                        n_qubits), 0.0, 1.0)
+        p01 = _spam_draw(profile.spam_p0_given_1)
+        p10 = _spam_draw(profile.spam_p1_given_0)
+    else:
+        # Consume no randomness: this branch is what keeps spam_spread_frac=0.0
+        # bit-for-bit identical to the behaviour before the knob existed.
+        p01 = np.full(n_qubits, profile.spam_p0_given_1)
+        p10 = np.full(n_qubits, profile.spam_p1_given_0)
 
     drift: Dict[str, DriftProcess] = {}
     crosstalk: List[CrosstalkMechanism] = []
@@ -2039,7 +2163,7 @@ def _run_validation_tests() -> None:
     try:
         from qiskit import QuantumCircuit
         t_ideal = generate_device("superconducting", 1, seed=5, regime="ideal",
-                                  overrides={"T1_range_s": (100e-6, 100e-6), "T2_range_s": (100e-6, 100e-6)})
+                                  overrides={"T1_range_s": (100e-6, 100e-6), "T_phi_range_s": (100e-6, 100e-6)})
         t_ideal.T2_s[:] = np.minimum(t_ideal.T2_s, 2 * t_ideal.T1_s)
         delays_ns = [0, 20_000, 50_000, 100_000]
         rel_errs = []
@@ -2264,6 +2388,110 @@ def _run_validation_tests() -> None:
           f"off={t_heat_off.architecture_specific['heating_extra_gate_error']} "
           f"on={t_heat_on.architecture_specific['heating_extra_gate_error']}")
 
+    # K. No sampled instance is unrecoverable by construction. The engine's
+    # shortest Ramsey delay is 0.5*T2_PRIOR, so the phase that actually
+    # accumulates is |dw_true| * 0.5 * T2_prior, and it must stay below pi for
+    # delta_omega to be identifiable at all. This is checked against the real
+    # prior (not the truth), across every architecture x regime, because the
+    # failure it guards was invisible to any test that used T2_true.
+    alias_detail, alias_ok = [], True
+    for arch_k in ARCHITECTURES:
+        for regime_k in ("ideal", "nisq"):
+            worst, n_alias = 0.0, 0
+            for sd in range(300):
+                t_k = generate_device(arch_k, 1, seed=sd, regime=regime_k)
+                pr_k = generate_calibration_prior(t_k, 0)
+                phase = abs(float(t_k.delta_omega_rad_s[0])) * 0.5 * pr_k.T2_prior_s
+                worst = max(worst, phase)
+                n_alias += phase >= np.pi
+            alias_ok &= (n_alias == 0)
+            alias_detail.append(f"{arch_k[:2]}/{regime_k}:{n_alias}/300 "
+                                f"worst={worst / np.pi:.3f}pi")
+    check("K. no instance aliases against its own calibration-prior delay grid",
+          alias_ok, "  ".join(alias_detail))
+
+    # L. _TRUTH_RANGES declares what it samples. The second coherence key
+    # bounds T_phi; T2 is derived, so the sampled T2 must sit inside the range
+    # the T1 and T_phi ranges jointly imply -- and NOT inside the T_phi range,
+    # which is the misdeclaration this replaced.
+    key_ok = all(set(v) == {"T1_s", "T_phi_s", "eps"} for v in _TRUTH_RANGES.values())
+    check("L1. _TRUTH_RANGES keys name the quantity actually sampled (T_phi_s, not T2_s)",
+          key_ok, str({a: sorted(v) for a, v in _TRUTH_RANGES.items()}))
+    derived_ok, derived_detail = True, []
+    for arch_k in ARCHITECTURES:
+        r_k = _TRUTH_RANGES[arch_k]
+        t_k = generate_device(arch_k, 2000, seed=11, regime="ideal")
+        # Monotone in both arguments, so the extremes of the derived T2 range
+        # are attained at the corners of the (T1, T_phi) box.
+        def _t2(t1, tphi):
+            return min(1.0 / (1.0 / (2.0 * t1) + 1.0 / tphi), 2.0 * t1)
+        lo_k = _t2(r_k["T1_s"][0], r_k["T_phi_s"][0])
+        hi_k = _t2(r_k["T1_s"][1], r_k["T_phi_s"][1])
+        derived_ok &= bool(t_k.T2_s.min() >= lo_k * (1 - 1e-9)
+                           and t_k.T2_s.max() <= hi_k * (1 + 1e-9))
+        derived_detail.append(f"{arch_k[:2]} derived[{lo_k:.4g},{hi_k:.4g}] "
+                              f"sampled[{t_k.T2_s.min():.4g},{t_k.T2_s.max():.4g}]")
+    check("L2. sampled T2 lies inside the range DERIVED from T1 x T_phi",
+          derived_ok, "  ".join(derived_detail))
+    # The deprecated alias must still work, warn, and give identical numbers.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        t_old = generate_device("superconducting", 4, seed=21, regime="ideal",
+                                overrides={"T2_range_s": (50e-6, 60e-6)})
+    t_new = generate_device("superconducting", 4, seed=21, regime="ideal",
+                            overrides={"T_phi_range_s": (50e-6, 60e-6)})
+    check("L3. deprecated 'T2_range_s' override still works, warns, and is numerically identical",
+          bool(np.array_equal(t_old.T2_s, t_new.T2_s))
+          and any(issubclass(w.category, DeprecationWarning) for w in caught),
+          f"{len(caught)} warning(s); T2 arrays equal="
+          f"{bool(np.array_equal(t_old.T2_s, t_new.T2_s))}")
+
+    # M. Compensation cannot make crosstalk worse. The entry that violated
+    # this was deleted (see the REMOVED note in MODEL_PROVENANCE); the check is
+    # written to hold either way, so it stays meaningful if one is restored.
+    unc = MODEL_PROVENANCE["sc.crosstalk.coherent_angle_rad_uncompensated"]["value"]
+    comp_entry = MODEL_PROVENANCE.get("sc.crosstalk.coherent_angle_rad_compensated")
+    check("M. no provenance entry claims compensated crosstalk exceeds uncompensated",
+          comp_entry is None or comp_entry["value"] < unc,
+          "entry absent (deleted: 0.016% residual cannot be read as an angle "
+          "without an invented assumption)" if comp_entry is None
+          else f"compensated={comp_entry['value']:.3e} < uncompensated={unc:.3e}")
+
+    # N. Per-qubit SPAM spread: off by default and bit-for-bit inert, on when
+    # asked, and bounded by the band requested.
+    t_s0a = generate_device("superconducting", 10, seed=31, regime="nisq")
+    t_s0b = generate_device("superconducting", 10, seed=31, regime="nisq",
+                            spam_spread_frac=0.0)
+    base01 = get_architecture_profile("superconducting").spam_p0_given_1
+    check("N1. spam_spread_frac=0.0 is the default and changes nothing bit-for-bit",
+          bool(np.array_equal(t_s0a.spam_p0_given_1, t_s0b.spam_p0_given_1)
+               and np.array_equal(t_s0a.spam_p1_given_0, t_s0b.spam_p1_given_0)
+               and np.array_equal(t_s0a.T1_s, t_s0b.T1_s)
+               and np.array_equal(t_s0a.delta_omega_rad_s, t_s0b.delta_omega_rad_s)
+               and np.all(t_s0a.spam_p0_given_1 == base01)),
+          f"{len(np.unique(t_s0a.spam_p0_given_1))} unique p0|1 across 10 qubits "
+          f"(downstream draws unshifted: T1 and dw arrays identical)")
+    F_SP = 0.30
+    t_sp = generate_device("superconducting", 10, seed=31, regime="nisq",
+                           spam_spread_frac=F_SP)
+    base10 = get_architecture_profile("superconducting").spam_p1_given_0
+    in_band = bool(
+        np.all(t_sp.spam_p0_given_1 >= (1 - F_SP) * base01 - 1e-12)
+        and np.all(t_sp.spam_p0_given_1 <= (1 + F_SP) * base01 + 1e-12)
+        and np.all(t_sp.spam_p1_given_0 >= (1 - F_SP) * base10 - 1e-12)
+        and np.all(t_sp.spam_p1_given_0 <= (1 + F_SP) * base10 + 1e-12))
+    in_range = bool(np.all((t_sp.spam_p0_given_1 >= 0) & (t_sp.spam_p0_given_1 <= 1))
+                    and np.all((t_sp.spam_p1_given_0 >= 0) & (t_sp.spam_p1_given_0 <= 1)))
+    check("N2. spam_spread_frac>0 gives n_qubits distinct values, in band and in [0,1]",
+          len(np.unique(t_sp.spam_p0_given_1)) == 10
+          and len(np.unique(t_sp.spam_p1_given_0)) == 10 and in_band and in_range,
+          f"{len(np.unique(t_sp.spam_p0_given_1))} unique p0|1 in "
+          f"[{t_sp.spam_p0_given_1.min():.5f}, {t_sp.spam_p0_given_1.max():.5f}] "
+          f"vs band [{(1 - F_SP) * base01:.5f}, {(1 + F_SP) * base01:.5f}]")
+    check("N3. rejects an out-of-range spam_spread_frac",
+          _raises(lambda: generate_device("superconducting", 2, seed=1,
+                                          spam_spread_frac=1.0)))
+
     # End-to-end chain into the frozen engine: DeviceTruth -> simulate_probe -> lindblad_inversion
     try:
         import importlib.util, pathlib, sys
@@ -2274,7 +2502,7 @@ def _run_validation_tests() -> None:
         spec.loader.exec_module(inv)
 
         truth_e2e = generate_device("superconducting", 1, seed=21, regime="ideal",
-                                    overrides={"T1_range_s": (150e-6, 150e-6), "T2_range_s": (90e-6, 90e-6)})
+                                    overrides={"T1_range_s": (150e-6, 150e-6), "T_phi_range_s": (90e-6, 90e-6)})
         profile = inv.BackendProfile.from_architecture("superconducting")
         circuits, meta = inv.build_probe_circuits(profile)
         result = simulate_probe(circuits, truth_e2e, shots=[300]*meta["n_t1"] + [1000]*meta["n_ramsey"]
