@@ -1,778 +1,364 @@
+"""3_benchmark.py -- parameter-recovery accuracy on NISQ simulated hardware.
+
+Per instance: 1c.generate_device(regime="nisq") -> hidden DeviceTruth with
+drift and coherent error mechanisms; 1c.generate_calibration_prior() -> what
+Canary may know; 1_inversion builds its own probe circuits from the prior;
+1c.simulate_probe() executes them on Aer at T_MEASURE_S;
+1_inversion.lindblad_inversion() recovers T1, T2, delta_omega, epsilon_sx.
+Ground truth is read only by the simulator and by the final comparison.
+
+true_value is 1c.evaluate_truth_at() at T_MEASURE_S, the exact parameters the
+simulator used, not the undrifted base values. Coherent over-rotation and
+coherent-fraction error are model mismatch and are not folded into the
+epsilon truth. Probes are single-qubit, so crosstalk never fires.
+
+SPAM is not benchmarked: the inversion consumes it as a known constant and
+never estimates it. delta_omega has no prior: CalibrationPrior deliberately
+omits it, so prior_value is NaN for that parameter.
+
+Output: one CSV, no figures.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
 import importlib.util
+import logging
 import multiprocessing as mp
 import pathlib
 import sys
-import csv
-import time
 import warnings
-import numpy as np
 from datetime import datetime, timezone
-from collections import defaultdict
+from typing import Any, Dict, List
+
+import numpy as np
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
-_spec = importlib.util.spec_from_file_location("inversion", SCRIPT_DIR / "1_inversion.py")
-inv = importlib.util.module_from_spec(_spec)
-sys.modules["inversion"] = inv
-_spec.loader.exec_module(inv)
 
-DATA_DIR = SCRIPT_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
 
-SEED               = 48
-N_INSTANCES        = 200
-N_BOOTSTRAP        = 2000
-R2_THRESHOLD       = 0.95
+def _load(name: str, filename: str):
+    spec = importlib.util.spec_from_file_location(name, SCRIPT_DIR / filename)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
-CANARY_SHOTS_T1     = 300
-CANARY_SHOTS_RAMSEY = 1000
-CANARY_SHOTS_GATE   = 500
-CANARY_SHOTS_ECHO   = 500
-CANARY_TOTAL        = (3 * CANARY_SHOTS_T1 +
-                       6 * CANARY_SHOTS_RAMSEY +
-                       3 * CANARY_SHOTS_GATE +
-                       3 * CANARY_SHOTS_ECHO)
 
-QE_N_DELAYS        = 15
-QE_RB_LENGTHS      = [1, 2, 4, 8, 16, 32, 64, 128]
-QE_RB_SAMPLES      = 5
-QE_SX_PER_CLIFFORD = 1.875
+inv = _load("inversion", "1_inversion.py")
+sim = _load("sim1c", "1c_simulation_models.py")
 
-QE_DW_PLAUSIBILITY_MULT  = 2.0
-QE_T1_PLAUSIBILITY_MULT  = 5.0
-QE_EPS_PLAUSIBILITY_MULT = 5.0
+REGIME = "nisq"
+T_CALIB_S = 0.0
+T_MEASURE_S = 0.0
+SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 1000, 500, 500
+ARCHITECTURES = ("superconducting", "trapped_ion")
+ARCH_SEED_OFFSET = {"superconducting": 0, "trapped_ion": 100_000}
+PARAMETERS = ("T1_s", "T2_s", "delta_omega", "epsilon_sx")
+CIRCUIT_PREFIXES = ("t1_", "ramsey_X_", "ramsey_Y_", "gate_rep_N", "echo_")
 
-QE_GUARD_REJECTS = defaultdict(lambda: defaultdict(int))
-QE_GUARD_TOTAL   = defaultdict(lambda: defaultdict(int))
-
-import os as _os
-
-_ALL_BUDGETS = [1_000, 2_500, 5_000, 9_900, 15_000, 25_000, 50_000]
-_budget_env  = _os.environ.get("BUDGET_SUBSET", "").strip()
-if _budget_env:
-    SHOT_BUDGETS = [int(b.strip()) for b in _budget_env.split(",") if b.strip()]
-else:
-    SHOT_BUDGETS = _ALL_BUDGETS
-
-ALL_ARCHITECTURES = ["superconducting", "trapped_ion"]
-ARCH = _os.environ.get("ARCH", "superconducting").strip()
-if ARCH not in ALL_ARCHITECTURES:
-    sys.exit(f"ARCH env var must be one of {ALL_ARCHITECTURES}, got {ARCH!r}")
-
-JOB_TAG = _os.environ.get("JOB_TAG", f"full{ARCH}")
-COMBINE = _os.environ.get("COMBINE", "0") == "1"
-
-TRUE_PARAM_RANGES = {
-    "superconducting": {
-        "T1_s": (80e-6,  400e-6),
-        "T2_s": (40e-6,  200e-6),
-        "eps":  (1e-4,   2e-3),
-    },
-    "trapped_ion": {
-        "T1_s": (100.0,  10000.0),
-        "T2_s": (0.1,    3.0),
-        "eps":  (1e-4,   2e-3),
-    },
-}
-
-PARAMS = [
-    ("T1",          0),
-    ("T2",          1),
-    ("delta_omega", 2),
-    ("epsilon_sx",  3),
+CSV_COLUMNS = [
+    "architecture", "instance_id", "seed", "parameter",
+    "true_value", "canary_value", "absolute_error", "relative_error",
+    "success", "fit_status", "sigma_canary", "chi2_dof", "chi2_dof_secondary",
+    "shots_total", "prior_value", "prior_absolute_error", "prior_relative_error",
+    "timestamp_utc",
 ]
-
-BENCH_COLS = [
-    "budget",  "architecture",  "parameter",  "method",
-    "r2",  "r2_lo",  "r2_hi",
-    "nrmse",  "n_valid",  "n_total",  "mean_time_s",
-]
-
-THRESH_COLS = ["architecture", "parameter", "method", "shots_to_R2_095", "shots_to_R2_099"]
+NAN = float("nan")
 
 
-def sample_instance(rng, arch_name):
-    ranges = TRUE_PARAM_RANGES[arch_name]
-    T1_lo, T1_hi = ranges["T1_s"]
-    T2_lo, T2_hi = ranges["T2_s"]
-    eps_lo, eps_hi = ranges["eps"]
-    if T1_hi / T1_lo > 10.0:
-        T1 = float(10 ** rng.uniform(np.log10(T1_lo), np.log10(T1_hi)))
-    else:
-        T1 = float(rng.uniform(T1_lo, T1_hi))
-    T_phi = float(rng.uniform(T2_lo, T2_hi))
-    T2    = min(1.0 / (1.0 / (2.0 * T1) + 1.0 / T_phi), 2.0 * T1)
-    eps   = float(10 ** rng.uniform(np.log10(eps_lo), np.log10(eps_hi)))
-    dw_max = inv.BackendProfile.from_architecture(arch_name).dw_max_rad_s
-    dw     = float(rng.choice([-1, 1]) * rng.uniform(0.2 * dw_max, dw_max))
-    return T1, T2, dw, eps
+def _abs_error(value: float, truth_value: float) -> float:
+    if not np.isfinite(value) or not np.isfinite(truth_value):
+        return NAN
+    return abs(value - truth_value)
 
 
-REALISTIC_NOISE = {
-    "superconducting": {
-        "sigma_T1_lognormal": 0.15,
-        "T2_reduction_max":   0.12,
-        "sigma_coherent_rad": 0.010,
-        "sigma_SPAM_frac":    0.05,
-    },
-    "trapped_ion": {
-        "sigma_T1_lognormal": 0.00,
-        "T2_reduction_max":   0.10,
-        "sigma_coherent_rad": 0.005,
-        "sigma_SPAM_frac":    0.03,
-    },
-}
+def _rel_error(value: float, truth_value: float) -> float:
+    if not np.isfinite(value) or not np.isfinite(truth_value) or truth_value == 0:
+        return NAN
+    return abs(value - truth_value) / abs(truth_value)
 
 
-def _perturb_instance(arch_name, T1, T2, eps, p0g1_nom, p1g0_nom, rng):
-    """Apply architecture-specific unmodeled hardware physics to one instance.
-
-    Returns effective (T1_eff, T2_eff, eps_eff, p0g1_eff, p1g0_eff) that
-    are passed to BOTH run_canary and run_qe, so both methods see identical
-    simulated hardware and neither is advantaged or disadvantaged.
-
-    Neither method knows the effective values — Canary uses
-    BackendProfile.from_architecture() (arch-typical prior) and QE uses
-    arch-typical delay grids. Both are equally blind to the drift.
-
-    Perturbations:
-      T1  : log-normal TLS fluctuator (Klimov et al. PRL 2018;
-                                        Carroll et al. npj QI 2022)
-      T2  : uniform fractional reduction from quasi-static 1/f dephasing
-            (same references; also micromotion for trapped-ion)
-      eps : coherent over-rotation delta ~ N(0, sigma_coh), adds
-            eps_coh = delta^2/4 to depolarising (Rol et al. PRL 2019,
-            first-order Magnus)
-      SPAM: calibration drift, multiplicative fractional noise
-            (Bultink et al. PRApplied 2018)
-
-    No dw perturbation: sigma_dw interacts with Canary's hard arctan2
-    bounds in a way that depends on the per-instance profile dw_max,
-    which varies with T2_prior and cannot be safely bounded by a fixed
-    sigma. Omitting it is the correct choice — dw recovery is already
-    characterised in the ideal Markovian scenario.
-    """
-    arch = inv.ARCH_DEFAULTS[arch_name]
-    cfg  = REALISTIC_NOISE[arch_name]
-    if cfg["sigma_T1_lognormal"] > 0.0:
-        T1_eff = float(np.clip(
-            T1 * np.exp(rng.normal(0.0, cfg["sigma_T1_lognormal"])),
-            arch["T1_min_s"], arch["T1_max_s"]))
-    else:
-        T1_eff = T1
-    T2_eff = float(np.clip(
-        T2 * (1.0 - rng.uniform(0.0, cfg["T2_reduction_max"])),
-        arch["T2_min_s"], min(2.0 * T1_eff, arch["T1_max_s"])))
-    delta_coh = rng.normal(0.0, cfg["sigma_coherent_rad"])
-    eps_eff   = float(np.clip(eps + delta_coh ** 2 / 4.0, 0.0, arch["eps_max"]))
-    p0g1_eff = float(np.clip(
-        p0g1_nom * (1.0 + rng.normal(0.0, cfg["sigma_SPAM_frac"])), 0.0, 0.30))
-    p1g0_eff = float(np.clip(
-        p1g0_nom * (1.0 + rng.normal(0.0, cfg["sigma_SPAM_frac"])), 0.0, 0.30))
-    return T1_eff, T2_eff, eps_eff, p0g1_eff, p1g0_eff
+def _row(architecture: str, instance_id: int, seed: int, parameter: str,
+         timestamp: str, **kw) -> Dict[str, Any]:
+    row = dict.fromkeys(CSV_COLUMNS, NAN)
+    row.update(architecture=architecture, instance_id=instance_id, seed=seed,
+               parameter=parameter, timestamp_utc=timestamp,
+               success=False, fit_status="", shots_total=0)
+    row.update(kw)
+    return row
 
 
-def _convert_native_to_unitary(qc, native_gate_names):
-    from qiskit.circuit.library import UnitaryGate
-    new_qc = qc.copy_empty_like()
-    for inst in qc.data:
-        op = inst.operation
-        if op.name in native_gate_names:
-            new_qc.append(UnitaryGate(op.to_matrix(), label=op.name),
-                          inst.qubits, inst.clbits)
-        else:
-            new_qc.append(inst)
-    return new_qc
-
-
-def _make_backend(qc, T1, T2, eps, p0g1, p1g0, gate_time_ns, dt_ns,
-                  noise_gate_names=None):
-    from qiskit_aer import AerSimulator
-    from qiskit_aer.noise import (NoiseModel, thermal_relaxation_error,
-                                  depolarizing_error, ReadoutError)
-    nm   = NoiseModel()
-    gate_time_s = gate_time_ns * 1e-9
-    sx_e = (thermal_relaxation_error(T1, T2, gate_time_s)
-            .compose(depolarizing_error(2.0 * eps, 1)))
-    names = noise_gate_names or ["sx", "x", "id", "rx", "u1", "p"]
-    nm.add_quantum_error(sx_e, names, [0])
-    seen = set()
-    for inst in qc.data:
-        if inst.operation.name == "delay":
-            ds = inv._delay_seconds(inst, dt_ns)
-            key = round(ds, 15)
-            if key not in seen and ds > 1e-12:
-                seen.add(key)
-                nm.add_quantum_error(
-                    thermal_relaxation_error(T1, T2, ds), ["delay"], [0])
-    nm.add_readout_error(
-        ReadoutError([[1 - p0g1, p0g1], [p1g0, 1 - p1g0]]), [0])
-    return AerSimulator(noise_model=nm)
-
-
-def _run_exp(exp_obj, T1, T2, eps, p0g1, p1g0, shots, gate_time_ns, dt_ns,
-             dw_true=0.0, inject_detuning=False, native_target=None,
-             native_gate_names=None):
-    from qiskit import transpile
-    exp_obj.set_run_options(shots=shots)
-    circuits = exp_obj.circuits()
-    exp_data = exp_obj._initialize_experiment_data()
-    for qc in circuits:
-        run_qc = (inv._inject_ramsey_detuning(qc, dw_true, dt_ns)
-                  if inject_detuning else qc)
-        noise_gate_names = None
-        if native_target is not None:
-            run_qc = transpile(run_qc, target=native_target, optimization_level=1)
-            run_qc = _convert_native_to_unitary(run_qc, native_gate_names)
-            noise_gate_names = ["unitary"]
-        b    = _make_backend(run_qc, T1, T2, eps, p0g1, p1g0, gate_time_ns,
-                             dt_ns, noise_gate_names=noise_gate_names)
-        tqc  = run_qc if native_target is not None else transpile(run_qc, b, optimization_level=0)
-        cnts = b.run(tqc, shots=shots).result().get_counts()
-        meta = {**dict(qc.metadata), "count_ops": [(((0,), g), c) for g, c in tqc.count_ops().items()]}
-        exp_data.add_data({"counts": cnts, "shots": shots, "metadata": meta})
-    exp_obj.analysis.run(exp_data).block_for_results()
-    return exp_data
-
-
-def _extract(exp_data, name):
+def run_one_instance(architecture: str, instance_id: int, seed: int) -> List[Dict[str, Any]]:
+    timestamp = datetime.now(timezone.utc).isoformat()
     try:
-        df  = exp_data.analysis_results(dataframe=True)
-        row = df[df["name"] == name]
-        if row.empty:
-            return float("nan"), float("nan")
-        val = row["value"].iloc[0]
-        nom = float(val.nominal_value)
-        std = float(val.std_dev)
-        std = std if np.isfinite(std) and std > 0 else float("nan")
-        return nom, std
-    except Exception:
-        return float("nan"), float("nan")
+        truth = sim.generate_device(architecture, n_qubits=1, seed=seed, regime=REGIME)
+        prior = sim.generate_calibration_prior(truth, qubit=0, t0_s=T_CALIB_S)
+
+        constants = dict(inv.ARCH_DEFAULTS[architecture])
+        constants.update(T1_s=prior.T1_prior_s, T2_s=prior.T2_prior_s,
+                         eps_typical=prior.epsilon_prior,
+                         p0_given_1=prior.spam_p0_given_1_prior,
+                         p1_given_0=prior.spam_p1_given_0_prior)
+        profile = inv.BackendProfile(
+            architecture=architecture,
+            T1_prior_s=prior.T1_prior_s,
+            T2_prior_s=prior.T2_prior_s,
+            dt_ns=inv.ARCH_DEFAULTS[architecture]["dt_ns"],
+            backend_name=f"nisq_benchmark_sim::{architecture}",
+            custom_arch=constants,
+            prior_confidence="live")
+
+        circuits, meta = inv.build_probe_circuits(profile)
+        for qc in circuits:
+            if not any(qc.name.startswith(p) for p in CIRCUIT_PREFIXES):
+                raise RuntimeError(f"unexpected circuit name {qc.name!r}")
+
+        shots_list = ([SHOTS_T1] * meta["n_t1"] + [SHOTS_RAMSEY] * meta["n_ramsey"]
+                      + [SHOTS_GATE] * meta["n_gate"] + [SHOTS_ECHO] * meta["n_echo"])
+        if len(shots_list) != len(circuits):
+            raise RuntimeError(f"{len(shots_list)} shot entries != {len(circuits)} circuits")
+
+        sim_result = sim.simulate_probe(circuits, truth, shots=shots_list,
+                                        t_s=T_MEASURE_S, dt_ns=profile.dt_ns)
+        result = inv.lindblad_inversion(
+            sim_result.counts_list, meta, profile,
+            shots_t1=SHOTS_T1, shots_ramsey=SHOTS_RAMSEY, shots_gate=SHOTS_GATE,
+            shots_echo=SHOTS_ECHO, qubit_id=0, timestamp=timestamp)
+
+        tv_now = sim.evaluate_truth_at(truth, 0, T_MEASURE_S)
+        true_values = {"T1_s": float(tv_now["T1_s"]),
+                       "T2_s": float(tv_now["T2_s"]),
+                       "delta_omega": abs(float(tv_now["delta_omega_rad_s"])),
+                       "epsilon_sx": float(tv_now["epsilon_gate"])}
+        canary = {"T1_s": float(result.T1_s),
+                  "T2_s": float(result.T2_s),
+                  "delta_omega": abs(float(result.delta_omega)),
+                  "epsilon_sx": float(result.epsilon_sx)}
+        sigmas = {"T1_s": float(result.T1_sigma_s),
+                  "T2_s": float(result.T2_sigma_s),
+                  "delta_omega": float(result.delta_omega_sigma),
+                  "epsilon_sx": float(result.epsilon_sx_sigma)}
+        chi2 = {"T1_s": float(result.t1_chi2_dof),
+                "T2_s": float(result.ramsey_chi2_dof),
+                "delta_omega": float(result.ramsey_chi2_dof),
+                "epsilon_sx": float(result.gate_chi2_dof)}
+        chi2_secondary = {"T2_s": float(result.echo_chi2_dof)}
+        priors = {"T1_s": float(prior.T1_prior_s),
+                  "T2_s": float(prior.T2_prior_s),
+                  "delta_omega": NAN,
+                  "epsilon_sx": float(prior.epsilon_prior)}
+
+        rows = []
+        for param in PARAMETERS:
+            tv, cv, sg, pv = true_values[param], canary[param], sigmas[param], priors[param]
+            converged = bool(np.isfinite(cv) and np.isfinite(sg))
+            rows.append(_row(
+                architecture, instance_id, seed, param, timestamp,
+                true_value=tv, canary_value=cv,
+                absolute_error=_abs_error(cv, tv), relative_error=_rel_error(cv, tv),
+                success=converged,
+                fit_status="ok" if converged else "non_convergent_infinite_sigma",
+                sigma_canary=sg, chi2_dof=chi2[param],
+                chi2_dof_secondary=chi2_secondary.get(param, NAN),
+                shots_total=sum(shots_list), prior_value=pv,
+                prior_absolute_error=_abs_error(pv, tv),
+                prior_relative_error=_rel_error(pv, tv)))
+        return rows
+
+    except Exception as exc:
+        status = f"exception:{type(exc).__name__}:{exc}"
+        return [_row(architecture, instance_id, seed, p, timestamp, fit_status=status)
+                for p in PARAMETERS]
 
 
-def _ionq_native_target(gate_time_ns: float):
-    try:
-        from qiskit.transpiler import Target, InstructionProperties
-        from qiskit.circuit import Delay, Measure, Parameter
-        from qiskit_ionq import GPIGate, GPI2Gate, add_equivalences
-    except Exception:
-        return None
-    add_equivalences()  # idempotent; registers IonQ gate equivalences globally
-    target = Target(num_qubits=1)
-    theta = Parameter("theta")
-    dur = gate_time_ns * 1e-9
-    target.add_instruction(GPIGate(theta),  {(0,): InstructionProperties(duration=dur)})
-    target.add_instruction(GPI2Gate(theta), {(0,): InstructionProperties(duration=dur)})
-    target.add_instruction(Delay(Parameter("t")), {(0,): None})
-    target.add_instruction(Measure(), {(0,): InstructionProperties(duration=dur)})
-    return target
-
-
-def _native_gates_per_clifford(rb_circuits, native_target):
-    from qiskit import transpile
-    from qiskit.transpiler.exceptions import TranspilerError
-    weighted_gates = 0.0
-    weighted_cliffords = 0.0
-    for qc in rb_circuits:
-        n_cliff = qc.metadata.get("xval")
-        if not n_cliff:
-            continue
-        try:
-            tqc = transpile(qc, target=native_target, optimization_level=1)
-        except TranspilerError:
-            continue
-        counts = tqc.count_ops()
-        n_native = counts.get("gpi", 0) + counts.get("gpi2", 0)
-        weighted_gates      += n_native
-        weighted_cliffords  += n_cliff
-    if weighted_cliffords <= 0:
-        return float("nan")
-    return weighted_gates / weighted_cliffords
-
-
-def _qe_backend(arch_name: str = "superconducting"):
-    try:
-        from qiskit.providers.fake_provider import GenericBackendV2
-        return GenericBackendV2(
-            num_qubits=1,
-            basis_gates=["sx", "x", "rz", "measure", "delay"],
-            seed=0)
-    except Exception:
-        from qiskit_ibm_runtime.fake_provider import FakeNairobiV2
-        return FakeNairobiV2()
-
-
-def run_canary(T1_true, T2_true, dw_true, eps_true, seed, budget, arch_name,
-               p0g1_eff=None, p1g0_eff=None):
-    arch    = inv.ARCH_DEFAULTS[arch_name]
-    profile = inv.BackendProfile.from_architecture(arch_name)
-    p0g1    = p0g1_eff if p0g1_eff is not None else arch["p0_given_1"]
-    p1g0    = p1g0_eff if p1g0_eff is not None else arch["p1_given_0"]
-    circuits, meta = inv.build_probe_circuits(profile)
-    scale   = budget / CANARY_TOTAL
-    sh_t1   = max(10, int(round(CANARY_SHOTS_T1     * scale)))
-    sh_ram  = max(10, int(round(CANARY_SHOTS_RAMSEY  * scale)))
-    sh_gate = max(10, int(round(CANARY_SHOTS_GATE    * scale)))
-    sh_echo = max(10, int(round(CANARY_SHOTS_ECHO    * scale)))
-    try:
-        counts_list = inv.run_probe_circuits_aer(
-            circuits, meta,
-            T1_true, T2_true, eps_true,
-            p0g1, p1g0,
-            profile.dt_ns,
-            sh_t1, sh_ram, sh_gate, sh_echo,
-            dw_s=dw_true,
-        )
-        r = inv.lindblad_inversion(
-            counts_list,
-            meta, profile,
-            shots_t1=sh_t1, shots_ramsey=sh_ram,
-            shots_gate=sh_gate, shots_echo=sh_echo,
-            qubit_id=0,
-            timestamp=datetime.now(timezone.utc).isoformat())
-        return r.T1_s, r.T2_s, abs(r.delta_omega), r.epsilon_sx
-    except Exception:
-        return float("nan"), float("nan"), float("nan"), float("nan")
-
-
-def run_qe(T1_true, T2_true, dw_true, eps_true, budget, seed, arch_name,
-           p0g1_eff=None, p1g0_eff=None, profile_dw_max=None):
-    from qiskit_experiments.library import (T1 as QE_T1, T2Ramsey,
-                                            T2Hahn, StandardRB)
-    arch         = inv.ARCH_DEFAULTS[arch_name]
-    p0g1         = p0g1_eff if p0g1_eff is not None else arch["p0_given_1"]
-    p1g0         = p1g0_eff if p1g0_eff is not None else arch["p1_given_0"]
-    T1_pr        = arch["T1_s"]
-    T2_pr        = arch["T2_s"]
-    eps_max      = arch["eps_max"]
-    gate_time_ns = arch["gate_time_ns"]
-    dw_max = (profile_dw_max if profile_dw_max is not None
-              else inv.BackendProfile.from_architecture(arch_name).dw_max_rad_s)
-    budget_per_exp = budget // 4
-    n_rb_circs     = len(QE_RB_LENGTHS) * QE_RB_SAMPLES
-    shots_t1  = max(10, budget_per_exp // QE_N_DELAYS)
-    shots_t2r = max(10, budget_per_exp // QE_N_DELAYS)
-    shots_t2h = max(10, budget_per_exp // QE_N_DELAYS)
-    shots_rb  = max(10, budget_per_exp // n_rb_circs)
-    delays_t1 = np.linspace(1e-6, 5.0 * T1_pr, QE_N_DELAYS).tolist()
-    delays_t2 = np.linspace(1e-6, 3.0 * T2_pr, QE_N_DELAYS).tolist()
-    backend = _qe_backend(arch_name)
-    dt_ns = (backend.dt * 1e9) if getattr(backend, "dt", None) else 0.2222
-
-    # Native Execution
-    native_target     = None
-    native_gate_names = None
-    if arch_name == "trapped_ion":
-        native_target = _ionq_native_target(gate_time_ns)
-        if native_target is not None:
-            native_gate_names = ["gpi", "gpi2"]
-
-    T1_qe   = float("nan");  T1_std  = float("nan")
-    T2r_qe  = float("nan");  T2r_std = float("nan")
-    T2h_qe  = float("nan");  T2h_std = float("nan")
-    dw_qe   = float("nan")
-    eps_qe  = float("nan")
-    guard_flags = {"T1": (False, False), "T2": (False, False),
-                   "dw": (False, False), "eps": (False, False)}
-    T1_true_max = TRUE_PARAM_RANGES[arch_name]["T1_s"][1]
-    T1_guard_threshold = QE_T1_PLAUSIBILITY_MULT * T1_true_max
-
-    try:
-        data          = _run_exp(QE_T1([0], delays=delays_t1, backend=backend),
-                                 T1_true, T2_true, eps_true, p0g1, p1g0, shots_t1,
-                                 gate_time_ns, dt_ns,
-                                 native_target=native_target,
-                                 native_gate_names=native_gate_names)
-        T1_candidate, T1_std = _extract(data, "T1")
-        if np.isfinite(T1_candidate):
-            plausible = (0.0 < T1_candidate <= T1_guard_threshold)
-            guard_flags["T1"] = (True, not plausible)
-            if plausible:
-                T1_qe = T1_candidate
-    except Exception:
-        pass
-
-    try:
-        osc_freq_hz      = arch["dw_typical_khz"] * 1e3
-        data             = _run_exp(
-            T2Ramsey([0], delays=delays_t2, osc_freq=osc_freq_hz, backend=backend),
-            T1_true, T2_true, eps_true, p0g1, p1g0, shots_t2r,
-            gate_time_ns, dt_ns,
-            dw_true=dw_true, inject_detuning=True,
-            native_target=native_target, native_gate_names=native_gate_names)
-        T2r_qe, T2r_std  = _extract(data, "T2star")
-        freq_hz, _        = _extract(data, "Frequency")
-        if np.isfinite(freq_hz):
-            dw_candidate = abs(freq_hz - osc_freq_hz) * 2.0 * np.pi
-            plausible = dw_candidate <= QE_DW_PLAUSIBILITY_MULT * dw_max
-            guard_flags["dw"] = (True, not plausible)
-            if plausible:
-                dw_qe = dw_candidate
-    except Exception:
-        pass
-
-    try:
-        T2e_true         = min(T2_true, 2.0 * T1_true)
-        data             = _run_exp(
-            T2Hahn([0], delays=delays_t2, backend=backend),
-            T1_true, T2e_true, eps_true, p0g1, p1g0, shots_t2h,
-            gate_time_ns, dt_ns,
-            native_target=native_target, native_gate_names=native_gate_names)
-        T2h_qe, T2h_std  = _extract(data, "T2")
-    except Exception:
-        pass
-
-    valid = [(v, s) for v, s in [(T2r_qe, T2r_std), (T2h_qe, T2h_std)]
-             if np.isfinite(v) and np.isfinite(s) and s > 0]
-    if len(valid) == 2:
-        w0 = 1.0 / valid[0][1] ** 2
-        w1 = 1.0 / valid[1][1] ** 2
-        T2_candidate = (w0 * valid[0][0] + w1 * valid[1][0]) / (w0 + w1)
-    elif len(valid) == 1:
-        T2_candidate = valid[0][0]
-    elif np.isfinite(T2r_qe):
-        T2_candidate = T2r_qe
-    elif np.isfinite(T2h_qe):
-        T2_candidate = T2h_qe
-    else:
-        T2_candidate = float("nan")
-
-    T2_combined = float("nan")
-    if np.isfinite(T2_candidate):
-        plausible = (0.0 < T2_candidate <= T1_guard_threshold)
-        guard_flags["T2"] = (True, not plausible)
-        if plausible:
-            T2_combined = T2_candidate
-    if np.isfinite(T1_qe) and np.isfinite(T2_combined):
-        T2_combined = min(T2_combined, 2.0 * T1_qe)
-
-    try:
-        exp_rb = StandardRB([0], lengths=QE_RB_LENGTHS,
-                            num_samples=QE_RB_SAMPLES,
-                            seed=int(seed), backend=backend)
-        exp_rb.analysis.set_options(gate_error_ratio=False)
-        data       = _run_exp(exp_rb, T1_true, T2_true, eps_true,
-                              p0g1, p1g0, shots_rb, gate_time_ns, dt_ns,
-                              native_target=native_target,
-                              native_gate_names=native_gate_names)
-        epc, _     = _extract(data, "EPC")
-        if np.isfinite(epc) and epc > 0:
-            gates_per_clifford = QE_SX_PER_CLIFFORD
-            if arch_name == "trapped_ion":
-                native_target = _ionq_native_target(gate_time_ns)
-                if native_target is not None:
-                    measured = _native_gates_per_clifford(
-                        exp_rb.circuits(), native_target)
-                    if np.isfinite(measured) and measured > 0:
-                        gates_per_clifford = measured
-            eps_candidate = epc / gates_per_clifford
-            eps_true_max = TRUE_PARAM_RANGES[arch_name]["eps"][1]
-            eps_guard_threshold = QE_EPS_PLAUSIBILITY_MULT * eps_true_max
-            plausible = (0.0 <= eps_candidate <= eps_guard_threshold)
-            guard_flags["eps"] = (True, not plausible)
-            if plausible:
-                eps_qe = float(np.clip(eps_candidate, 0.0, eps_max))
-    except Exception:
-        pass
-
-    return float(T1_qe), float(T2_combined), float(dw_qe), float(eps_qe), guard_flags
-
-
-def _r2_point(true_arr, rec_arr):
-    t = np.asarray(true_arr, float)
-    r = np.asarray(rec_arr,  float)
-    mask = np.isfinite(r) & np.isfinite(t)
-    if mask.sum() < 2:
-        return float("nan")
-    t, r   = t[mask], r[mask]
-    ss_res = np.sum((r - t) ** 2)
-    ss_tot = np.sum((t - t.mean()) ** 2)
-    return float(1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
-
-
-def bootstrap_r2(true_vals, rec_vals, n_boot=N_BOOTSTRAP, rng_seed=0):
-    t = np.asarray(true_vals, float)
-    r = np.asarray(rec_vals,  float)
-    mask = np.isfinite(r) & np.isfinite(t)
-    if mask.sum() < 2:
-        return float("nan"), float("nan"), float("nan")
-    t, r   = t[mask], r[mask]
-    n      = len(t)
-    ss_res = np.sum((r - t) ** 2)
-    ss_tot = np.sum((t - t.mean()) ** 2)
-    r2_pt  = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
-    rng    = np.random.default_rng(rng_seed)
-    boot   = []
-    for _ in range(n_boot):
-        idx  = rng.integers(0, n, size=n)
-        ss_r = np.sum((r[idx] - t[idx]) ** 2)
-        ss_t = np.sum((t[idx] - t[idx].mean()) ** 2)
-        boot.append(float(1.0 - ss_r / ss_t) if ss_t > 0 else 0.0)
-    b = np.array(boot)
-    return r2_pt, float(np.percentile(b, 2.5)), float(np.percentile(b, 97.5))
-
-
-def nrmse(true_vals, rec_vals):
-    t = np.asarray(true_vals, float)
-    r = np.asarray(rec_vals,  float)
-    mask = np.isfinite(r) & np.isfinite(t)
-    if mask.sum() < 2:
-        return float("nan")
-    t, r  = t[mask], r[mask]
-    rmse  = float(np.sqrt(np.mean((r - t) ** 2)))
-    span  = float(t.max() - t.min())
-    return rmse / span if span > 0 else float("nan")
-
-
-def _worker_canary(args):
+def _worker(job) -> List[Dict[str, Any]]:
     warnings.filterwarnings("ignore")
-    idx, (T1, T2, dw, eps), seed, budget, arch_name, p0g1_eff, p1g0_eff = args
-    t0  = time.perf_counter()
-    res = run_canary(T1, T2, dw, eps, seed, budget, arch_name, p0g1_eff, p1g0_eff)
-    return idx, res, time.perf_counter() - t0
+    logging.getLogger("qiskit_aer.noise.noise_model").setLevel(logging.ERROR)
+    return run_one_instance(*job)
 
 
-def _worker_qe(args):
-    warnings.filterwarnings("ignore")
-    idx, (T1, T2, dw, eps), budget, seed, arch_name, p0g1_eff, p1g0_eff, profile_dw_max = args
-    t0  = time.perf_counter()
-    res = run_qe(T1, T2, dw, eps, budget, seed, arch_name, p0g1_eff, p1g0_eff, profile_dw_max)
-    return idx, res, time.perf_counter() - t0
+def run_architecture(architecture: str, n_instances: int, seed_offset: int,
+                     n_workers: int) -> List[Dict[str, Any]]:
+    jobs = [(architecture, i, seed_offset + i) for i in range(n_instances)]
+    print(f"[nisq_benchmark] {architecture}: {n_instances} instances, seeds "
+          f"{seed_offset}..{seed_offset + n_instances - 1}, {n_workers} workers", flush=True)
 
-
-def run_sweep(n_workers):
-    rng_master  = np.random.default_rng(SEED)
-    instances   = [sample_instance(rng_master, ARCH) for _ in range(N_INSTANCES)]
-    rng_perturb = np.random.default_rng(SEED + 999)
-    arch_def    = inv.ARCH_DEFAULTS[ARCH]
-    perturbed   = [
-        _perturb_instance(
-            ARCH,
-            inst[0], inst[1], inst[3],
-            arch_def["p0_given_1"], arch_def["p1_given_0"],
-            rng_perturb)
-        for inst in instances
-    ]
-    profile_dw_max = inv.BackendProfile.from_architecture(ARCH).dw_max_rad_s
-    print(f"  profile_dw_max (dynamic, used for QE's dw guard) = "
-          f"{profile_dw_max:.4f} rad/s", flush=True)
-    rows = []
-    print(f"  ARCH={ARCH}  N={N_INSTANCES}  budgets={SHOT_BUDGETS}  workers={n_workers}", flush=True)
-    print(f"  Canary={CANARY_TOTAL} shots | QE=budget/4 per exp | osc_freq=arch-typical | RB lengths={QE_RB_LENGTHS}", flush=True)
-    print(f"  Realistic noise: TLS T1 drift, 1/f T2 reduction, coherent over-rotation, SPAM drift", flush=True)
-    print(f"  Perturbations applied once per instance; identical effective params fed to both methods.", flush=True)
-
-    for bi, budget in enumerate(SHOT_BUDGETS):
-        print(f"\n[{bi+1}/{len(SHOT_BUDGETS)}] budget={budget:,}  arch={ARCH}", flush=True)
-        c_seed_base = SEED * 10_000 + bi * 1_000
-        q_seed_base = c_seed_base + 500
-        c_args = [
-            (i,
-             (perturbed[i][0], perturbed[i][1], instances[i][2], perturbed[i][2]),
-             c_seed_base + i, budget, ARCH,
-             perturbed[i][3], perturbed[i][4])
-            for i in range(N_INSTANCES)
-        ]
-        q_args = [
-            (i,
-             (perturbed[i][0], perturbed[i][1], instances[i][2], perturbed[i][2]),
-             budget, q_seed_base + i, ARCH,
-             perturbed[i][3], perturbed[i][4], profile_dw_max)
-            for i in range(N_INSTANCES)
-        ]
-        c_res  = [None] * N_INSTANCES;  c_time = [float("nan")] * N_INSTANCES
-        q_res  = [None] * N_INSTANCES;  q_time = [float("nan")] * N_INSTANCES
+    results: List[Any] = [None] * n_instances
+    if n_workers <= 1:
+        for idx, job in enumerate(jobs):
+            results[idx] = _worker(job)
+    else:
         with mp.Pool(n_workers) as pool:
-            for idx, res, t in pool.imap_unordered(_worker_canary, c_args, chunksize=4):
-                c_res[idx]  = res;  c_time[idx] = t
-        with mp.Pool(n_workers) as pool:
-            for idx, res, t in pool.imap_unordered(_worker_qe, q_args, chunksize=4):
-                q_res[idx]  = res;  q_time[idx] = t
-
-        for res in q_res:
-            gf = res[4]
-            for pname, (had_candidate, rejected) in gf.items():
-                if had_candidate:
-                    QE_GUARD_TOTAL[ARCH][pname]   += 1
-                    QE_GUARD_REJECTS[ARCH][pname] += int(rejected)
-
-        true = {
-            "T1":          [perturbed[i][0] for i in range(N_INSTANCES)],
-            "T2":          [perturbed[i][1] for i in range(N_INSTANCES)],
-            "delta_omega": [abs(instances[i][2]) for i in range(N_INSTANCES)],
-            "epsilon_sx":  [perturbed[i][2] for i in range(N_INSTANCES)],
-        }
-        for pname, pidx in PARAMS:
-            tv = true[pname]
-            cv = [r[pidx] for r in c_res]
-            qv = [r[pidx] for r in q_res]
-            for method, vals, times in [
-                    ("Canary",            cv, c_time),
-                    ("QiskitExperiments", qv, q_time)]:
-                r2pt, r2lo, r2hi = bootstrap_r2(tv, vals, rng_seed=bi * 100 + pidx)
-                nr      = nrmse(tv, vals)
-                n_valid = int(sum(1 for v in vals if np.isfinite(v)))
-                mean_t  = float(np.nanmean(times))
-                rows.append({
-                    "budget":      budget,
-                    "architecture": ARCH,
-                    "parameter":   pname,
-                    "method":      method,
-                    "r2":          r2pt,
-                    "r2_lo":       r2lo,
-                    "r2_hi":       r2hi,
-                    "nrmse":       nr,
-                    "n_valid":     n_valid,
-                    "n_total":     N_INSTANCES,
-                    "mean_time_s": mean_t,
-                })
-            rc = _r2_point(tv, cv); nc = sum(1 for v in cv if np.isfinite(v))
-            rq = _r2_point(tv, qv); nq = sum(1 for v in qv if np.isfinite(v))
-            print(f"  {pname:12s}: Canary R2={rc:+.4f} ({nc}/{N_INSTANCES})"
-                  f"  QE R2={rq:+.4f} ({nq}/{N_INSTANCES})", flush=True)
-
-        save_benchmark_csv(rows)
-        print(f"  [checkpoint] saved after budget={budget:,} "
-              f"({bi+1}/{len(SHOT_BUDGETS)} budgets complete)", flush=True)
-
-    print(f"\n  QE plausibility-guard summary for {ARCH} "
-          f"(rejected/had-candidate, across all budgets):", flush=True)
-    for pname in ("T1", "T2", "dw", "eps"):
-        total    = QE_GUARD_TOTAL[ARCH].get(pname, 0)
-        rejected = QE_GUARD_REJECTS[ARCH].get(pname, 0)
-        pct      = (100.0 * rejected / total) if total else 0.0
-        flag     = "  <-- check this" if pct > 50.0 else ""
-        print(f"    {pname:4s}: {rejected:5d}/{total:5d} rejected "
-              f"({pct:5.1f}%){flag}", flush=True)
-    return rows
+            for idx, rows in enumerate(pool.imap(_worker, jobs, chunksize=1)):
+                results[idx] = rows
+    if any(r is None for r in results):
+        raise RuntimeError("a worker returned no rows; refusing to emit a partial CSV")
+    return [row for rows in results for row in rows]
 
 
-def save_benchmark_csv(rows):
-    path = DATA_DIR / f"qe_benchmark_{JOB_TAG}.csv"
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=BENCH_COLS)
-        w.writeheader()
-        w.writerows(rows)
-    print(f"\nSaved: {path}  ({len(rows)} rows)", flush=True)
-    return path
-
-
-def save_threshold_csv(rows):
-    groups = defaultdict(list)
+def validate_rows(rows: List[Dict[str, Any]], n_instances: int,
+                  architectures: List[str]) -> List[str]:
+    problems: List[str] = []
+    by_arch: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
-        groups[(row["architecture"], row["parameter"], row["method"])].append(
-            (row["budget"], row["r2"]))
-    thresh_rows = []
-    max_b = max(SHOT_BUDGETS)
-    for (arch_name, pname, method), pairs in sorted(groups.items()):
-        pairs.sort()
-        s95 = next((b for b, r2 in pairs if np.isfinite(r2) and r2 >= 0.95), None)
-        s99 = next((b for b, r2 in pairs if np.isfinite(r2) and r2 >= 0.99), None)
-        thresh_rows.append({
-            "architecture":    arch_name,
-            "parameter":       pname,
-            "method":          method,
-            "shots_to_R2_095": s95 if s95 else f"> {max_b:,}",
-            "shots_to_R2_099": s99 if s99 else f"> {max_b:,}",
-        })
-    path = DATA_DIR / "qe_threshold.csv"
+        by_arch.setdefault(row["architecture"], []).append(row)
+
+    if sorted(by_arch) != sorted(architectures):
+        problems.append(f"architectures {sorted(by_arch)} != {sorted(architectures)}")
+
+    for architecture, arch_rows in sorted(by_arch.items()):
+        ids = sorted({r["instance_id"] for r in arch_rows})
+        if ids != list(range(n_instances)):
+            problems.append(f"{architecture}: instance_ids are not contiguous "
+                            f"0..{n_instances - 1} (a gap means instances were dropped)")
+        if len(arch_rows) != n_instances * len(PARAMETERS):
+            problems.append(f"{architecture}: {len(arch_rows)} rows, expected "
+                            f"{n_instances * len(PARAMETERS)}")
+        per_instance: Dict[int, List[str]] = {}
+        for r in arch_rows:
+            per_instance.setdefault(r["instance_id"], []).append(r["parameter"])
+        if any(sorted(p) != sorted(PARAMETERS) for p in per_instance.values()):
+            problems.append(f"{architecture}: an instance does not carry exactly {PARAMETERS}")
+        if len({r["seed"] for r in arch_rows}) != n_instances:
+            problems.append(f"{architecture}: seeds are not unique per instance")
+        budgets = {r["shots_total"] for r in arch_rows if r["shots_total"]}
+        if len(budgets) > 1:
+            problems.append(f"{architecture}: unequal shot budgets {sorted(budgets)}")
+        if any(not str(r["fit_status"]).strip() for r in arch_rows):
+            problems.append(f"{architecture}: a row has a blank fit_status")
+
+    keys = [(r["architecture"], r["instance_id"], r["parameter"]) for r in rows]
+    if len(set(keys)) != len(keys):
+        problems.append("duplicate (architecture, instance_id, parameter) rows")
+    if len({(r["architecture"], r["seed"]) for r in rows}) != len(architectures) * n_instances:
+        problems.append("architecture/seed pairs are not unique")
+    return problems
+
+
+def write_csv(rows: List[Dict[str, Any]], path: pathlib.Path) -> None:
+    rank = {p: i for i, p in enumerate(PARAMETERS)}
+    ordered = sorted(rows, key=lambda r: (r["architecture"], r["instance_id"],
+                                          rank.get(r["parameter"], 99)))
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=THRESH_COLS)
-        w.writeheader()
-        w.writerows(thresh_rows)
-    print(f"Saved: {path}", flush=True)
-    by_arch_param = defaultdict(dict)
-    for r in thresh_rows:
-        by_arch_param[(r["architecture"], r["parameter"])][r["method"]] = r["shots_to_R2_095"]
-    print(f"\n  Shots to R2>=0.95:")
-    print(f"  {'Arch':16s}  {'Parameter':14s}  {'Canary':>10s}  {'QE':>10s}")
-    print(f"  {'-'*56}")
-    for (arch_name, pname), d in sorted(by_arch_param.items()):
-        sc = d.get("Canary", "-")
-        sq = d.get("QiskitExperiments", "-")
-        print(f"  {arch_name:16s}  {pname:14s}  {str(sc):>10s}  {str(sq):>10s}")
-    return path
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(ordered)
+    print(f"[nisq_benchmark] wrote {len(ordered)} rows -> {path}", flush=True)
 
 
-def _load_benchmark_rows(path):
+def summarize(rows: List[Dict[str, Any]]) -> None:
+    print("\n[nisq_benchmark] median relative error, all instances, nothing removed")
+    by_arch: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        by_arch.setdefault(r["architecture"], []).append(r)
+    for architecture, arch_rows in sorted(by_arch.items()):
+        n_inst = len({r["instance_id"] for r in arch_rows})
+        n_bad = len({r["instance_id"] for r in arch_rows if not r["success"]})
+        print(f"  {architecture} ({n_inst} instances, {n_bad} with a failed parameter)")
+        for param in PARAMETERS:
+            vals = np.array([r["relative_error"] for r in arch_rows
+                             if r["parameter"] == param], dtype=float)
+            finite = vals[np.isfinite(vals)]
+            med = float(np.median(finite)) * 100 if len(finite) else NAN
+            print(f"     {param:12s} {med:8.2f}%   ({len(finite)}/{len(vals)} finite)")
+
+
+def _read_csv(path: pathlib.Path) -> List[Dict[str, Any]]:
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        if reader.fieldnames != CSV_COLUMNS:
+            raise ValueError(f"{path.name}: columns {reader.fieldnames} != {CSV_COLUMNS}")
         rows = []
-        for r in reader:
-            r["budget"]      = int(r["budget"])
-            r["r2"]          = float(r["r2"])
-            r["r2_lo"]       = float(r["r2_lo"])
-            r["r2_hi"]       = float(r["r2_hi"])
-            r["nrmse"]       = float(r["nrmse"])
-            r["n_valid"]     = int(r["n_valid"])
-            r["n_total"]     = int(r["n_total"])
-            r["mean_time_s"] = float(r["mean_time_s"])
-            rows.append(r)
+        for raw in reader:
+            row = dict(raw)
+            for key in ("instance_id", "seed", "shots_total"):
+                row[key] = int(row[key])
+            row["success"] = str(row["success"]).strip().lower() == "true"
+            for key in ("true_value", "canary_value", "absolute_error", "relative_error",
+                        "sigma_canary", "chi2_dof", "chi2_dof_secondary",
+                        "prior_value", "prior_absolute_error", "prior_relative_error"):
+                row[key] = float(row[key]) if row[key] not in ("", None) else NAN
+            rows.append(row)
     return rows
 
 
-def combine_data():
-    """Merge all per-job qe_benchmark_{JOB_TAG}.csv files (downloaded job
-    artifacts) into the final qe_benchmark.csv, then recompute
-    qe_threshold.csv from the complete dataset. Triggered by COMBINE=1
-    in the merge job of benchmark_matrix.yml."""
-    paths = sorted(DATA_DIR.glob("qe_benchmark_*.csv"))
-    if not paths:
-        sys.exit(f"ERROR: no qe_benchmark_*.csv files found in {DATA_DIR}.  "
-                 f"Download and extract all job artifacts first.")
+def combine(inputs: List[pathlib.Path], out: pathlib.Path, n_instances: int) -> None:
+    if not inputs:
+        sys.exit("--combine requires at least one --input")
+    rows: List[Dict[str, Any]] = []
+    for path in inputs:
+        if not path.exists():
+            sys.exit(f"missing input CSV: {path}")
+        rows.extend(_read_csv(path))
 
-    print(f"Merging {len(paths)} file(s):")
-    all_rows = []
-    seen = set()
-    for path in paths:
-        rows = _load_benchmark_rows(path)
-        combos_here = sorted(set((r["architecture"], r["budget"]) for r in rows))
-        overlap = seen.intersection(combos_here)
-        if overlap:
-            print(f"  WARNING: (arch,budget) combos {overlap} already seen — "
-                  f"duplicate rows will be kept, check for overlapping jobs.")
-        seen.update(combos_here)
-        print(f"  {path.name}: {combos_here}  ({len(rows)} rows)")
-        all_rows.extend(rows)
+    architectures = sorted({r["architecture"] for r in rows})
+    problems = validate_rows(rows, n_instances, architectures)
+    expected = len(architectures) * n_instances * len(PARAMETERS)
+    if len(rows) != expected:
+        problems.append(f"aggregate row count {len(rows)} != {expected}")
 
-    all_rows.sort(key=lambda r: (r["architecture"], r["budget"], r["parameter"], r["method"]))
-    print(f"\nTotal merged rows: {len(all_rows)}")
-    expected = {(a, b) for a in ALL_ARCHITECTURES for b in _ALL_BUDGETS}
-    missing_combos = expected - seen
-    print(f"Architectures present: {sorted(set(a for a, b in seen))}")
-    print(f"Budgets present: {sorted(set(b for a, b in seen))}")
-    if missing_combos:
-        print(f"WARNING: missing (architecture, budget) combinations: "
-              f"{sorted(missing_combos)}")
-    else:
-        print("All expected (architecture, budget) combinations present: OK")
+    write_csv(rows, out)
+    summarize(rows)
+    _finish(problems, len(rows))
 
-    merged_path = DATA_DIR / "qe_benchmark.csv"
-    with open(merged_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=BENCH_COLS)
-        w.writeheader()
-        w.writerows(all_rows)
-    print(f"\nSaved merged CSV: {merged_path}")
 
-    save_threshold_csv(all_rows)
+def _finish(problems: List[str], n_rows: int) -> None:
+    if problems:
+        print("\n[nisq_benchmark] VALIDATION FAILED:", flush=True)
+        for p in problems:
+            print(f"  - {p}", flush=True)
+        sys.exit(1)
+    print(f"\n[nisq_benchmark] validation passed: {n_rows} rows")
 
-    print("\nDone. qe_benchmark.csv and qe_threshold.csv are now the final, "
-          "complete outputs.", flush=True)
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="NISQ parameter-recovery benchmark.")
+    ap.add_argument("--combine", action="store_true")
+    ap.add_argument("--input", type=pathlib.Path, action="append", default=[])
+    ap.add_argument("--architecture", choices=list(ARCHITECTURES) + ["all"])
+    ap.add_argument("--n-instances", type=int, default=300)
+    ap.add_argument("--seed-offset", type=int, default=None)
+    ap.add_argument("--out", required=True, type=pathlib.Path)
+    ap.add_argument("--workers", type=int, default=None)
+    args = ap.parse_args()
+
+    if args.n_instances <= 0:
+        sys.exit("--n-instances must be positive")
+    if args.combine:
+        combine(args.input, args.out, args.n_instances)
+        return
+    if args.architecture is None:
+        sys.exit("--architecture is required (or use --combine)")
+
+    architectures = list(ARCHITECTURES) if args.architecture == "all" else [args.architecture]
+    if args.seed_offset is not None and len(architectures) > 1:
+        sys.exit("--seed-offset cannot be combined with --architecture all")
+
+    n_workers = args.workers if args.workers is not None else max(1, mp.cpu_count() - 1)
+    started = datetime.now(timezone.utc)
+
+    rows: List[Dict[str, Any]] = []
+    for architecture in architectures:
+        offset = (args.seed_offset if args.seed_offset is not None
+                  else ARCH_SEED_OFFSET[architecture])
+        rows.extend(run_architecture(architecture, args.n_instances, offset, n_workers))
+
+    problems = validate_rows(rows, args.n_instances, architectures)
+    write_csv(rows, args.out)
+    summarize(rows)
+    print(f"[nisq_benchmark] elapsed "
+          f"{(datetime.now(timezone.utc) - started).total_seconds():.1f}s")
+    _finish(problems, len(rows))
 
 
 if __name__ == "__main__":
-    import os
     warnings.filterwarnings("ignore")
-    if COMBINE:
-        combine_data()
-        sys.exit(0)
+    logging.getLogger("qiskit_aer.noise.noise_model").setLevel(logging.ERROR)
     if sys.platform != "win32":
-        mp.set_start_method("fork", force=True)
-    n_workers = int(os.environ.get("N_WORKERS", max(1, mp.cpu_count() - 1)))
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    print(f"[{ts}] QE benchmark - Canary vs. Qiskit Experiments", flush=True)
-    print(f"  Architecture={ARCH}  Seed={SEED}  N={N_INSTANCES}  bootstrap={N_BOOTSTRAP}  workers={n_workers}", flush=True)
-    rows = run_sweep(n_workers)
-    save_benchmark_csv(rows)
-    print(f"\n[job JOB_TAG={JOB_TAG}] done. Run with COMBINE=1 after all "
-          f"matrix jobs complete to produce the final merged outputs.",
-          flush=True)
+        try:
+            mp.set_start_method("fork", force=True)
+        except RuntimeError:
+            pass
+    main()
