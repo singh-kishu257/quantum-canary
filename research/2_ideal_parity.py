@@ -6,6 +6,10 @@ own probe circuits from the prior; 1c.simulate_probe() executes them on Aer;
 1_inversion.lindblad_inversion() recovers T1, T2, delta_omega, epsilon_sx.
 Ground truth is read only by the simulator and by the final comparison.
 
+epsilon truth is 1c.effective_gate_epsilon(): the per-gate error of the
+simulated channel, including gate-time decoherence, in 1_inversion's
+convention -- not the sampled depolarizing budget alone.
+
 SPAM is not benchmarked: the inversion consumes it as a known constant and
 never estimates it. delta_omega has no prior: CalibrationPrior deliberately
 omits it, so prior_value is NaN for that parameter.
@@ -117,10 +121,11 @@ def run_one_instance(architecture: str, instance_id: int, seed: int) -> List[Dic
             shots_t1=SHOTS_T1, shots_ramsey=SHOTS_RAMSEY, shots_gate=SHOTS_GATE,
             shots_echo=SHOTS_ECHO, qubit_id=0, timestamp=timestamp)
 
-        true_values = {"T1_s": float(truth.T1_s[0]),
-                       "T2_s": float(truth.T2_s[0]),
-                       "delta_omega": abs(float(truth.delta_omega_rad_s[0])),
-                       "epsilon_sx": float(truth.epsilon_gate[0])}
+        tv_now = sim.evaluate_truth_at(truth, 0, 0.0)
+        true_values = {"T1_s": float(tv_now["T1_s"]),
+                       "T2_s": float(tv_now["T2_s"]),
+                       "delta_omega": abs(float(tv_now["delta_omega_rad_s"])),
+                       "epsilon_sx": sim.effective_gate_epsilon(truth, 0, 0.0)}
         canary = {"T1_s": float(result.T1_s),
                   "T2_s": float(result.T2_s),
                   "delta_omega": abs(float(result.delta_omega)),

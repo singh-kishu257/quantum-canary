@@ -8,9 +8,11 @@ Canary may know; 1_inversion builds its own probe circuits from the prior;
 Ground truth is read only by the simulator and by the final comparison.
 
 true_value is 1c.evaluate_truth_at() at T_MEASURE_S, the exact parameters the
-simulator used, not the undrifted base values. Coherent over-rotation and
-coherent-fraction error are model mismatch and are not folded into the
-epsilon truth. Probes are single-qubit, so crosstalk never fires.
+simulator used. epsilon truth is 1c.effective_gate_epsilon(): the per-gate
+error of the simulated channel, including gate-time decoherence and any
+coherent residual surviving the native G*G^-1 pair. Probes are single-qubit,
+so crosstalk never fires. Drift is zero at T_MEASURE_S = T_CALIB_S = 0; the
+calibration-prior envelope carries the staleness.
 
 SPAM is not benchmarked: the inversion consumes it as a known constant and
 never estimates it. delta_omega has no prior: CalibrationPrior deliberately
@@ -130,7 +132,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int) -> List[Dic
         true_values = {"T1_s": float(tv_now["T1_s"]),
                        "T2_s": float(tv_now["T2_s"]),
                        "delta_omega": abs(float(tv_now["delta_omega_rad_s"])),
-                       "epsilon_sx": float(tv_now["epsilon_gate"])}
+                       "epsilon_sx": sim.effective_gate_epsilon(truth, 0, T_MEASURE_S)}
         canary = {"T1_s": float(result.T1_s),
                   "T2_s": float(result.T2_s),
                   "delta_omega": abs(float(result.delta_omega)),
