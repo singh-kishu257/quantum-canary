@@ -1,71 +1,104 @@
-name: QE Benchmark - Parallel Matrix [all architectures]
+name: NISQ Benchmark - Parallel Matrix
 
 on:
   workflow_dispatch:
+    inputs:
+      n_instances:
+        description: "Instances per architecture"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nisq-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  N_INSTANCES: ${{ github.event.inputs.n_instances || '300' }}
 
 jobs:
   run:
+    name: ${{ matrix.architecture }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        budget: [1000, 2500, 5000, 9900, 15000, 25000, 50000]
-        architecture: [superconducting, trapped_ion, neutral_atom]
+        include:
+          - architecture: superconducting
+            seed_offset: 0
+          - architecture: trapped_ion
+            seed_offset: 100000
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
       - name: Install dependencies
-        run: pip install qiskit==2.5.1 qiskit-aer==0.17.2 qiskit-experiments==0.14.1 qiskit-ibm-runtime
-      - name: Make output folders
-        run: mkdir -p research/data
-      - name: Run benchmark (budget=${{ matrix.budget }}, arch=${{ matrix.architecture }})
         run: |
-          cd research
-          export BUDGET_SUBSET="${{ matrix.budget }}"
-          export ARCH="${{ matrix.architecture }}"
-          export JOB_TAG="${{ matrix.budget }}_${{ matrix.architecture }}"
-          N_WORKERS=4 python 7_benchmark_experiments.py
-      - name: Upload results (always, even on timeout/failure)
-        if: always()
+          python -m pip install --upgrade pip
+          pip install -r research/requirements.txt
+
+      - name: Self-test the simulation layer
+        run: python research/1c_simulation_models.py
+
+      - name: Run benchmark
+        run: |
+          python research/3_benchmark.py \
+            --architecture "${{ matrix.architecture }}" \
+            --n-instances "${N_INSTANCES}" \
+            --seed-offset "${{ matrix.seed_offset }}" \
+            --out "nisq_benchmark_${{ matrix.architecture }}.csv"
+
+      - name: Upload architecture CSV
         uses: actions/upload-artifact@v4
         with:
-          name: qe-results-${{ matrix.budget }}-${{ matrix.architecture }}
-          path: research/data/qe_benchmark_${{ matrix.budget }}_${{ matrix.architecture }}.csv
-          if-no-files-found: warn
+          name: nisq-benchmark-${{ matrix.architecture }}
+          path: nisq_benchmark_${{ matrix.architecture }}.csv
+          if-no-files-found: error
+          retention-days: 90
 
   merge:
+    name: merge
     needs: run
-    if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
       - name: Install dependencies
-        run: pip install numpy scipy qiskit==2.5.1 qiskit-aer==0.17.2
-      - name: Make output folders
-        run: mkdir -p research/data
-      - name: Download all split results
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r research/requirements.txt
+
+      - name: Download architecture CSVs
         uses: actions/download-artifact@v4
         with:
-          pattern: qe-results-*
-          path: research/data
+          pattern: nisq-benchmark-*
           merge-multiple: true
-      - name: Merge into single CSV and threshold table
+          path: benchmark_inputs
+
+      - name: Combine into nisq_benchmark.csv
         run: |
-          cd research
-          COMBINE=1 python 7_benchmark_experiments.py
-      - name: Upload final merged results (single artifact)
-        if: always()
+          python research/3_benchmark.py \
+            --combine \
+            --n-instances "${N_INSTANCES}" \
+            --input benchmark_inputs/nisq_benchmark_superconducting.csv \
+            --input benchmark_inputs/nisq_benchmark_trapped_ion.csv \
+            --out nisq_benchmark.csv
+
+      - name: Upload nisq_benchmark.csv
         uses: actions/upload-artifact@v4
         with:
-          name: qe-FINAL-merged
-          path: |
-            research/data/qe_benchmark.csv
-            research/data/qe_threshold.csv
-          if-no-files-found: warn
+          name: nisq-benchmark-combined
+          path: nisq_benchmark.csv
+          if-no-files-found: error
+          retention-days: 90
