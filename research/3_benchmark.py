@@ -52,7 +52,7 @@ sim = _load("sim1c", "1c_simulation_models.py")
 
 REGIME = "nisq"
 T_CALIB_S = 0.0
-T_MEASURE_S = 0.0
+T_MEASURE_S = 3600.0
 SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 1000, 500, 500
 ARCHITECTURES = ("superconducting", "trapped_ion")
 ARCH_SEED_OFFSET = {"superconducting": 0, "trapped_ion": 100_000}
