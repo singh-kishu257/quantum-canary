@@ -20,7 +20,7 @@ __all__ = [
 ]
 
 # Fallback priors when live provider calibration is unavailable.
-# All values sourced from CLOUD-DEPLOYED device measurements (vendor specs or
+# All values sourced from cloud-deployed device measurements (vendor specs or
 # independent papers reporting real cloud-hardware calibration), NOT from
 # best-case laboratory demonstrations. See README_PARAMS.md for full citations.
 # --- Trapped-ion readout asymmetry -------------------------------------
