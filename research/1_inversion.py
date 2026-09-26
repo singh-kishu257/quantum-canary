@@ -89,7 +89,7 @@ def fetch_live_spam(
             pass
         arch = ARCH_DEFAULTS["superconducting"]
         return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
-                "IBM properties() unavailable — using ARCH_DEFAULTS")
+                "IBM properties() unavailable — using SPAM from ARCH_DEFAULTS")
 
     if architecture == "trapped_ion":
         try:
@@ -136,8 +136,7 @@ def fetch_live_spam(
             pass
         arch = ARCH_DEFAULTS["trapped_ion"]
         return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
-                "IonQ API unavailable or field not found — using Mai et al. "
-                "(2024) defaults")
+                "IonQ API unavailable or field not found — using SPAM from ARCH_DEFAULTS")
 
     arch = ARCH_DEFAULTS.get(architecture, ARCH_DEFAULTS["unknown"])
     return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
