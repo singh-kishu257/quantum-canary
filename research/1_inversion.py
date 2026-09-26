@@ -9,7 +9,7 @@ from scipy.optimize import curve_fit
 
 
 __all__ = [
-    "ARCH_DEFAULTS", "build_custom_arch", "BackendProfile",
+    "ARCH_DEFAULTS", "BackendProfile",
     "CalibrationSource", "InversionResult", "forward_t1", "forward_ramsey_xy",
     "forward_gate", "forward_echo",
     "build_probe_circuits", "lindblad_inversion",
@@ -21,29 +21,24 @@ __all__ = [
 
 # Fallback priors when live provider calibration is unavailable.
 # All values sourced from cloud-deployed device measurements (vendor specs or
-# independent papers reporting real cloud-hardware calibration), NOT from
-# best-case laboratory demonstrations. See README_PARAMS.md for full citations.
+# independent papers reporting real cloud-hardware calibration), see citations.
 # --- Trapped-ion readout asymmetry -------------------------------------
-# RATIO ONLY, from Mai et al., arXiv:2402.18868 (2024). Their absolute
-# magnitudes (5e-4 / 1.8e-3) are a best-case Yb-171 shelving demonstration
-# and must NEVER be used as operational defaults -- they are ~4x more
-# optimistic than IonQ's published ~0.5% combined SPAM for Aria/Forte.
-# NOTE: this ratio is unvalidated against per-state IonQ measurements;
-# IonQ publishes only a combined SPAM figure, so any p0|1 / p1|0 pair we
-# report for IonQ inherits this ratio by construction and cannot be used
-# as evidence supporting it.
+# We use the ratio of trapped ion Yb-171 state preperation and measurement
+# error as observed from Mai et al., arXiv:2402.18868 (2024). The absolute
+# magnitudes of SPAM observed from this paper are not used, since this paper demonstrates
+# characterization of a state of the art trapped ion quantum computer, which
+# may not match SPAM oncloud available quantum computers. The ratio had to be used 
+# since some trapped ion quantum computer providers (like IonQ) do not provide
+# p1|0 and p0|1, they just provide a general SPAM constant.
 _TI_SPAM_RATIO_P0_OVER_P1 = 0.0005 / 0.0018   # = 0.2778  (p1|0 ~3.6x p0|1)
 
 ARCH_DEFAULTS: dict[str, dict] = {
     "superconducting": {
-        # PRIORS: Heron-class medians [arXiv:2607.11637]
+        # Heron-class medians [arXiv:2607.11637]
         "T1_s": 200e-6, "T2_s": 140e-6,
-        # BOUNDS (deliberately generous -- these only clamp the optimizer;
-        # clipping biases a fit silently, so err wide). Highest single-qubit
-        # T1 in IBM's own docs example is 488 us; 5 ms = 10.24x that.
-        "T1_min_s": 100e-9, "T1_max_s": 5e-3, "T2_min_s": 100e-9,
-        "dw_max_rad_s": 2*np.pi*2e6,          
-        "dw_typical_khz": 5.0,                 # 
+        # BOUNDS (deliberately generous these only clamp the optimizer;
+        # clipping biases a fit silently, so err wide). 
+        "T1_min_s": 100e-9, "T1_max_s": 5e-3, "T2_min_s": 100e-9,              
         "eps_typical": 3.0e-4, "eps_max": 0.5,
         "dt_ns": 0.2222, "gate_time_ns": 50.0,
         "p0_given_1": 0.030, "p1_given_0": 0.008,
@@ -51,64 +46,19 @@ ARCH_DEFAULTS: dict[str, dict] = {
     },
     "trapped_ion": {
         "T1_s": 100.0, "T2_s": 1.0,
-        # BOUNDS: 10,000 s is ~2x Wang et al.'s 5500 s lab record, so even a
-        # record-setting device cannot clip. Previous 1e5 s was ~18x the
-        # record with no justification; this is generous but bounded by a
-        # real physical measurement.
+        # BOUNDS: (deliberately generous these only clamp the optimizer;
+        # clipping biases a fit silently, so err wide). 
         "T1_min_s": 1e-3, "T1_max_s": 1e4, "T2_min_s": 1e-4,
-        "dw_max_rad_s": 2*np.pi*100e3,        # widened from 10 kHz
-        "dw_typical_khz": 0.5,                 # WEAKLY CONSTRAINED
-        "eps_typical": 3.0e-4, "eps_max": 0.5,
-        "dt_ns": None, "gate_time_ns": 135_000.0,
+        "eps_typical": 1.3e-4, "eps_max": 0.5,
+        "dt_ns": None, "gate_time_ns": 110_000.0,
         # IonQ publishes ~0.5% combined SPAM [arXiv:2308.05071] for Forte,
-        # split via _TI_SPAM_RATIO_P0_OVER_P1. Opposite asymmetry direction
-        # to superconducting (p1|0 > p0|1).
+        # split via _TI_SPAM_RATIO_P0_OVER_P1. 
         "p0_given_1": 0.0022, "p1_given_0": 0.0078,
         "display_unit": "ms", "time_scale": 1e3,
     },
 }
 
-ARCH_DEFAULTS["unknown"] = ARCH_DEFAULTS["superconducting"]
-
-class _DeprecatedGateRepN(list):
-    """Deprecated module-level gate-rep constant. Use BackendProfile.gate_rep_n."""
-    def __iter__(self):
-        warnings.warn(
-            "GATE_REP_N_DT is deprecated and no longer used by "
-            "build_probe_circuits(); use BackendProfile.gate_rep_n instead.",
-            DeprecationWarning, stacklevel=2)
-        return super().__iter__()
-
-
-GATE_REP_N_DT = _DeprecatedGateRepN([20, 40, 80])
-
-
-def build_custom_arch(T1_prior_s: float, T2_prior_s: float,
-                      dw_max_rad_s: Optional[float] = None,
-                      eps_typical:  Optional[float] = None,
-                      gate_time_ns: Optional[float] = None,
-                      p0_given_1:   float = 0.0,
-                      p1_given_0:   float = 0.0) -> dict:
-    if T1_prior_s < 1e-3:
-        unit, scale = "µs", 1e6
-    elif T1_prior_s < 1.0:
-        unit, scale = "ms", 1e3
-    else:
-        unit, scale = "s", 1.0
-    return {
-        "T1_s": T1_prior_s, "T2_s": min(T2_prior_s, 2.0*T1_prior_s),
-        "T1_min_s": T1_prior_s/1000, "T1_max_s": T1_prior_s*100,
-        "T2_min_s": T2_prior_s/1000,
-        "dw_max_rad_s": dw_max_rad_s if dw_max_rad_s is not None else 2*np.pi*500e3,
-        "dw_typical_khz": 5.0,
-        "eps_typical": eps_typical if eps_typical is not None else 1e-3,
-        "eps_max": 0.5,
-        "dt_ns": None,
-        "gate_time_ns": gate_time_ns if gate_time_ns is not None else 50.0,
-        "p0_given_1": p0_given_1,
-        "p1_given_0": p1_given_0,
-        "display_unit": unit, "time_scale": scale,
-    }
+ARCH_DEFAULTS["unknown"] = dict(ARCH_DEFAULTS["superconducting"])
 
 
 def fetch_live_spam(
@@ -131,7 +81,7 @@ def fetch_live_spam(
             props = backend.properties()
             p0 = props.qubit_property(qubit_id, "prob_meas0_prep1")[0]
             p1 = props.qubit_property(qubit_id, "prob_meas1_prep0")[0]
-            if p0 and p1 and p0 > 0 and p1 > 0:
+            if p0 is not None and p1 is not None and p0 >= 0 and p1 >= 0:
                 return (float(p0), float(p1), "live_asymmetric",
                         f"IBM: p0|1={p0:.4f}, p1|0={p1:.4f} from "
                         f"backend.properties() qubit {qubit_id}")
@@ -139,7 +89,7 @@ def fetch_live_spam(
             pass
         arch = ARCH_DEFAULTS["superconducting"]
         return (arch["p0_given_1"], arch["p1_given_0"], "literature_fallback",
-                "IBM properties() unavailable — using Chen et al. (2023) defaults")
+                "IBM properties() unavailable — using ARCH_DEFAULTS")
 
     if architecture == "trapped_ion":
         try:
@@ -494,18 +444,7 @@ class BackendProfile:
                           p0_given_1: Optional[float] = None,
                           p1_given_0: Optional[float] = None) -> "BackendProfile":
         if architecture == "custom":
-            if T1_prior_s is None or T2_prior_s is None:
-                raise ValueError("architecture='custom' requires T1_prior_s and T2_prior_s")
-            custom = build_custom_arch(T1_prior_s, T2_prior_s,
-                                       dw_max_rad_s=dw_max_rad_s,
-                                       eps_typical=eps_typical,
-                                       gate_time_ns=gate_time_ns,
-                                       p0_given_1=p0_given_1 if p0_given_1 is not None else 0.0,
-                                       p1_given_0=p1_given_0 if p1_given_0 is not None else 0.0)
-            return cls(architecture="custom", T1_prior_s=custom["T1_s"],
-                       T2_prior_s=custom["T2_s"], dt_ns=None,
-                       backend_name=backend_name, custom_arch=custom,
-                       prior_confidence="arch_default")
+            raise NotImplementedError("Custom architectures are not currently supported.")
         defaults = ARCH_DEFAULTS.get(architecture, ARCH_DEFAULTS["unknown"])
         T1 = T1_prior_s or defaults["T1_s"]
         T2 = min(T2_prior_s or defaults["T2_s"], 2.0*T1)
