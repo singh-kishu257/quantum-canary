@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+from scipy.stats import chi2 as _chi2_dist, norm as _norm_dist
 
 _spec = importlib.util.spec_from_file_location(
     "inversion", pathlib.Path(__file__).parent / "1_inversion.py")
@@ -69,6 +70,53 @@ def chi2_scaled_z(delta: float, sigma_cur: float, sigma_base: float,
     return float(delta / denom)
 
 
+# Degrees of freedom of each probe's reduced chi-square, dof = n_points -
+# n_params as in 1_inversion.py's _chi2_per_dof / lindblad_inversion.
+_PROBE_DOF = {
+    "t1":     2,  # 3 delays, 1 param (T1)
+    # Ramsey dof is nominal: delta_omega is fixed by arctan2 at the shortest
+    # delay, not fitted, so its chi2/dof does not follow chi2(4)/4 on ideal data.
+    "ramsey": 4,  # 3 delays x (X, Y) = 6 points, 2 params (T2, delta_omega)
+    # 3 repetition counts, 1 param (epsilon_sx); the asymptote z* is
+    # computed from T1, T2 and the gate time, not fitted.
+    "gate":   2,
+    "echo":   2,  # 3 delays, 1 param (T2_echo)
+}
+# Nominal family-wise false-YELLOW rate for one qubit-round, Bonferroni-split
+# over the len(_PROBE_DOF) probes. Calibrated for t1/gate/echo; the Ramsey
+# test is not (measured on correctly specified ideal data: Ramsey alone
+# 11.3% SC / 8.0% TI vs 1.25% nominal; family-wise 15.3% SC / 9.3% TI).
+_HEALTH_FAMILY_ALPHA = 0.05
+
+
+def _green_chi2_threshold(probe: str, override: Optional[float] = None) -> float:
+    """chi2/dof GREEN limit for one probe: `override` if given (legacy
+    single threshold for every probe), else the (1 - alpha/4) quantile of
+    chi2(dof)/dof with alpha = _HEALTH_FAMILY_ALPHA over the 4 probes
+    (a nominal quantile; see _HEALTH_FAMILY_ALPHA for the Ramsey caveat)."""
+    if override is not None:
+        return float(override)
+    dof = _PROBE_DOF[probe]
+    q = 1.0 - _HEALTH_FAMILY_ALPHA / len(_PROBE_DOF)
+    return float(_chi2_dist.ppf(q, dof) / dof)
+
+
+def _holm_adjust(p_values: dict) -> dict:
+    """Holm (1979) step-down adjusted p-values over the finite entries of
+    p_values; a test is rejected at family level alpha iff its adjusted
+    p-value is < alpha. Non-finite p-values (test not performed, e.g. a
+    nan z-score) are excluded from the family and returned as nan."""
+    keys = sorted((k for k, p in p_values.items() if np.isfinite(p)),
+                  key=lambda k: p_values[k])
+    m = len(keys)
+    out = {k: float("nan") for k in p_values}
+    running = 0.0
+    for i, k in enumerate(keys):
+        running = max(running, min(1.0, (m - i) * p_values[k]))
+        out[k] = float(running)
+    return out
+
+
 @dataclass
 class OnlineInversionResult:
     """Per-round snapshot of every monitored qubit's inverted parameters.
@@ -85,13 +133,23 @@ class OnlineInversionResult:
     algo_indices:   list
     canary_indices: list
     
-    green_chi2_threshold:         float = 5.0
+    green_chi2_threshold:         Optional[float] = None
     yellow_t2_disagree_threshold: float = 0.20
 
     def health_summary(self) -> dict:
         """Return {qubit_id: "GREEN" | "YELLOW" | "RED"} for every qubit
         in this round, using chi2/dof and T2_ramsey/T2_echo agreement as
         the health signal.
+
+        The per-probe chi2/dof threshold is green_chi2_threshold if set
+        (same value for every probe), otherwise dof-specific:
+        chi2.ppf(1 - 0.05/4, dof)/dof with dof from _PROBE_DOF, i.e.
+        nominal chi2 quantiles for a 5% family-wise false-YELLOW rate
+        (Bonferroni over the 4 probes) per qubit-round. The t1/gate/echo
+        tests are calibrated; the Ramsey test is not (its dof counts the
+        arctan2-fixed delta_omega as fitted; measured Ramsey false-YELLOW
+        11.3% SC / 8.0% TI vs 1.25% nominal), so the family-wise rate on
+        correctly specified data is ~9-15% (measured 15.3% SC / 9.3% TI).
 
         GREEN:  all probe chi2_dof <= threshold AND all sigmas finite
         YELLOW: any probe chi2_dof > threshold, OR T2_ramsey and T2_echo
@@ -106,8 +164,11 @@ class OnlineInversionResult:
                 out[qid] = "RED"
                 continue
 
-            chi2s = [r.t1_chi2_dof, r.ramsey_chi2_dof, r.gate_chi2_dof, r.echo_chi2_dof]
-            chi2_bad = any(np.isfinite(c) and c > self.green_chi2_threshold for c in chi2s)
+            chi2s = {"t1": r.t1_chi2_dof, "ramsey": r.ramsey_chi2_dof,
+                     "gate": r.gate_chi2_dof, "echo": r.echo_chi2_dof}
+            chi2_bad = any(
+                np.isfinite(c) and c > _green_chi2_threshold(p, self.green_chi2_threshold)
+                for p, c in chi2s.items())
 
             t2_disagree = False
             T2_ref = r.T2_s if r.T2_s > 0 else None
@@ -148,13 +209,17 @@ def build_inline_probe_circuits(profiles: dict, qubit_ids: list) -> tuple:
 
     1_inversion.py's build_probe_circuits() always targets qubit 0 of a
     fresh 1-qubit QuantumCircuit. Here, each qubit's probe set is built
-    the same way (as an independent 1-qubit circuit named per-qubit) and
-    relies on the backend transpiler's `initial_layout`/qubit mapping to
-    place it on the correct physical qubit at submission time — the
-    caller is responsible for passing the appropriate layout per circuit
-    (e.g. transpile(circ, backend, initial_layout=[qubit_id])). This
-    avoids building large, mostly-idle multi-qubit circuits just to
-    address a single physical qubit.
+    the same way (as independent 1-qubit circuits); each circuit's name
+    is prefixed with f"q{qubit_id}_" (so names are unique across qubits)
+    and its target is recorded in circuit.metadata["qubit_id"]. The
+    circuits rely on the backend transpiler's `initial_layout` to be
+    placed on the correct physical qubit at submission time — the caller
+    must transpile each circuit separately with its own layout, e.g.
+    transpile(circ, backend,
+              initial_layout=[circ.metadata["qubit_id"]]),
+    since qiskit 2.x rejects a list of per-circuit initial_layouts in a
+    single transpile() call. This avoids building large, mostly-idle
+    multi-qubit circuits just to address a single physical qubit.
 
     Returns (circuits, metadata) where metadata maps qubit_id -> dict
     with per-qubit probe layout info (see module docstring / spec).
@@ -164,6 +229,9 @@ def build_inline_probe_circuits(profiles: dict, qubit_ids: list) -> tuple:
     for qid in qubit_ids:
         profile = profiles[qid]
         qubit_circuits, meta = inv.build_probe_circuits(profile)
+        for qc in qubit_circuits:
+            qc.name = f"q{qid}_{qc.name}"
+            qc.metadata = {**(qc.metadata or {}), "qubit_id": qid}
         start_idx = len(circuits)
         circuits.extend(qubit_circuits)
         meta = dict(meta)
@@ -171,6 +239,14 @@ def build_inline_probe_circuits(profiles: dict, qubit_ids: list) -> tuple:
         meta["n_circuits"] = len(qubit_circuits)
         metadata[qid] = meta
     return circuits, metadata
+
+
+def _check_interval_n(interval_n) -> None:
+    """Raise ValueError unless interval_n is an int >= 1 (bool rejected);
+    interleave_circuits() would otherwise loop forever for interval_n <= 0."""
+    if (isinstance(interval_n, bool) or not isinstance(interval_n, (int, np.integer))
+            or interval_n < 1):
+        raise ValueError(f"interval_n must be an int >= 1, got {interval_n!r}")
 
 
 def interleave_circuits(algo_circuits: list, canary_circuits: list,
@@ -185,7 +261,10 @@ def interleave_circuits(algo_circuits: list, canary_circuits: list,
 
     If there are fewer algorithm circuits than interval_n, a single
     Canary round is appended once at the end.
+
+    Raises ValueError if interval_n is not an int >= 1.
     """
+    _check_interval_n(interval_n)
     n_algo = len(algo_circuits)
     n_canary = len(canary_circuits)
 
@@ -306,17 +385,23 @@ class CanaryInterleaver:
     def __init__(self, qubit_ids: list, profiles: dict, interval_n: int = 10,
                  shots_t1: int = 300, shots_ramsey: int = 1000,
                  shots_gate: int = 500, shots_echo: int = 500,
-                 # 95th pctile chi2 for DOF=2 (3-point fits); 2.0 is too
-                 # tight and flags ~14% of valid fits as YELLOW by sampling
-                 # variance alone.
-                 green_chi2_threshold: float = 5.0,
+                 # None: dof-specific per-probe chi2/dof thresholds at a
+                 # nominal 5% family-wise level per qubit-round (see _PROBE_DOF and
+                 # OnlineInversionResult.health_summary). A float applies
+                 # that single chi2/dof threshold to every probe (legacy
+                 # behaviour; the old default 5.0 is the ~99.3rd, not the
+                 # 95th, percentile of chi2/dof for dof=2).
+                 green_chi2_threshold: Optional[float] = None,
                  yellow_t2_disagree_threshold: float = 0.20,
                  # |z| > 2 matches the two-sample criterion used for the
                  # IBM Heron r2 A/B stability check (5_ibm_hardware.py's
                  # compare_runs()) -- roughly a 95% two-sided normal bound.
+                 # drift_report() uses 2*(1 - Phi(drift_z_threshold)) as
+                 # the Holm family alpha across a qubit's 4 parameters.
                  drift_z_threshold: float = 2.0):
         """Store configuration and pre-build the Canary probe circuit set
         (shared across every round) once at construction time."""
+        _check_interval_n(interval_n)
         self.qubit_ids = list(qubit_ids)
         self.profiles = profiles
         self.interval_n = interval_n
@@ -437,8 +522,15 @@ class CanaryInterleaver:
         stored baseline, returning a two-sample z-score per parameter --
         the same z_j = (A-B)/sqrt(sigma_A^2+sigma_B^2) construction used
         for the IBM Heron r2 A/B stability check in 5_ibm_hardware.py's
-        compare_runs(). |z| > self.drift_z_threshold flags that parameter
-        as drifted.
+        compare_runs(). Each |z| is converted to a two-sided normal
+        p-value ("p_values"), Holm-adjusted across this qubit's 4
+        parameters ("p_holm"), and a parameter is flagged as drifted if
+        its Holm-adjusted p-value is below the family alpha
+        2*(1 - Phi(self.drift_z_threshold)) (0.0455 for the default 2.0,
+        the same per-test level as an uncorrected |z| > 2). Parameters
+        with a nan z-score are excluded from the family and never
+        flagged. drift_report_all() applies Holm across every
+        (qubit, parameter) test of the latest round instead.
 
         This answers a different question than health_summary(): a round
         can be perfectly well-fit (GREEN) by its own chi2/dof and still
@@ -481,13 +573,45 @@ class CanaryInterleaver:
                 cur.epsilon_sx_sigma, base.epsilon_sx_sigma,
                 cur.gate_chi2_dof, base.gate_chi2_dof),
         }
-        drifted = {k: bool(np.isfinite(v) and abs(v) > self.drift_z_threshold)
-                   for k, v in z_scores.items()}
+        p_values = {k: float(2.0 * _norm_dist.sf(abs(v))) if np.isfinite(v)
+                    else float("nan") for k, v in z_scores.items()}
+        p_holm = _holm_adjust(p_values)
+        family_alpha = 2.0 * _norm_dist.sf(self.drift_z_threshold)
+        drifted = {k: bool(np.isfinite(p) and p < family_alpha)
+                   for k, p in p_holm.items()}
         return dict(qubit_id=qubit_id,
                     round_index=self._history[-1].round_index,
                     baseline_round_index=self._baseline_round[qubit_id],
                     z_scores=z_scores, drifted=drifted,
-                    any_drift=any(drifted.values()))
+                    any_drift=any(drifted.values()),
+                    p_values=p_values, p_holm=p_holm)
+
+    def drift_report_all(self) -> dict:
+        """drift_report() for every qubit of the most recent round that
+        has a baseline, returned as {qubit_id: report}, with the Holm
+        correction applied across ALL (qubit, parameter) tests of that
+        round (same family alpha 2*(1 - Phi(self.drift_z_threshold)))
+        instead of per qubit. z_scores and p_values are as in
+        drift_report(); p_holm, drifted and any_drift reflect the
+        round-wide family.
+
+        Raises ValueError if no round has been processed yet.
+        """
+        if not self._history:
+            raise ValueError("drift_report_all: no rounds processed yet")
+        qids = [q for q in sorted(self._history[-1].qubit_results.keys())
+                if q in self._baseline]
+        reports = {q: self.drift_report(q) for q in qids}
+        p_all = {(q, k): p for q in qids for k, p in reports[q]["p_values"].items()}
+        p_holm_all = _holm_adjust(p_all)
+        family_alpha = 2.0 * _norm_dist.sf(self.drift_z_threshold)
+        for q in qids:
+            rep = reports[q]
+            rep["p_holm"] = {k: p_holm_all[(q, k)] for k in rep["p_values"]}
+            rep["drifted"] = {k: bool(np.isfinite(p) and p < family_alpha)
+                              for k, p in rep["p_holm"].items()}
+            rep["any_drift"] = any(rep["drifted"].values())
+        return reports
 
     def trajectory(self, qubit_id: int, param: str) -> tuple:
         """Extract a time series for one qubit / one parameter across
@@ -565,11 +689,19 @@ if __name__ == "__main__":
     print("[Canary] 1b_online.py self-test (simulation only)")
     print("=" * 70)
 
+    # Plumbing/smoke test of the interleave -> process -> health/drift
+    # pipeline on synthetic data; not a statistical calibration of the
+    # health or drift false-positive/true-positive rates.
     failures = []
 
-    # 1. Profiles for qubits 0-4
+    # 1. Profiles for qubits 0-4. Prior-informed ("live") delay grids
+    # centred on the simulated truth: the arch_default log-spaced T1 grid
+    # gives too little T1 precision for the [7] drift true-positive check
+    # to have adequate power.
     N_QUBITS = 5
-    profiles = {q: inv.BackendProfile.from_architecture("superconducting")
+    profiles = {q: inv.BackendProfile(architecture="superconducting",
+                                      T1_prior_s=150e-6, T2_prior_s=90e-6,
+                                      dt_ns=0.2222, prior_confidence="live")
                 for q in range(N_QUBITS)}
 
     # 2. 50 dummy algo circuits
@@ -613,6 +745,10 @@ if __name__ == "__main__":
     def spam(p):
         return p*(1.0 - p0_given_1) + (1.0 - p)*p1_given_0
 
+    def spam0(p0):
+        # P(read 0) from P(state 0) -- the mapping inv.forward_gate_affine uses.
+        return p0*(1.0 - p1_given_0) + (1.0 - p0)*p0_given_1
+
     def c1(rng_obj, p, sh):
         n1 = int(rng_obj.binomial(sh, float(np.clip(p, 0, 1))))
         return {"0": sh-n1, "1": n1}
@@ -638,11 +774,15 @@ if __name__ == "__main__":
         ramsey_counts = []
         for t in ramsey_delays:
             px, py = inv.forward_ramsey_xy(t, T2_true, dw_true)
-            ramsey_counts.append(c1(rng_obj, px, SHOTS_RAMSEY))
-            ramsey_counts.append(c1(rng_obj, py, SHOTS_RAMSEY))
+            ramsey_counts.append(c1(rng_obj, spam(px), SHOTS_RAMSEY))
+            ramsey_counts.append(c1(rng_obj, spam(py), SHOTS_RAMSEY))
 
-        p0_gate = inv.forward_gate(Nv, eps_true)
-        gate_counts = [c0(rng_obj, spam(p), SHOTS_GATE) for p in p0_gate]
+        # Same gate model as the engine (_invert_gate): affine channel with
+        # z* from the true T1, T2 and the architecture gate time.
+        t_g = inv.ARCH_DEFAULTS["superconducting"]["gate_time_ns"] * 1e-9
+        z_star_true = inv._gate_z_star(eps_true, T1_true, T2_true, t_g)
+        p0_gate = inv.forward_gate_affine(Nv, eps_true, z_star_true)
+        gate_counts = [c0(rng_obj, spam0(p), SHOTS_GATE) for p in p0_gate]
 
         T2_echo_true = min(T2_true, 2.0*T1_true)
         echo_counts = [c1(rng_obj, spam(float(inv.forward_echo(t, T2_echo_true))), SHOTS_ECHO)
@@ -696,11 +836,11 @@ if __name__ == "__main__":
             failures.append("export_csv() row count mismatch")
 
     # 9. health_summary() should be mostly GREEN on consistent synthetic data.
-    # Each probe fits only 3 delay points (dof=2), so chi2/dof crossing the
-    # 5.0 GREEN threshold (95th pctile for DOF=2) by pure sampling variance
-    # is still possible some of the time even when the forward model matches
-    # the truth exactly — a single unlucky round of YELLOW is not itself a
-    # bug. We check that the large
+    # Each probe fits only a few points (dof 2-4, see _PROBE_DOF), so
+    # chi2/dof crossing its GREEN threshold (nominal 5% family-wise per qubit-round)
+    # by pure sampling variance is still possible some of the time even
+    # when the forward model matches the truth exactly — a single unlucky
+    # round of YELLOW is not itself a bug. We check that the large
     # majority of qubit-rounds come back GREEN and none come back RED (RED
     # would indicate an actual fit failure, which should not happen here).
     print("\n[5] health_summary() check "
@@ -726,7 +866,8 @@ if __name__ == "__main__":
 
     # 10. drift_report() should mostly NOT flag drift across 5 rounds drawn
     # from the SAME true parameters (independent shot noise only). At
-    # |z|>2 this is only a ~95% one-sided bound per test, so a rare
+    # |z|>2 this is only a ~95% two-sided bound (Holm-corrected across each
+    # qubit's 4 parameters), so a rare
     # false positive by chance is expected and not itself a bug -- this
     # is a smoke test, not the statistical false-positive calibration
     # (that belongs to 3_null_nonm.py). We just check flags stay rare.

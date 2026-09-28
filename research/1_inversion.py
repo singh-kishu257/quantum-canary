@@ -1,5 +1,6 @@
 from __future__ import annotations
 import datetime
+import dataclasses
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional
@@ -11,7 +12,7 @@ from scipy.optimize import curve_fit
 __all__ = [
     "ARCH_DEFAULTS", "BackendProfile",
     "CalibrationSource", "InversionResult", "forward_t1", "forward_ramsey_xy",
-    "forward_gate", "forward_echo",
+    "forward_gate", "forward_gate_affine", "forward_echo",
     "build_probe_circuits", "lindblad_inversion",
     "get_live_profile", "fetch_live_spam",
     "NATIVE_INVERSE_PAIRS", "register_native_pair",
@@ -20,26 +21,41 @@ __all__ = [
 ]
 
 # Fallback priors when live provider calibration is unavailable.
-# All values sourced from cloud-deployed device measurements (vendor specs or
-# independent papers reporting real cloud-hardware calibration), see citations.
+# Provenance is mixed (per-value records: 1c_simulation_models.MODEL_PROVENANCE).
+# Sourced from published cloud-hardware figures: superconducting T1_s/T2_s
+# (band centres, Sharma & Lau Table 4) and the 1.9% mean of p0_given_1/
+# p1_given_0 (inside the Table 4 readout band; the split itself is unsourced);
+# trapped-ion eps_typical (Chen et al., arXiv:2308.05071, DRB median 2.0e-4 /
+# 1.5), gate_time_ns (Chen Sec. 2) and the 0.5% SPAM mean (Chen Sec. 2; split
+# by the literature ratio below). Trapped-ion T1_s/T2_s match IonQ's vendor
+# specification (T1 10-100 s, T2 ~1 s) but are not cited here. Engine defaults
+# with no cloud-measurement source: superconducting eps_typical, gate_time_ns
+# and dt_ns. T1_min_s/T1_max_s/T2_min_s/eps_max are optimizer bounds, not
+# device values.
 # --- Trapped-ion readout asymmetry -------------------------------------
-# We use the ratio of trapped ion Yb-171 state preperation and measurement
-# error as observed from Mai et al., arXiv:2402.18868 (2024). The absolute
-# magnitudes of SPAM observed from this paper are not used, since this paper demonstrates
-# characterization of a state of the art trapped ion quantum computer, which
-# may not match SPAM oncloud available quantum computers. The ratio had to be used 
-# since some trapped ion quantum computer providers (like IonQ) do not provide
-# p1|0 and p0|1, they just provide a general SPAM constant.
-_TI_SPAM_RATIO_P0_OVER_P1 = 0.0005 / 0.0018   # = 0.2778  (p1|0 ~3.6x p0|1)
+# IonQ reports only an average SPAM error (0.5% on Forte, Chen et al.,
+# arXiv:2308.05071, Sec. 2), not p1|0 and p0|1, so the split uses a literature
+# ratio. Forte reads out by standard hyperfine (resonant-fluorescence)
+# detection (Chen Sec. 2). For that scheme Mai et al., arXiv:2402.18868 (2024),
+# Fig. 4, report p(1|0) = 6.4(7)e-3 and p(0|1) = 9.3(8)e-3 for a single 171Yb+
+# ion in a laboratory trap (their 1.8e-3/0.5e-3 figures are for 2D3/2 shelving
+# detection, which Forte does not use). Only the ratio is used: the magnitudes
+# are single-ion detection errors, not cloud-device SPAM, and Forte's own
+# per-state asymmetry is not published. The direction (p0|1 > p1|0) agrees with
+# Wright et al., arXiv:1903.08181, p.5: "the dominant error is single-qubit
+# bit-flips from |1> to |0> during the measurement process".
+_TI_SPAM_RATIO_P0_OVER_P1 = 0.0093 / 0.0064   # = 1.453  (p0|1 ~1.45x p1|0)
 
 ARCH_DEFAULTS: dict[str, dict] = {
     "superconducting": {
-        # Heron-class medians [arXiv:2607.11637]
+        # centres of representative Heron bands [Sharma & Lau, arXiv:2607.11637, Table 4]
         "T1_s": 200e-6, "T2_s": 140e-6,
         # BOUNDS (deliberately generous these only clamp the optimizer;
         # clipping biases a fit silently, so err wide). 
         "T1_min_s": 100e-9, "T1_max_s": 5e-3, "T2_min_s": 100e-9,              
         "eps_typical": 3.0e-4, "eps_max": 0.5,
+        # gate_time_ns is load-bearing: _invert_gate computes the gate model's z*
+        # from it and the fitted T1/T2 (from_ibm_backend uses the live sx duration).
         "dt_ns": 0.2222, "gate_time_ns": 50.0,
         "p0_given_1": 0.030, "p1_given_0": 0.008,
         "display_unit": "µs", "time_scale": 1e6,
@@ -50,15 +66,31 @@ ARCH_DEFAULTS: dict[str, dict] = {
         # clipping biases a fit silently, so err wide). 
         "T1_min_s": 1e-3, "T1_max_s": 1e4, "T2_min_s": 1e-4,
         "eps_typical": 1.3e-4, "eps_max": 0.5,
+        # gate_time_ns is load-bearing: _invert_gate computes the gate model's z*
+        # from it and the fitted T1/T2.
         "dt_ns": None, "gate_time_ns": 110_000.0,
         # IonQ publishes ~0.5% combined SPAM [arXiv:2308.05071] for Forte,
-        # split via _TI_SPAM_RATIO_P0_OVER_P1. 
-        "p0_given_1": 0.0022, "p1_given_0": 0.0078,
+        # split via _TI_SPAM_RATIO_P0_OVER_P1 (r = 1.453) at fixed 0.5% mean:
+        # p0|1 = 0.01*r/(1+r) = 0.005924 -> 0.0059; p1|0 = 0.01/(1+r) = 0.004076 -> 0.0041.
+        "p0_given_1": 0.0059, "p1_given_0": 0.0041,
         "display_unit": "ms", "time_scale": 1e3,
     },
 }
 
 ARCH_DEFAULTS["unknown"] = dict(ARCH_DEFAULTS["superconducting"])
+
+# Floor for a live provider eps reported as exactly 0 (IBM gate_error 0, IonQ
+# 1q fidelity 1.0), so gate_rep_n stays finite. Every eps <= 1.25e-4 gives the
+# same capped repetition grid N = [500, 1000, 2000], so the exact value does
+# not change the probe design; 1e-6 is below both ARCH_DEFAULTS eps_typical
+# values (1.3e-4, 3e-4). It also becomes the gate fit's fallback seed.
+_EPS_LIVE_FLOOR = 1e-6
+
+
+def _require_pos_finite(name, v) -> float:
+    if v is None or not np.isfinite(v) or v <= 0:
+        raise ValueError(f"{name} must be positive and finite, got {v!r}")
+    return float(v)
 
 
 def fetch_live_spam(
@@ -81,7 +113,10 @@ def fetch_live_spam(
             props = backend.properties()
             p0 = props.qubit_property(qubit_id, "prob_meas0_prep1")[0]
             p1 = props.qubit_property(qubit_id, "prob_meas1_prep0")[0]
-            if p0 is not None and p1 is not None and p0 >= 0 and p1 >= 0:
+            # A per-state readout error >= 0.5 is at or below chance for that
+            # state; such values and non-finite ones -> literature fallback.
+            if (p0 is not None and p1 is not None and np.isfinite(p0) and np.isfinite(p1)
+                    and 0 <= p0 < 0.5 and 0 <= p1 < 0.5):
                 return (float(p0), float(p1), "live_asymmetric",
                         f"IBM: p0|1={p0:.4f}, p1|0={p1:.4f} from "
                         f"backend.properties() qubit {qubit_id}")
@@ -119,18 +154,22 @@ def fetch_live_spam(
                     v = path(data)
                     if v is not None:
                         raw = float(v)
+                        # Neither an error nor a fidelity fraction can exceed 1
+                        # (e.g. a percentage such as 99.5): reject, do not misread.
+                        if not (np.isfinite(raw) and 0.0 <= raw <= 1.0):
+                            break
                         spam_error = (1.0 - raw) if raw > 0.5 else raw
                         break
                 except Exception:
                     continue
     
-            if spam_error is not None and spam_error > 0:
+            if spam_error is not None and 0.0 <= spam_error < 0.5:
                 ratio = _TI_SPAM_RATIO_P0_OVER_P1
                 p0 = spam_error * 2.0 * ratio / (1.0 + ratio)
                 p1 = spam_error * 2.0 / (1.0 + ratio)
                 return (p0, p1, "live_magnitude_literature_ratio",
                         f"IonQ: live combined spam_error={spam_error:.6f} split using "
-                        f"asymmetry ratio {ratio:.4f} from Mai et al. (2024). "
+                        f"asymmetry ratio {ratio:.4f} from Mai et al. (2024) standard-fluorescence detection. "
                         f"Magnitude is live; asymmetry is literature-derived, not measured.")
         except Exception:
             pass
@@ -156,6 +195,7 @@ class CalibrationSource:
     backend:    str   
     spam_source: str = "literature_fallback"
     spam_note:  str = ""
+    lookup_errors: str = ""  # "; "-joined exceptions from live T1/T2/gate_error/properties() lookups (IBM)
 
 
 @dataclass
@@ -164,13 +204,17 @@ class BackendProfile:
     architecture, T1_prior_s/T2_prior_s: platform and prior decoherence estimates.
     dt_ns: hardware sample-time quantization, if applicable.
     backend_name, custom_arch, calibration_source: provenance/bookkeeping.
-    prior_confidence: "live" | "arch_default". "live" means T1_prior_s/T2_prior_s
-      were read from a provider calibration API and are trusted; "arch_default"
-      means they are architecture-typical literature values that may be off by
+    prior_confidence: "live" | "prior_informed" | "arch_default". "live" means
+      T1_prior_s/T2_prior_s were read from a provider calibration API and are
+      trusted; "prior_informed" means they were supplied by the caller from
+      some other source (e.g. a synthetic or offline calibration record) and
+      are used with the same prior-informed linear delay grid as "live" --
+      "live" stays reserved for provider-API priors; "arch_default" means
+      they are architecture-typical literature values that may be off by
       an order of magnitude or more for the actual device.
 
-    Delay-grid strategy: when prior_confidence == "live", t1_delays_s /
-    ramsey_delays_s / echo_delays_s use linear multiples of the prior
+    Delay-grid strategy: when prior_confidence is "live" or "prior_informed",
+    t1_delays_s / ramsey_delays_s / echo_delays_s use linear multiples of the prior
     (0.5x/1.0x/1.5x etc) — this is Fisher-informed when the prior is close to
     the true decay constant. When prior_confidence == "arch_default", the
     prior may be wrong by 10x or more, so delays are instead log-spaced across
@@ -190,7 +234,7 @@ class BackendProfile:
     backend_name: str = "unknown"
     custom_arch:  Optional[dict] = None
     calibration_source: Optional[CalibrationSource] = None
-    prior_confidence: str = "arch_default"  # "live" | "arch_default"
+    prior_confidence: str = "arch_default"  # "live" | "prior_informed" | "arch_default"
 
     @property
     def constants(self) -> dict:
@@ -212,7 +256,7 @@ class BackendProfile:
 
     @property
     def t1_delays_s(self) -> list[float]:
-        if self.prior_confidence == "live":
+        if self.prior_confidence in ("live", "prior_informed"):
             base   = 0.50 * self.T1_prior_s
             delays = [base, 2*base, 3*base]
         else:
@@ -222,7 +266,7 @@ class BackendProfile:
 
     @property
     def ramsey_delays_s(self) -> list[float]:
-        if self.prior_confidence == "live":
+        if self.prior_confidence in ("live", "prior_informed"):
             T2     = self.T2_prior_s
             delays = [0.5*T2, 1.0*T2, 1.5*T2]
         else:
@@ -249,6 +293,10 @@ class BackendProfile:
     @property
     def gate_rep_n(self) -> list[int]:
         eps    = self.constants["eps_typical"]
+        eps_max = self.constants["eps_max"]
+        if not (np.isfinite(eps) and 0 < eps <= eps_max):
+            raise ValueError(f"eps_typical must be finite and in (0, eps_max={eps_max}], "
+                             f"got {eps!r}")
         n_max  = max(5, min(int(1.0 / (4.0 * eps)), 2000))
         n_mid  = max(3, n_max // 2)
         n_low  = max(1, n_max // 4)
@@ -264,41 +312,60 @@ class BackendProfile:
         T2_prior,  T2_source  = arch["T2_s"], "arch_default"
         eps_prior, eps_source = arch["eps_typical"], "arch_default"
         dw_source = "arch_default"  # IBM properties() does not expose Δω
+        gate_time_ns_live = None
+        lookup_errors = []
 
         try:
             props = backend.properties()
-        except Exception:
+        except Exception as e:
             props = None
+            lookup_errors.append(f"properties(): {type(e).__name__}: {e}")
 
         if props is not None:
             try:
-                t1 = props.qubit_property(qubit, "t1")[0]
+                t1 = props.qubit_property(qubit, "T1")[0]
                 if t1 and t1 > 0:
                     T1_prior, T1_source = float(t1), "live_calibration"
-            except Exception:
-                pass
+            except Exception as e:
+                lookup_errors.append(f"T1: {type(e).__name__}: {e}")
 
             try:
-                t2 = props.qubit_property(qubit, "t2")[0]
+                t2 = props.qubit_property(qubit, "T2")[0]
                 if t2 and t2 > 0:
                     T2_prior, T2_source = float(t2), "live_calibration"
-            except Exception:
-                pass
+            except Exception as e:
+                lookup_errors.append(f"T2: {type(e).__name__}: {e}")
 
             eps_live = None
             try:
                 eps_live = props.gate_error("sx", qubit)
-            except Exception:
+            except Exception as e:
+                lookup_errors.append(f"gate_error(sx): {type(e).__name__}: {e}")
                 try:
                     eps_live = props.gate_error("x", qubit)
-                except Exception:
+                except Exception as e:
+                    lookup_errors.append(f"gate_error(x): {type(e).__name__}: {e}")
                     eps_live = None
             if eps_live is not None:
                 try:
-                    eps_prior  = float(np.clip(eps_live, 0.0, arch["eps_max"]))
-                    eps_source = "live_calibration"
+                    eps_val = float(eps_live)
                 except Exception:
-                    pass
+                    eps_val = float("nan")
+                if eps_val == 0.0:
+                    warnings.warn(f"IBM gate_error for qubit {qubit} is 0; eps_typical "
+                                  f"floored at {_EPS_LIVE_FLOOR:g}")
+                    eps_prior, eps_source = _EPS_LIVE_FLOOR, "live_calibration"
+                    lookup_errors.append(f"gate_error = 0 floored at {_EPS_LIVE_FLOOR:g}")
+                elif np.isfinite(eps_val) and 0.0 < eps_val < arch["eps_max"]:
+                    eps_prior, eps_source = eps_val, "live_calibration"
+                # otherwise (negative, non-finite, >= eps_max): rejected, arch default kept
+
+            try:
+                tg_s = props.gate_length("sx", qubit)  # BackendProperties: SI seconds
+                if tg_s is not None and np.isfinite(tg_s) and tg_s > 0:
+                    gate_time_ns_live = float(tg_s) * 1e9
+            except Exception as e:
+                lookup_errors.append(f"gate_length(sx): {type(e).__name__}: {e}")
 
         T2_prior = min(T2_prior, 2.0*T1_prior)
 
@@ -311,6 +378,11 @@ class BackendProfile:
             custom_arch["eps_typical"] = eps_prior
             custom_arch["p0_given_1"] = p0_given_1
             custom_arch["p1_given_0"] = p1_given_0
+        if gate_time_ns_live is not None:
+            # live sx duration feeds the gate model's z* (_invert_gate)
+            if custom_arch is None:
+                custom_arch = dict(arch)
+            custom_arch["gate_time_ns"] = gate_time_ns_live
 
         calibration_source = CalibrationSource(
             T1_source=T1_source, T2_source=T2_source,
@@ -318,6 +390,7 @@ class BackendProfile:
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             backend=backend_name,
             spam_source=spam_source, spam_note=spam_note,
+            lookup_errors="; ".join(lookup_errors),
         )
 
         print(f"[Canary] IBM live priors — qubit {qubit}: "
@@ -385,8 +458,16 @@ class BackendProfile:
                 fidelity_1q = f1q
                 fidelity_1q_stat_used = "scalar"
             if fidelity_1q is not None:
-                eps_prior  = float(np.clip(1.0 - float(fidelity_1q), 0.0, arch["eps_max"]))
-                eps_source = "live_calibration"
+                eps_val = 1.0 - float(fidelity_1q)
+                if eps_val == 0.0:
+                    warnings.warn(f"IonQ 1q fidelity is 1.0; eps_typical floored at "
+                                  f"{_EPS_LIVE_FLOOR:g}")
+                    print(f"[Canary] IonQ 1Q fidelity = 1.0 -> eps floored at {_EPS_LIVE_FLOOR:g}")
+                    eps_prior, eps_source = _EPS_LIVE_FLOOR, "live_calibration"
+                elif np.isfinite(eps_val) and 0.0 < eps_val < arch["eps_max"]:
+                    eps_prior, eps_source = eps_val, "live_calibration"
+                # otherwise (fidelity > 1, e.g. a percentage such as 99.98, non-finite,
+                # or eps >= eps_max): rejected, arch default kept
                 diag_parts = []
                 if f1q_median is not None:
                     diag_parts.append(f"median_eps={1.0-float(f1q_median):.2e}")
@@ -437,7 +518,6 @@ class BackendProfile:
     def from_architecture(cls, architecture: str, backend_name: str = "unknown",
                           T1_prior_s: Optional[float] = None,
                           T2_prior_s: Optional[float] = None,
-                          dw_max_rad_s: Optional[float] = None,
                           eps_typical: Optional[float] = None,
                           gate_time_ns: Optional[float] = None,
                           p0_given_1: Optional[float] = None,
@@ -445,10 +525,28 @@ class BackendProfile:
         if architecture == "custom":
             raise NotImplementedError("Custom architectures are not currently supported.")
         defaults = ARCH_DEFAULTS.get(architecture, ARCH_DEFAULTS["unknown"])
-        T1 = T1_prior_s or defaults["T1_s"]
-        T2 = min(T2_prior_s or defaults["T2_s"], 2.0*T1)
+        T1 = (defaults["T1_s"] if T1_prior_s is None
+              else _require_pos_finite("T1_prior_s", T1_prior_s))
+        T2 = min(defaults["T2_s"] if T2_prior_s is None
+                 else _require_pos_finite("T2_prior_s", T2_prior_s), 2.0*T1)
+        if eps_typical is not None and not (np.isfinite(eps_typical)
+                                            and 0 < eps_typical <= defaults["eps_max"]):
+            raise ValueError(f"eps_typical must be finite and in "
+                             f"(0, eps_max={defaults['eps_max']}], got {eps_typical!r}")
+        if gate_time_ns is not None:
+            gate_time_ns = _require_pos_finite("gate_time_ns", gate_time_ns)
+        for name, p in (("p0_given_1", p0_given_1), ("p1_given_0", p1_given_0)):
+            if p is not None and not (np.isfinite(p) and 0 <= p < 0.5):
+                raise ValueError(f"{name} must be finite and in [0, 0.5), got {p!r}")
 
         live_p0, live_p1, spam_source, spam_note = fetch_live_spam(architecture)
+        if p0_given_1 is not None or p1_given_0 is not None:
+            spam_source = "user_override"
+            spam_note = ("SPAM overridden by the caller via from_architecture(): "
+                         f"p0|1={defaults['p0_given_1'] if p0_given_1 is None else p0_given_1} "
+                         f"({'ARCH_DEFAULTS' if p0_given_1 is None else 'override'}), "
+                         f"p1|0={defaults['p1_given_0'] if p1_given_0 is None else p1_given_0} "
+                         f"({'ARCH_DEFAULTS' if p1_given_0 is None else 'override'})")
         calibration_source = CalibrationSource(
             T1_source="arch_default", T2_source="arch_default",
             eps_source="arch_default", dw_source="arch_default",
@@ -457,7 +555,7 @@ class BackendProfile:
             spam_source=spam_source, spam_note=spam_note,
         )
 
-        # dw_max_rad_s/eps_typical/gate_time_ns/p0_given_1/p1_given_0 (and
+        # eps_typical/gate_time_ns/p0_given_1/p1_given_0 (and
         # T1/T2 whenever supplied) only take effect via .constants, which
         # otherwise falls straight through to ARCH_DEFAULTS[architecture]
         # unchanged -- build a custom_arch overlay so a caller's explicit
@@ -465,7 +563,7 @@ class BackendProfile:
         # ignored.
         custom_arch = None
         overrides = {"T1_s": T1_prior_s, "T2_s": T2_prior_s,
-                     "dw_max_rad_s": dw_max_rad_s, "eps_typical": eps_typical,
+                     "eps_typical": eps_typical,
                      "gate_time_ns": gate_time_ns,
                      "p0_given_1": p0_given_1, "p1_given_0": p1_given_0}
         if any(v is not None for v in overrides.values()):
@@ -480,11 +578,30 @@ class BackendProfile:
                    prior_confidence="arch_default")
 
     def updated(self, T1_est_s: float, T2_est_s: float) -> "BackendProfile":
+        T1_est_s = _require_pos_finite("T1_est_s", T1_est_s)
+        T2_est_s = _require_pos_finite("T2_est_s", T2_est_s)
         T2_est_s = min(T2_est_s, 2.0*T1_est_s)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if self.calibration_source is not None:
+            cs = dataclasses.replace(self.calibration_source,
+                                     T1_source="updated_from_estimate",
+                                     T2_source="updated_from_estimate", timestamp=now)
+        else:
+            # No provenance record: eps/SPAM are ARCH_DEFAULTS only if custom_arch is None.
+            known = self.custom_arch is None
+            cs = CalibrationSource(
+                T1_source="updated_from_estimate", T2_source="updated_from_estimate",
+                eps_source="arch_default" if known else "unknown", dw_source="arch_default",
+                timestamp=now, backend=self.backend_name,
+                spam_source="literature_fallback" if known else "unknown",
+                spam_note="updated(): source profile had no CalibrationSource")
+        # "prior_informed": the refreshed T1/T2 set the linear delay grids
+        # (arch_default grids do not depend on T1_prior_s/T2_prior_s).
         return BackendProfile(architecture=self.architecture, T1_prior_s=T1_est_s,
                               T2_prior_s=T2_est_s, dt_ns=self.dt_ns,
                               backend_name=self.backend_name, custom_arch=self.custom_arch,
-                              prior_confidence=self.prior_confidence)
+                              calibration_source=cs,
+                              prior_confidence="prior_informed")
 
 
 def get_live_profile(backend, qubit_id: int = 0,
@@ -596,10 +713,12 @@ def _build_echo_circuit(delay_s: float, dt_ns: Optional[float], idx: int):
 
 
 def _default_superconducting_pair(qc, q):
-    """sx, sxdg — Qiskit standard gate, native on IBM superconducting
+    """sx, barrier, sxdg — Qiskit standard gate, native on IBM superconducting
     hardware; used as the generic stand-in for any architecture without
-    a more specific registered pair (matches pre-existing behaviour)."""
+    a more specific registered pair (matches pre-existing behaviour). The
+    barrier stops the transpiler cancelling sx.sxdg as an identity."""
     qc.sx(q)
+    qc.barrier(q)
     qc.sxdg(q)
 
 
@@ -607,13 +726,16 @@ def _default_trapped_ion_pair(qc, q):
     """GPI2(0), GPI2(0.5) — native IonQ pulses; GPI2(0.5) is verified
     equal to GPI2(0)^dagger, so the pair nets to identity exactly as
     sx/sxdg does. Falls back to an equivalent R-gate decomposition if
-    qiskit_ionq is not installed."""
+    qiskit_ionq is not installed. A barrier separates the two gates in
+    both branches so the transpiler cannot cancel the pair."""
     try:
         from qiskit_ionq.ionq_gates import GPI2Gate
         qc.append(GPI2Gate(0.0), [q])
+        qc.barrier(q)
         qc.append(GPI2Gate(0.5), [q])
     except ImportError:
         qc.r(np.pi / 2, 0.0, q)
+        qc.barrier(q)
         qc.r(np.pi / 2, np.pi, q)
 
 
@@ -645,9 +767,14 @@ def register_native_pair(architecture: str, pair_fn) -> None:
     from coherent over-rotation — see the design note in build_probe_circuits
     and Section IV of the paper.
 
+    pair_fn should place a barrier between G and G^-1 (qc.barrier(q)) so
+    the transpiler cannot cancel the pair as an identity;
+    _build_gate_rep_circuit() inserts a barrier between successive pairs.
+
     Example (hypothetical new backend with a native Rx(pi/2)):
         def my_pair(qc, q):
             qc.rx(np.pi / 2, q)
+            qc.barrier(q)
             qc.rx(-np.pi / 2, q)
         register_native_pair("myvendor_custom", my_pair)
 
@@ -676,6 +803,7 @@ def _build_gate_rep_circuit(N: int, architecture: str = "superconducting"):
     qc = QuantumCircuit(1, 1, name=f"gate_rep_N{N}")
     for _ in range(N):
         _sqrtx_native_inverse_pair(qc, 0, architecture)
+        qc.barrier(0)
     qc.measure(0, 0)
     return qc
 
@@ -791,6 +919,56 @@ def forward_gate(N, epsilon_sx: float, p0_given_1: float = 0.0, p1_given_0: floa
     return p_ideal * (1.0 - p1_given_0) + (1.0 - p_ideal) * p0_given_1
 
 
+def forward_gate_affine(N, epsilon_sx: float, z_star: float,
+                        p0_given_1: float = 0.0, p1_given_0: float = 0.0):
+    """Gate-repetition P0 for a non-unital (affine) per-pair channel.
+
+    For the native pair the Z Bloch component obeys z -> R_zz*z + R_z0
+    (e.g. amplitude damping toward |0> during the gates). Starting from
+    z_0 = 1, after N pairs z_N = z* + (1 - z*)*lambda**(2N) with
+    lambda = 1 - 2*epsilon_sx (R_zz = lambda**2) and fixed point
+    z* = R_z0/(1 - R_zz); P_ideal(0) = (1 + z_N)/2, then readout error is
+    applied as in forward_gate. z_star = 0 reproduces forward_gate exactly.
+    z_star is not fitted: _invert_gate computes it (_gate_z_star) from the
+    run's fitted T1, combined T2 and the gate time t_g, for the per-gate
+    channel thermal relaxation (T=0) over t_g followed by depolarizing.
+    """
+    N = np.asarray(N, dtype=float)
+    z = z_star + (1.0 - z_star) * (1.0 - 2.0*epsilon_sx)**(2.0*N)
+    p_ideal = 0.5 * (1.0 + z)
+    return p_ideal * (1.0 - p1_given_0) + (1.0 - p_ideal) * p0_given_1
+
+
+def _irls_refit(model, xdata, ydata, popt, pcov, shots, bounds):
+    """Iteratively re-weighted refit shared by the four probe fits.
+
+    The first curve_fit weights each point by sqrt(p(1-p)/shots) (floor
+    1e-3) evaluated at the SEED guess; with absolute_sigma=True a poor seed
+    mis-scales pcov. Up to 2 passes re-evaluate the same weight formula and
+    floor at the current fitted model and refit from the previous optimum
+    with the same bounds/maxfev/absolute_sigma. If a pass raises, the last
+    successful (popt, pcov) is kept.
+    """
+    # 2 passes: the weights depend on the fit only through p(1-p). In a
+    # model-consistent binomial Monte-Carlo (800 SC+TI draws) 6 passes changed
+    # no estimate or sigma by more than 0.25% relative to 2 passes.
+    for _ in range(2):
+        try:
+            p_fit = model(xdata, *popt)
+            fit_sigma = np.maximum(np.sqrt(np.clip(p_fit*(1.0-p_fit), 0, None)/shots), 1e-3)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=RuntimeWarning)
+                popt_new, pcov_new = curve_fit(model, xdata, ydata,
+                                               p0=popt,
+                                               sigma=fit_sigma, absolute_sigma=True,
+                                               bounds=bounds,
+                                               maxfev=10_000)
+        except Exception:
+            break
+        popt, pcov = popt_new, pcov_new
+    return popt, pcov
+
+
 def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
                T1_prior_s: float, arch: dict, shots_t1: int) -> tuple[float, float, float]:
     p0_given_1 = arch.get("p0_given_1", 0.0)
@@ -815,6 +993,8 @@ def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
                                    sigma=fit_sigma, absolute_sigma=True,
                                    bounds=([arch["T1_min_s"]], [arch["T1_max_s"]]),
                                    maxfev=10_000)
+            popt, pcov = _irls_refit(spam_model, tau_s, p1_measured, popt, pcov,
+                                     shots_t1, ([arch["T1_min_s"]], [arch["T1_max_s"]]))
         T1    = float(popt[0])
         sigma = float(np.sqrt(np.diag(pcov))[0])
         resid = float(np.sum((p1_measured - spam_model(tau_s, T1))**2))
@@ -887,6 +1067,9 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
                                    sigma=fit_sigma, absolute_sigma=True,
                                    bounds=([T2_min], [T2_max]),
                                    maxfev=10_000)
+            # Re-weighting only; dw stays frozen inside xy_model.
+            popt, pcov = _irls_refit(xy_model, ramsey_delays, xy_meas, popt, pcov,
+                                     shots_ramsey, ([T2_min], [T2_max]))
         T2    = float(popt[0])
         sT2   = float(np.sqrt(np.diag(pcov))[0])
         resid = float(np.sum((xy_meas - xy_model(None, T2))**2))
@@ -896,14 +1079,58 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
     return T2, sT2, dw, sdw, resid
 
 
+def _gate_z_star(epsilon_sx: float, T1_s: float, T2_s: float, gate_time_s: float) -> float:
+    """Fixed point z* of the native pair's Z Bloch map (forward_gate_affine).
+
+    Per native gate: thermal relaxation (T=0) over t_g, then depolarizing
+    with Bloch shrink d: (x, y, z) -> (d*a*x, d*a*y, d*(b*z + 1 - b)),
+    a = exp(-t_g/T2), b = exp(-t_g/T1), T2 capped at 2*T1. For the pair,
+    z -> d^2*a*b*z + d*(1 - b). With (1 - 2*eps)^2 = d^2*a*b this gives
+    z* = (1 - 2*eps)*(1 - b) / (sqrt(a*b)*(1 - (1 - 2*eps)^2)), clipped to
+    [0, 1] (eps below the coherence floor (1 - sqrt(a*b))/2 would need
+    d > 1). If 1 - (1 - 2*eps)^2 <= 1e-15 (eps ~ 0) returns 1, i.e.
+    P_ideal(0) = 1, avoiding 0/0.
+    """
+    T2_s = min(T2_s, 2.0 * T1_s)
+    a = np.exp(-gate_time_s / T2_s)
+    b = np.exp(-gate_time_s / T1_s)
+    lam = 1.0 - 2.0 * float(epsilon_sx)
+    den = 1.0 - lam**2
+    if den <= 1e-15:
+        return 1.0
+    return float(np.clip(lam * (1.0 - b) / (np.sqrt(a * b) * den), 0.0, 1.0))
+
+
 def _invert_gate(p0_measured: np.ndarray, N_values: np.ndarray,
-                  arch: dict, shots_gate: int) -> tuple[float, float, float]:
+                  arch: dict, shots_gate: int,
+                  T1_est_s: Optional[float] = None, T2_est_s: Optional[float] = None,
+                  gate_time_s: Optional[float] = None) -> tuple[float, float, float, float]:
+    """Returns (epsilon_sx, sigma_epsilon, residual, z_star); epsilon_sx is
+    the only fitted parameter. If T1_est_s, T2_est_s and gate_time_s are all
+    finite and > 0, the model is forward_gate_affine with z_star =
+    _gate_z_star(epsilon_sx, T1_est_s, T2_est_s, gate_time_s) recomputed at
+    each trial epsilon_sx (not fitted); z_star is returned at the fitted
+    epsilon_sx. Otherwise z_star = 0: forward_gate, the unital model, which
+    ignores relaxation toward |0> during the gates. Same model for 2 or
+    >= 3 repetition counts."""
     p0_given_1 = arch.get("p0_given_1", 0.0)
     p1_given_0 = arch.get("p1_given_0", 0.0)
     spam_model = lambda N_values, epsilon_sx: forward_gate(N_values, epsilon_sx, p0_given_1, p1_given_0)
+    affine_model = lambda N_values, epsilon_sx, z_star: forward_gate_affine(
+        N_values, epsilon_sx, z_star, p0_given_1, p1_given_0)
+    if all(v is not None and np.isfinite(v) and v > 0 for v in (T1_est_s, T2_est_s, gate_time_s)):
+        z_of_eps = lambda epsilon_sx: _gate_z_star(epsilon_sx, T1_est_s, T2_est_s, gate_time_s)
+        gate_model = lambda N_values, epsilon_sx: affine_model(N_values, epsilon_sx, z_of_eps(epsilon_sx))
+        # Coherence floor (1 - sqrt(a*b))/2: eps with d = 1 (no depolarizing).
+        eps_floor = float((1.0 - np.sqrt(np.exp(-gate_time_s / min(T2_est_s, 2.0 * T1_est_s))
+                                         * np.exp(-gate_time_s / T1_est_s))) / 2.0)
+    else:
+        z_of_eps = lambda epsilon_sx: 0.0
+        gate_model = spam_model
+        eps_floor = 0.0
 
     if len(p0_measured) < 2:
-        return arch["eps_typical"], float("inf"), float("inf")
+        return arch["eps_typical"], float("inf"), float("inf"), 0.0
 
     denom    = float(p0_measured[0]) - float(p0_measured[1])
     eps_guess = arch["eps_typical"]
@@ -912,22 +1139,28 @@ def _invert_gate(p0_measured: np.ndarray, N_values: np.ndarray,
         if 0 < x < 1:
             eps_guess = float(np.clip((1 - x**(1.0/(2.0*N_values[0])))/2.0,
                                       0.0, arch["eps_max"]))
+    # Seed at or above the coherence floor: well below it z* is clipped at 1,
+    # the model is flat in eps and the fit cannot leave the seed.
+    eps_guess = max(eps_guess, eps_floor)
     p_guess = spam_model(N_values, eps_guess)
     fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_gate), 1e-3)
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
-            popt, pcov = curve_fit(spam_model, N_values, p0_measured,
+            popt, pcov = curve_fit(gate_model, N_values, p0_measured,
                                    p0=[eps_guess],
                                    sigma=fit_sigma, absolute_sigma=True,
                                    bounds=([0.0], [arch["eps_max"]]),
                                    maxfev=10_000)
-        eps   = float(popt[0])
-        sigma = float(np.sqrt(np.diag(pcov))[0])
-        resid = float(np.sum((p0_measured - spam_model(N_values, eps))**2))
+            popt, pcov = _irls_refit(gate_model, N_values, p0_measured, popt, pcov,
+                                     shots_gate, ([0.0], [arch["eps_max"]]))
+        eps    = float(popt[0])
+        z_star = float(z_of_eps(eps))
+        sigma  = float(np.sqrt(pcov[0, 0]))
+        resid  = float(np.sum((p0_measured - affine_model(N_values, eps, z_star))**2))
     except Exception:
-        eps, sigma, resid = eps_guess, np.inf, np.inf
-    return eps, sigma, resid
+        eps, sigma, resid, z_star = eps_guess, np.inf, np.inf, 0.0
+    return eps, sigma, resid, z_star
 
 
 def _invert_echo(p1_measured: np.ndarray, tau_s: np.ndarray,
@@ -940,7 +1173,9 @@ def _invert_echo(p1_measured: np.ndarray, tau_s: np.ndarray,
     denom     = float(p1_measured[0]) - float(p1_measured[1])
     T2_min    = arch["T2_min_s"]
     T2_max    = 2.0 * T1_estimate_s
-    T2_guess  = float(np.clip(T2_max * 0.5, T2_min, T2_max))
+    # Fallback seed: lindblad_inversion passes profile.T2_prior_s in the
+    # T1_prior_s slot, so this seeds from the T2 prior (not from T1_est).
+    T2_guess  = float(np.clip(T1_prior_s, T2_min, T2_max))
     if abs(denom) > 1e-6:
         x = (float(p1_measured[1]) - float(p1_measured[2])) / denom
         if 0 < x < 1:
@@ -956,12 +1191,20 @@ def _invert_echo(p1_measured: np.ndarray, tau_s: np.ndarray,
                                    sigma=fit_sigma, absolute_sigma=True,
                                    bounds=([T2_min], [T2_max]),
                                    maxfev=10_000)
+            popt, pcov = _irls_refit(spam_model, tau_s, p1_measured, popt, pcov,
+                                     shots_echo, ([T2_min], [T2_max]))
         T2_echo    = float(popt[0])
         sigma      = float(np.sqrt(np.diag(pcov))[0])
         resid      = float(np.sum((p1_measured - spam_model(tau_s, T2_echo))**2))
     except Exception:
         T2_echo, sigma, resid = T2_guess, np.inf, np.inf
     return T2_echo, sigma, resid
+
+
+def _fit_failed(sigma: float) -> bool:
+    """A probe fit failed if curve_fit raised (the _invert_* fallbacks return
+    sigma = inf) or sigma is non-finite or exactly 0.0 (degenerate pcov)."""
+    return not np.isfinite(sigma) or sigma == 0.0
 
 
 def _chi2_per_dof(measured: np.ndarray, predicted: np.ndarray,
@@ -1000,6 +1243,7 @@ class InversionResult:
     echo_chi2_dof:      float = 0.0
     calibration_source: Optional[CalibrationSource] = None
     prior_warning:      str = ""
+    gate_z_star:        float = 0.0
 
     def summary(self, arch: Optional[dict] = None) -> str:
         if arch is None:
@@ -1041,6 +1285,22 @@ def lindblad_inversion(counts_list: list[dict],
     expected = n_t1 + n_ramsey + n_gate + n_echo
     if len(counts_list) != expected:
         raise ValueError(f"Expected {expected} count dicts, got {len(counts_list)}")
+    shots_per_circuit = ([shots_t1]*n_t1 + [shots_ramsey]*n_ramsey
+                         + [shots_gate]*n_gate + [shots_echo]*n_echo)
+    normalized = []
+    for i, (c, sh) in enumerate(zip(counts_list, shots_per_circuit)):
+        cn = {str(k): v for k, v in c.items()}
+        if len(cn) != len(c) or not set(cn) <= {"0", "1"}:
+            raise ValueError(f"counts_list[{i}]: keys must be '0'/'1' only, "
+                             f"got {list(c.keys())!r}")
+        if not all(isinstance(v, (int, np.integer)) and v >= 0 for v in cn.values()):
+            raise ValueError(f"counts_list[{i}]: counts must be non-negative integers, "
+                             f"got {c!r}")
+        if sum(cn.values()) != sh:
+            raise ValueError(f"counts_list[{i}]: counts sum to {sum(cn.values())}, "
+                             f"expected {sh} shots")
+        normalized.append(cn)
+    counts_list = normalized
 
     t1_counts     = counts_list[:n_t1]
     ramsey_counts = counts_list[n_t1:n_t1+n_ramsey]
@@ -1050,6 +1310,10 @@ def lindblad_inversion(counts_list: list[dict],
     p1_t1 = np.array([c.get("1",0)/shots_t1 for c in t1_counts])
     t1d   = np.array(metadata["t1_delays_s"])
     T1, sT1, r_t1 = _invert_t1(p1_t1, t1d, profile.T1_prior_s, arch, shots_t1)
+    # On a failed fit the REPORTED value is NaN +/- inf; the fallback value is
+    # still used internally (chi2, T2_max = 2*T1 bounds of Ramsey/echo).
+    t1_failed = _fit_failed(sT1)
+    T1_rep, sT1_rep = (float("nan"), float("inf")) if t1_failed else (T1, sT1)
 
     t1_chi2 = _chi2_per_dof(p1_t1,
         forward_t1(t1d, T1, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
@@ -1062,6 +1326,7 @@ def lindblad_inversion(counts_list: list[dict],
     T2, sT2, dw, sdw, r_ram = _invert_ramsey_3t(
         p1_x_arr, p1_y_arr, ramsey_delays, profile.T2_prior_s, arch,
         T1_estimate_s=T1, shots_ramsey=shots_ramsey)
+    ramsey_failed = _fit_failed(sT2)
 
     px_pred, py_pred = forward_ramsey_xy(
         ramsey_delays, T2, dw,
@@ -1072,18 +1337,12 @@ def lindblad_inversion(counts_list: list[dict],
     # delta_omega (arctan2 on the first delay) from these same points.
     ramsey_chi2 = _chi2_per_dof(ramsey_meas, ramsey_pred, shots_ramsey, n_params=2)
 
-    p0_gate = np.array([c.get("0",0)/shots_gate for c in gate_counts])
-    N_vals  = np.array(metadata["gate_rep_N"], dtype=float)
-    eps, seps, r_gate = _invert_gate(p0_gate, N_vals, arch, shots_gate)
-    gate_chi2 = _chi2_per_dof(p0_gate,
-        forward_gate(N_vals, eps, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
-        shots_gate, n_params=1)
-
     p1_echo   = np.array([c.get("1",0)/shots_echo for c in echo_counts])
     echo_delays = np.array(metadata["echo_delays_s"])
     T2_echo, sT2_echo, r_echo = _invert_echo(
         p1_echo, echo_delays, profile.T2_prior_s, arch,
         T1_estimate_s=T1, shots_echo=shots_echo)
+    echo_failed = _fit_failed(sT2_echo)
     echo_chi2 = _chi2_per_dof(p1_echo,
         forward_echo(echo_delays, T2_echo, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
         shots_echo, n_params=1)
@@ -1101,39 +1360,65 @@ def lindblad_inversion(counts_list: list[dict],
     else:
         T2_combined = (w_ramsey*T2 + w_echo*T2_echo) / (w_ramsey + w_echo)
         sT2_combined = float(np.sqrt(1.0/(w_ramsey + w_echo)))
+    if ramsey_failed and echo_failed:
+        T2_combined, sT2_combined = float("nan"), float("inf")
+
+    p0_gate = np.array([c.get("0",0)/shots_gate for c in gate_counts])
+    N_vals  = np.array(metadata["gate_rep_N"], dtype=float)
+    # Placed after the T2 fusion: z* is computed from this run's T1, combined
+    # T2 and the gate time; eps is the only fitted parameter (n_params=1).
+    # Reported T1/T2 are passed: NaN after a failed fit gives z* = 0 (unital).
+    gate_time_ns = arch.get("gate_time_ns")
+    eps, seps, r_gate, z_star = _invert_gate(
+        p0_gate, N_vals, arch, shots_gate, T1_est_s=T1_rep, T2_est_s=T2_combined,
+        gate_time_s=gate_time_ns * 1e-9 if gate_time_ns is not None else None)
+    gate_chi2 = _chi2_per_dof(p0_gate,
+        forward_gate_affine(N_vals, eps, z_star, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
+        shots_gate, n_params=1)
+
+    gate_failed = _fit_failed(seps)
 
     prior_warning = ""
-    if profile.prior_confidence == "arch_default":
-        chi2_dof_checks = [
-            ("T1", t1_chi2, t1d, "T1_prior_s"),
-            ("Ramsey/T2", ramsey_chi2, ramsey_delays, "T2_prior_s"),
-            ("Echo/T2", echo_chi2, echo_delays, "T2_prior_s"),
-            ("Gate-rep/eps", gate_chi2, N_vals, "eps_typical"),
-        ]
-        messages = []
-        for label, chi2, delays_arr, prior_name in chi2_dof_checks:
-            if np.isfinite(chi2) and chi2 > 7.0:
-                vals = [float(v) for v in np.asarray(delays_arr)]
-                messages.append(
-                    f"WARNING: {label} chi2/dof={chi2:.1f} >> 1. Delays may not "
-                    f"span the true timescale. Consider re-running with updated "
-                    f"{prior_name}. Current values: {vals}.")
-        if messages:
-            prior_warning = "\n".join(messages)
-            for msg in messages:
-                print(f"[Canary] {msg}")
+    chi2_dof_checks = [
+        ("T1", t1_chi2, t1d, "T1_prior_s"),
+        ("Ramsey/T2", ramsey_chi2, ramsey_delays, "T2_prior_s"),
+        ("Echo/T2", echo_chi2, echo_delays, "T2_prior_s"),
+        ("Gate-rep/eps", gate_chi2, N_vals, "eps_typical"),
+    ]
+    messages = []
+    for label, chi2, delays_arr, prior_name in chi2_dof_checks:
+        if np.isfinite(chi2) and chi2 > 7.0:
+            vals = [float(v) for v in np.asarray(delays_arr)]
+            if profile.prior_confidence == "arch_default":
+                advice = (f"Delays may not span the true timescale. Consider "
+                          f"re-running with updated {prior_name}.")
+            else:
+                advice = (f"The model may not describe this device (non-Markovian "
+                          f"noise, coherent error) or priors may be stale "
+                          f"({prior_name}).")
+            messages.append(
+                f"WARNING: {label} chi2/dof={chi2:.1f} >> 1. {advice} "
+                f"Current values: {vals}.")
+    if messages:
+        prior_warning = "\n".join(messages)
+        for msg in messages:
+            print(f"[Canary] {msg}")
 
     return InversionResult(
         backend_name=metadata.get("backend_name", profile.backend_name),
         qubit_id=qubit_id, timestamp=timestamp, architecture=profile.architecture,
-        T1_s=T1, T1_sigma_s=sT1,
+        T1_s=T1_rep, T1_sigma_s=sT1_rep,
         T2_s=T2_combined, T2_sigma_s=sT2_combined,
         delta_omega=dw, delta_omega_sigma=sdw,
-        epsilon_sx=eps, epsilon_sx_sigma=seps,
+        epsilon_sx=float("nan") if gate_failed else eps,
+        epsilon_sx_sigma=float("inf") if gate_failed else seps,
         t1_residual=r_t1, ramsey_residual=r_ram, gate_residual=r_gate,
         t1_chi2_dof=t1_chi2, ramsey_chi2_dof=ramsey_chi2, gate_chi2_dof=gate_chi2,
-        T2_ramsey_s=T2, T2_ramsey_sigma_s=sT2,
-        T2_echo_s=T2_echo, T2_echo_sigma_s=sT2_echo,
+        T2_ramsey_s=float("nan") if ramsey_failed else T2,
+        T2_ramsey_sigma_s=float("inf") if ramsey_failed else sT2,
+        T2_echo_s=float("nan") if echo_failed else T2_echo,
+        T2_echo_sigma_s=float("inf") if echo_failed else sT2_echo,
         echo_residual=r_echo, echo_chi2_dof=echo_chi2,
         calibration_source=profile.calibration_source,
-        prior_warning=prior_warning)
+        prior_warning=prior_warning,
+        gate_z_star=z_star)

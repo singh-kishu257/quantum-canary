@@ -4,7 +4,10 @@ Per instance: 1c.generate_device(regime="ideal") -> hidden DeviceTruth;
 1c.generate_calibration_prior() -> what Canary may know; 1_inversion builds its
 own probe circuits from the prior; 1c.simulate_probe() executes them on Aer;
 1_inversion.lindblad_inversion() recovers T1, T2, delta_omega, epsilon_sx.
-Ground truth is read only by the simulator and by the final comparison.
+Ground truth is read by the simulator, by the calibration-prior generator
+(which perturbs T1, T2, eps by U(1±f) and passes SPAM through exactly -- an
+oracle-SPAM idealisation; see --spam-scale/--spam-swap), and by the final
+comparison.
 
 epsilon truth is 1c.effective_gate_epsilon(): the per-gate error of the
 simulated channel, including gate-time decoherence, in 1_inversion's
@@ -58,8 +61,25 @@ CSV_COLUMNS = [
     "success", "fit_status", "sigma_canary", "chi2_dof", "chi2_dof_secondary",
     "shots_total", "prior_value", "prior_absolute_error", "prior_relative_error",
     "timestamp_utc",
+    "perturbation_frac", "spam_scale", "spam_swap", "spam_spread", "cold_start",
+    "dw_population", "dw_aliased",
 ]
 NAN = float("nan")
+
+# Benchmark-design configuration (CLI flags). These defaults reproduce the
+# pre-flag benchmark exactly; each value is recorded (resolved) in the CSV.
+DEFAULT_CFG: Dict[str, Any] = {
+    "perturbation_frac": None,          # None -> 1c _CALIB_PERTURBATION table
+    "spam_scale": 1.0,                  # multiplies the SPAM handed to the inversion
+    "spam_swap": False,                 # swap p0|1 <-> p1|0 handed to the inversion
+    "spam_spread": 0.0,                 # 1c generate_device(spam_spread_frac=...)
+    "cold_start": False,                # arch_default profile instead of the prior
+    "dw_population": "estimator_window",  # 1c generate_device(dw_population=...)
+}
+# Upper clip for the SPAM handed to the inversion: keeps each readout error
+# below 0.5 and 1 - p0|1 - p1|0 >= 0.002 > 0, so the readout contrast used by
+# the forward models never vanishes or inverts.
+SPAM_CLIP_MAX = 0.499
 
 
 def _abs_error(value: float, truth_value: float) -> float:
@@ -84,25 +104,72 @@ def _row(architecture: str, instance_id: int, seed: int, parameter: str,
     return row
 
 
-def run_one_instance(architecture: str, instance_id: int, seed: int) -> List[Dict[str, Any]]:
-    timestamp = datetime.now(timezone.utc).isoformat()
-    try:
-        truth = sim.generate_device(architecture, n_qubits=1, seed=seed, regime="ideal")
-        prior = sim.generate_calibration_prior(truth, qubit=0, t0_s=0.0)
+def _resolve_cfg(cfg: Any = None) -> Dict[str, Any]:
+    out = dict(DEFAULT_CFG)
+    if cfg:
+        unknown = set(cfg) - set(DEFAULT_CFG)
+        if unknown:
+            raise ValueError(f"unknown config keys {sorted(unknown)}")
+        out.update(cfg)
+    return out
 
-        constants = dict(inv.ARCH_DEFAULTS[architecture])
-        constants.update(T1_s=prior.T1_prior_s, T2_s=prior.T2_prior_s,
-                         eps_typical=prior.epsilon_prior,
-                         p0_given_1=prior.spam_p0_given_1_prior,
-                         p1_given_0=prior.spam_p1_given_0_prior)
-        profile = inv.BackendProfile(
-            architecture=architecture,
-            T1_prior_s=prior.T1_prior_s,
-            T2_prior_s=prior.T2_prior_s,
-            dt_ns=inv.ARCH_DEFAULTS[architecture]["dt_ns"],
-            backend_name=f"ideal_parity_sim::{architecture}",
-            custom_arch=constants,
-            prior_confidence="live")
+
+def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolved config values recorded in every row of the instance."""
+    pf = c["perturbation_frac"]
+    if pf is None:
+        pf = sim.resolve_calibration_perturbation(architecture, "ideal")
+    return {"perturbation_frac": float(pf), "spam_scale": float(c["spam_scale"]),
+            "spam_swap": bool(c["spam_swap"]), "spam_spread": float(c["spam_spread"]),
+            "cold_start": bool(c["cold_start"]), "dw_population": str(c["dw_population"])}
+
+
+def _inversion_spam(prior: Any, c: Dict[str, Any]):
+    """SPAM handed to the inversion: the prior's (oracle) SPAM scaled by
+    spam_scale, then swapped if spam_swap, then clipped to [0, SPAM_CLIP_MAX].
+    Truth and the prior_value columns are untouched."""
+    p01 = prior.spam_p0_given_1_prior * c["spam_scale"]
+    p10 = prior.spam_p1_given_0_prior * c["spam_scale"]
+    if c["spam_swap"]:
+        p01, p10 = p10, p01
+    return (float(np.clip(p01, 0.0, SPAM_CLIP_MAX)),
+            float(np.clip(p10, 0.0, SPAM_CLIP_MAX)))
+
+
+def run_one_instance(architecture: str, instance_id: int, seed: int,
+                     cfg: Any = None) -> List[Dict[str, Any]]:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    c = _resolve_cfg(cfg)
+    cfg_cols = _config_columns(architecture, c)
+    try:
+        truth = sim.generate_device(architecture, n_qubits=1, seed=seed, regime="ideal",
+                                    spam_spread_frac=c["spam_spread"],
+                                    perturbation_frac=c["perturbation_frac"],
+                                    dw_population=c["dw_population"])
+        prior = sim.generate_calibration_prior(truth, qubit=0, t0_s=0.0,
+                                               perturbation_frac=c["perturbation_frac"])
+        p0_given_1, p1_given_0 = _inversion_spam(prior, c)
+
+        if c["cold_start"]:
+            # Architecture-default grid and eps_typical; the prior is still
+            # generated above and recorded in the prior_* columns.
+            profile = inv.BackendProfile.from_architecture(
+                architecture, backend_name=f"ideal_parity_sim::{architecture}",
+                p0_given_1=p0_given_1, p1_given_0=p1_given_0)
+        else:
+            constants = dict(inv.ARCH_DEFAULTS[architecture])
+            constants.update(T1_s=prior.T1_prior_s, T2_s=prior.T2_prior_s,
+                             eps_typical=prior.epsilon_prior,
+                             p0_given_1=p0_given_1,
+                             p1_given_0=p1_given_0)
+            profile = inv.BackendProfile(
+                architecture=architecture,
+                T1_prior_s=prior.T1_prior_s,
+                T2_prior_s=prior.T2_prior_s,
+                dt_ns=inv.ARCH_DEFAULTS[architecture]["dt_ns"],
+                backend_name=f"ideal_parity_sim::{architecture}",
+                custom_arch=constants,
+                prior_confidence="prior_informed")
 
         circuits, meta = inv.build_probe_circuits(profile)
         for qc in circuits:
@@ -114,8 +181,11 @@ def run_one_instance(architecture: str, instance_id: int, seed: int) -> List[Dic
         if len(shots_list) != len(circuits):
             raise RuntimeError(f"{len(shots_list)} shot entries != {len(circuits)} circuits")
 
+        # Independent shot noise per circuit: circuit i uses Aer seed seed*1000 + i
+        # (a probe has far fewer than 1000 circuits, so seeds never collide across instances).
         sim_result = sim.simulate_probe(circuits, truth, shots=shots_list,
-                                        t_s=0.0, dt_ns=profile.dt_ns)
+                                        t_s=0.0, dt_ns=profile.dt_ns,
+                                        seed=int(seed) * 1000)
         result = inv.lindblad_inversion(
             sim_result.counts_list, meta, profile,
             shots_t1=SHOTS_T1, shots_ramsey=SHOTS_RAMSEY, shots_gate=SHOTS_GATE,
@@ -143,6 +213,10 @@ def run_one_instance(architecture: str, instance_id: int, seed: int) -> List[Dic
                   "T2_s": float(prior.T2_prior_s),
                   "delta_omega": NAN,
                   "epsilon_sx": float(prior.epsilon_prior)}
+        # Post-inversion comparison only: would the true |delta_omega| alias
+        # (accumulate > pi) at the shortest Ramsey delay actually probed?
+        dw_aliased = {"delta_omega": bool(true_values["delta_omega"]
+                                          * meta["ramsey_delays_s"][0] > np.pi)}
 
         rows = []
         for param in PARAMETERS:
@@ -158,12 +232,14 @@ def run_one_instance(architecture: str, instance_id: int, seed: int) -> List[Dic
                 chi2_dof_secondary=chi2_secondary.get(param, NAN),
                 shots_total=sum(shots_list), prior_value=pv,
                 prior_absolute_error=_abs_error(pv, tv),
-                prior_relative_error=_rel_error(pv, tv)))
+                prior_relative_error=_rel_error(pv, tv),
+                dw_aliased=dw_aliased.get(param, NAN), **cfg_cols))
         return rows
 
     except Exception as exc:
         status = f"exception:{type(exc).__name__}:{exc}"
-        return [_row(architecture, instance_id, seed, p, timestamp, fit_status=status)
+        return [_row(architecture, instance_id, seed, p, timestamp, fit_status=status,
+                     **cfg_cols)
                 for p in PARAMETERS]
 
 
@@ -174,8 +250,8 @@ def _worker(job) -> List[Dict[str, Any]]:
 
 
 def run_architecture(architecture: str, n_instances: int, seed_offset: int,
-                     n_workers: int) -> List[Dict[str, Any]]:
-    jobs = [(architecture, i, seed_offset + i) for i in range(n_instances)]
+                     n_workers: int, cfg: Any = None) -> List[Dict[str, Any]]:
+    jobs = [(architecture, i, seed_offset + i, cfg) for i in range(n_instances)]
     print(f"[ideal_parity] {architecture}: {n_instances} instances, seeds "
           f"{seed_offset}..{seed_offset + n_instances - 1}, {n_workers} workers", flush=True)
 
@@ -258,6 +334,9 @@ def summarize(rows: List[Dict[str, Any]]) -> None:
             finite = vals[np.isfinite(vals)]
             med = float(np.median(finite)) * 100 if len(finite) else NAN
             print(f"     {param:12s} {med:8.2f}%   ({len(finite)}/{len(vals)} finite)")
+        n_aliased = sum(1 for r in arch_rows
+                        if r["parameter"] == "delta_omega" and r["dw_aliased"] is True)
+        print(f"     dw_aliased: {n_aliased}/{n_inst} instances")
 
 
 def _read_csv(path: pathlib.Path) -> List[Dict[str, Any]]:
@@ -273,8 +352,13 @@ def _read_csv(path: pathlib.Path) -> List[Dict[str, Any]]:
             row["success"] = str(row["success"]).strip().lower() == "true"
             for key in ("true_value", "canary_value", "absolute_error", "relative_error",
                         "sigma_canary", "chi2_dof", "chi2_dof_secondary",
-                        "prior_value", "prior_absolute_error", "prior_relative_error"):
+                        "prior_value", "prior_absolute_error", "prior_relative_error",
+                        "perturbation_frac", "spam_scale", "spam_spread"):
                 row[key] = float(row[key]) if row[key] not in ("", None) else NAN
+            for key in ("spam_swap", "cold_start"):
+                row[key] = str(row[key]).strip().lower() == "true"
+            flag = str(row["dw_aliased"]).strip().lower()
+            row["dw_aliased"] = {"true": True, "false": False}.get(flag, NAN)
             rows.append(row)
     return rows
 
@@ -317,10 +401,33 @@ def main() -> None:
     ap.add_argument("--seed-offset", type=int, default=None)
     ap.add_argument("--out", required=True, type=pathlib.Path)
     ap.add_argument("--workers", type=int, default=None)
+    ap.add_argument("--perturbation-frac", type=float, default=None,
+                    help="calibration-prior envelope half-width f (default: 1c table); "
+                         "also sets the matching generate_device dw ceiling")
+    ap.add_argument("--spam-scale", type=float, default=1.0,
+                    help="scale the SPAM handed to the inversion (truth untouched)")
+    ap.add_argument("--spam-swap", action="store_true",
+                    help="swap p0|1 and p1|0 handed to the inversion (truth untouched)")
+    ap.add_argument("--spam-spread", type=float, default=0.0,
+                    help="generate_device(spam_spread_frac=...)")
+    ap.add_argument("--cold-start", action="store_true",
+                    help="use the architecture-default profile instead of the prior")
+    ap.add_argument("--dw-population", choices=["estimator_window", "independent"],
+                    default="estimator_window",
+                    help="generate_device(dw_population=...)")
     args = ap.parse_args()
 
     if args.n_instances <= 0:
         sys.exit("--n-instances must be positive")
+    if args.perturbation_frac is not None and not 0.0 <= args.perturbation_frac < 1.0:
+        sys.exit("--perturbation-frac must be in [0, 1)")
+    if args.spam_scale < 0.0:
+        sys.exit("--spam-scale must be non-negative")
+    if not 0.0 <= args.spam_spread < 1.0:
+        sys.exit("--spam-spread must be in [0, 1)")
+    cfg = {"perturbation_frac": args.perturbation_frac, "spam_scale": args.spam_scale,
+           "spam_swap": args.spam_swap, "spam_spread": args.spam_spread,
+           "cold_start": args.cold_start, "dw_population": args.dw_population}
     if args.combine:
         combine(args.input, args.out, args.n_instances)
         return
@@ -338,7 +445,7 @@ def main() -> None:
     for architecture in architectures:
         offset = (args.seed_offset if args.seed_offset is not None
                   else ARCH_SEED_OFFSET[architecture])
-        rows.extend(run_architecture(architecture, args.n_instances, offset, n_workers))
+        rows.extend(run_architecture(architecture, args.n_instances, offset, n_workers, cfg))
 
     problems = validate_rows(rows, args.n_instances, architectures)
     write_csv(rows, args.out)

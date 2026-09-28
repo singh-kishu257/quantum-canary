@@ -6,10 +6,60 @@ Models quantum hardware in-silico for superconducting and trapped-ion qubits
 under two regimes:
 
     ideal / model_consistent  -- correctly specified, stationary Markovian
-                                 noise (the null baseline for chi2/dof).
-    nisq  / model_mismatched  -- adds specific, literature-motivated
-                                 violations of that assumption (temporal
-                                 drift, coherent crosstalk, motional heating).
+                                 noise (the null baseline for the T1, gate
+                                 and echo chi2/dof, which follow chi2(2)).
+                                 The Ramsey chi2/dof is inflated by
+                                 construction: delta_omega is fixed by
+                                 arctan2 at the shortest delay yet counted
+                                 as a fitted parameter, so its dof = 4 is
+                                 nominal (measured median 1.21 SC / 1.09 TI
+                                 vs 0.84 for chi2(4)/4; KS p ~ 1e-9).
+    nisq  / model_mismatched  -- adds the mechanisms listed below.
+
+NISQ MECHANISMS. [ON] = active in the single-qubit 3_benchmark.py by
+default; [OFF] = exists but inactive there. Evidence classes are those of
+the MODEL_PROVENANCE keys named (see EVIDENCE CLASSES below).
+  Superconducting:
+    [ON]  log-T1 drift, OU: stationary std sc.T1_drift.amplitude_frac (B),
+          mean-reversion time sc.T1_drift.timescale_s (C).
+    [ON]  detuning drift, single-pole low-frequency noise: std
+          sc.detuning_drift.amplitude_rad_s (C); cutoff 1/sc.T1_drift.
+          timescale_s (C).
+    [OFF] 1/f^alpha detuning drift (detuning_1_over_f=True): alpha
+          sc.detuning_1_over_f.alpha (A, device-specific); band low edge
+          sc.detuning_1_over_f.f_min_hz (C).
+    [ON]  coherent drive-amplitude error: sc.gate.coherent_fraction (C).
+    [OFF] coherent ZZ crosstalk kicks (needs >= 2 qubits):
+          sc.crosstalk.zz_shift_khz_min/_max (A) times sc.gate.duration_ns (C).
+    [OFF] two-state T1 switching (t1_telegraph=True): rate range
+          sc.T1_telegraph.switching_rate_hz (A); amplitude
+          sc.T1_telegraph.amplitude_frac (C), hence opt-in.
+  Trapped ion:
+    [ON]  detuning drift, additive OU: std ti.detuning_drift.amplitude_rad_s
+          (C); mean-reversion time ti.detuning_drift.correlation_time_s
+          (C, no source found).
+    [ON]  coherent drive-amplitude error: ti.gate.coherent_fraction (C).
+    [OFF] coherent crosstalk kicks (needs >= 2 qubits):
+          ti.crosstalk.coherent_angle_rad_high (A).
+    [OFF] motional-heating gate error (enable_heating_gate_error=True):
+          ti.heating.baseline_axial_quanta_per_s (A) times
+          ti.heating_to_gate_error.mapping_coefficient (C).
+  Both architectures:
+    [ON]  stale calibration prior: calib.perturbation.* (C), plus the drift
+          accumulated up to the benchmark's measurement time.
+    [OFF] time-resolved probe execution (simulate_probe(time_resolved=True);
+          library default False, benchmark opt-in --time-resolved): circuits
+          run sequentially and each shot chunk sees the truth at its own
+          time, so the drift processes above act within a run and shot to
+          shot. No new physical parameter: shot durations use the circuits'
+          delays and the gate durations sc.gate.duration_ns (C) /
+          ti.gate.duration_ns (A); the repetition overhead is 0 s (a lower
+          bound, see _DEFAULT_REP_DELAY_S). Available but OFF by default:
+          a superconducting run (~1 s) is far shorter than its drift times,
+          so the mode's effect there is negligible, and its trapped-ion
+          effect is set by the Class C ti.detuning_drift.correlation_time_s.
+  Gate-time decoherence, readout error and detuning phase evolution act in
+  both regimes. The ideal regime is unaffected by every NISQ option.
 
 
 SCOPE (see spec Section 17 for the full list): this module is the physics/
@@ -41,16 +91,19 @@ truth would misrepresent a stress-test parameter as a measurement.
       crosstalk-driven versus intrinsic to the other mechanisms.
   coherent_fraction (sc.gate.coherent_fraction, ti.gate.coherent_fraction):
       share of each qubit's gate error realised as a sign-following drive-
-      amplitude error. Class C (0.10 default; GST on IonQ Forte bounds it to
-      a minority only qualitatively). Sweep 0-0.5.
-  detuning drift amplitude (sc/ti.detuning_drift.amplitude_rad_s): Class C /
-      B consistency bound, not a measured cloud-hardware spectrum. Sweep.
+      amplitude error. Class C (0.10 default; GST on a few IonQ Forte qubit
+      pairs bounds it to a minority only qualitatively). Sweep 0-0.5.
+  detuning drift amplitude (sc/ti.detuning_drift.amplitude_rad_s): Class C
+      order-of-magnitude anchor / consistency bound, not a measured
+      cloud-hardware spectrum. Sweep.
   alpha (generate_device(detuning_1_over_f=True), sc.detuning_1_over_f.alpha):
-      Class C -- the specific value 0.57 could not be independently verified
-      against its originally-cited source (see that entry's notes for what
-      was actually found) and must not be treated as a measurement. Sweep
-      across a plausible range (e.g. 0.5-1.5) instead of relying on one
-      point value.
+      Class A -- 0.57 +/- 0.03 is reported by Slichter et al., PRL 109,
+      153601 (2012), arXiv:1206.6946, p.4 (1/f^alpha fit to 90 minutes of
+      Ramsey fringes), verified against that text in the 2026-09-26
+      external audit. It is device-specific: sub-0.5 Hz flux noise of a
+      flux-biased laboratory transmon, and the paper itself notes other work
+      finding alpha = 0.9-1.0. Still sweep it across a plausible range
+      (e.g. 0.5-1.5) instead of relying on one point value.
 
 -----------------------------------------------------------------------------
 EVIDENCE CLASSES (see MODEL_PROVENANCE)
@@ -61,26 +114,23 @@ EVIDENCE CLASSES (see MODEL_PROVENANCE)
   C = phenomenological/stress-test assumption. The cited paper supports the
       MECHANISM but not a specific number; the value here is a reasonable
       order-of-magnitude choice for exercising the mechanism, never to be
-      read as a measured fact. Every C-class entry says so explicitly in
-      its "notes" field.
+      read as a measured fact. Every C-class entry says why in its
+      "class_c_rationale" field (enforced by validate_parameter_provenance).
 
-Every numerical default lives in MODEL_PROVENANCE with its source, the
-location within that source (or "abstract"/"figure N"/etc.), its evidence
-class, and how it maps into this module's code. Call
-validate_parameter_provenance() to check the registry's internal
-consistency (it cannot verify the citations themselves -- that was done by
-hand against the actual papers before writing this file; see the docstring
-of each MODEL_PROVENANCE entry for what was and was not independently
-confirmed).
+The model's literature-facing numerical defaults, including the per-qubit
+truth-sampling ranges (sc./ti.truth_range.*, from which _TRUTH_RANGES is
+built), live in MODEL_PROVENANCE with their source, the location within
+that source (or "abstract"/"figure N"/etc.), their evidence class, and how
+they map into this module's code. Call validate_parameter_provenance() to check the
+registry's internal consistency (it cannot verify the citations
+themselves; see the next section).
 
 -----------------------------------------------------------------------------
-A NOTE ON WHAT COULD AND COULD NOT BE VERIFIED
+A NOTE ON VERIFICATION
 -----------------------------------------------------------------------------
-Every entry below with evidence_class "A" reflects a number I could
-independently confirm by fetching the actual paper (arXiv abstract/HTML or a
-Nature/PRL page), not one reconstructed from memory of the paper's general
-reputation. Numbers I could not confirm to this standard are marked "C" and
-say so, even where a specific-looking number would have been easy to invent.
+The citations in MODEL_PROVENANCE were checked against the primary texts in
+an external audit (2026-09-26); each entry's notes record what was verified
+and what remains an assumption or a modelling choice.
 In particular: Wang et al. (2021) report a coherence time near 5500 s for an
 actively-stabilized single 171Yb+ ion -- that is a best-case demonstration,
 not the trapped-ion T2 this module samples by default (which instead follows
@@ -123,7 +173,8 @@ def _canonical_regime(regime: str) -> str:
 # Each entry: value, unit, evidence_class (A/B/C), source (author/journal/
 # year), location (equation/table/figure or "abstract" if that is as
 # precise as could be confirmed), and notes describing exactly what was
-# verified vs. assumed, and how the number maps into the code.
+# verified vs. assumed, and how the number maps into the code. Class C
+# entries also carry class_c_rationale (why the value is not A/B).
 
 MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
     # ---------------- Superconducting ----------------
@@ -149,11 +200,18 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
         "notes": "Centre of the reported Heron T2 band; see sc.T1.baseline_s.",
     },
     "sc.T1_drift.diffusivity_MHz_per_sqrt_hr": {
-        "value": 2.35, "unit": "MHz/hr^0.5", "evidence_class": "A",
-        "source": "Klimov et al., Phys. Rev. Lett. 121, 090502 (2018)",
-        "location": "abstract (reported ~2.2-2.5 MHz/hr^0.5 across independently "
-                    "analyzed TLS defects; 2.35 is the midpoint used here)",
-        "notes": ("This is a TLS *frequency* diffusivity: individual two-level-"
+        "value": 2.5, "unit": "MHz/hr^0.5", "evidence_class": "A",
+        "source": "Klimov et al., Phys. Rev. Lett. 121, 090502 (2018), arXiv:1809.01043",
+        "location": "main text (D = 2.5 +/- 0.1 MHz/hr^0.5); not in abstract",
+        "notes": ("Klimov et al. report a single diffusivity, consolidated over "
+                  "the transition frequencies of 13 defects: 'sigma(t) = "
+                  "2Dt^1/2, with the diffusivity D = 2.5 -/+ 0.1 MHz "
+                  "(hour)^-1/2' (arXiv:1809.01043 p.3; repeated p.4 and Suppl. "
+                  "S9). Previously recorded as 2.35 with an unsupported "
+                  "'~2.2-2.5, abstract' location; corrected after the "
+                  "2026-09-26 audit. Recorded only: not read by "
+                  "generate_device(). "
+                  "This is a TLS *frequency* diffusivity: individual two-level-"
                   "system defects random-walk in frequency, occasionally "
                   "sweeping through resonance with the qubit and suppressing "
                   "its T1 while resonant. It is NOT directly a T1(t) amplitude "
@@ -162,7 +220,7 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "not as a literal formula for T1's magnitude."),
     },
     "sc.T1_drift.timescale_s": {
-        "value": 1800.0, "unit": "s", "evidence_class": "B",
+        "value": 1800.0, "unit": "s", "evidence_class": "C",
         "source": "Klimov et al., PRL 121, 090502 (2018); Google AI Blog, "
                  "'Understanding Performance Fluctuations in Quantum Processors' (2018)",
         "location": "abstract / blog summary",
@@ -175,7 +233,13 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "see generate_device(). This is a reduced-order stand-in for "
                   "the actual TLS spectral-diffusion process, not a claim that "
                   "T1(t) literally follows an OU process; it reproduces the "
-                  "qualitative timescale Klimov et al. report."),
+                  "qualitative timescale Klimov et al. report. Class C (was "
+                  "B): a chosen point in a qualitative range is not a "
+                  "derivation from a reported number."),
+        "class_c_rationale": ("The sources state only a qualitative 'minutes "
+                              "to hours' range; 1800 s is a chosen point in it, "
+                              "used as the mean-reversion time of a "
+                              "phenomenological OU process."),
     },
     "sc.T1_drift.amplitude_frac": {
         "value": 0.22, "unit": "dimensionless (stationary std of log T1)", "evidence_class": "B",
@@ -193,6 +257,61 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "stationary OU does not reproduce (see calib.perturbation."
                   "sc_nisq for the telegraph/dropout caveat). Replaces an "
                   "earlier undocumented 0.30."),
+    },
+    # -- Opt-in two-state (telegraph) T1 switching: generate_device(
+    # t1_telegraph=True), superconducting nisq only, default OFF (also OFF in
+    # 3_benchmark.py) because its switching amplitude is Class C.
+    "sc.T1_telegraph.switching_rate_hz": {
+        "value": (71.4e-6, 1851.8e-6), "unit": "Hz (Lorentzian 1/tau_0)", "evidence_class": "A",
+        "source": "Burnett, Bengtsson, Scigliuzzo, Niepce, Kudra, Delsing, "
+                 "Bylander, 'Decoherence benchmarking of superconducting "
+                 "qubits', npj Quantum Information 5, 54 (2019), arXiv:1901.04417",
+        "location": "Sec. II D: 'Collectively, we find switching rates ranging "
+                   "from 71.4 uHz to 1.9 mHz'; Table II columns 1/tau_0 (uHz), "
+                   "extremes 71.4 (QA C6) and 1851.8 (QB C1)",
+        "notes": ("Rates of the Lorentzians S(f) = 4*A^2*tau_0/(1 + (2*pi*f*"
+                  "tau_0)^2) (Methods Eq. 4) fitted to T1-vs-time data of two "
+                  "fixed-frequency transmons over several cooldowns. With "
+                  "t1_telegraph=True, generate_device draws one 1/tau_0 per "
+                  "device log-uniform in this range (the log-uniform shape is "
+                  "a modelling choice) from its own RNG stream. DERIVATION of "
+                  "the process rate: a symmetric two-state process switching "
+                  "at rate r in each direction has autocorrelation "
+                  "exp(-2*r*|t|), i.e. the Lorentzian above with tau_0 = "
+                  "1/(2r), so _proc_telegraph is given r = (1/tau_0)/2."),
+    },
+    "sc.T1_telegraph.amplitude_frac": {
+        "value": -0.12, "unit": "dimensionless (fractional T1 change on a switch)",
+        "evidence_class": "C",
+        "source": "Order of magnitude from Burnett et al., npj QI 5, 54 (2019), "
+                 "arXiv:1901.04417, Table II (Lorentzian amplitudes A) and "
+                 "Suppl. Table III (mean T1 per cooldown)",
+        "location": "Table II A_Lor1/A_Lor2 (us); Table III mean T1: QA C2 57.95, "
+                   "C3 49.72, C5 44.49, C6 46.68 us; QB C1 74.56, C5 81.63, "
+                   "C6 71.22 us",
+        "notes": ("Burnett et al. report the amplitude A (us) of each fitted "
+                  "Lorentzian, not the size of a T1 jump. READING USED HERE: "
+                  "for a symmetric two-state signal with levels a apart, the "
+                  "one-sided PSD is a^2*tau_0/(1 + (2*pi*f*tau_0)^2), so "
+                  "Eq. 4 gives a = 2A (a two-sided PSD normalisation would "
+                  "give a = 2*sqrt(2)*A). 2A/<T1> over the 13 Lorentzians of "
+                  "Table II spans 0.062-0.234, median 0.117, rounded to 0.12. "
+                  "The sign is a choice: the switched state has the LOWER T1 "
+                  "(a TLS moving into resonance suppresses T1), so starting "
+                  "from the t=0 state the first switch is a dropout. "
+                  "evaluate_truth_at() multiplies T1 by x(t)/x(0) of a "
+                  "_proc_telegraph trajectory x with levels 1 and 1+value, on "
+                  "top of the OU log-T1 drift; note that Burnett's Gaussian "
+                  "T1 spread, from which sc.T1_drift.amplitude_frac is "
+                  "derived, already contains these switches, so enabling "
+                  "both slightly double counts T1 variance. Sweep it."),
+        "class_c_rationale": ("The paper reports a Lorentzian noise amplitude, "
+                              "not a fractional T1 jump; converting it assumes "
+                              "a symmetric two-state fluctuator and a one-sided "
+                              "PSD normalisation, and the paper itself notes "
+                              "that two Lorentzians cannot distinguish two "
+                              "two-state TLS from one TLS with four states. "
+                              "The sign is a modelling choice."),
     },
     "sc.detuning_drift.amplitude_rad_s": {
         "value": 2 * np.pi * 2.0e3, "unit": "rad/s", "evidence_class": "C",
@@ -214,6 +333,11 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "the median sampled superconducting T2, so the drift does not "
                   "contradict the coherence the module samples. "
                   "Process is single-pole low-frequency colored noise, NOT 1/f."),
+        "class_c_rationale": ("Order-of-magnitude anchor only: Dhieb et al. "
+                              "report a bound on total frequency excursion for "
+                              "a laboratory device, not a stationary std for "
+                              "cloud transmons; 2 kHz is chosen to be "
+                              "consistent with that bound."),
     },
     "sc.gate.coherent_fraction": {
         "value": 0.10, "unit": "dimensionless", "evidence_class": "C",
@@ -235,6 +359,11 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "not match its own stated derivation (2*sqrt(3.5e-4)=0.037 "
                   "rad, not 3.5e-4). Sweep 0-0.5; no measured split for cloud "
                   "transmons was found."),
+        "class_c_rationale": ("Phenomenological: no measured coherent/"
+                              "stochastic split of gate error for cloud "
+                              "transmons was found; Bautra et al. only show "
+                              "that calibration-derived IBM noise models carry "
+                              "no coherent term. Sweep 0-0.5."),
     },
     "sc.gate.stochastic_error": {
         "value": 3.5e-4, "unit": "dimensionless", "evidence_class": "C",
@@ -242,9 +371,13 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
         "location": "n/a (engine-compatibility default)",
         "notes": ("Architecture-typical gate error recorded on ArchitectureProfile; "
                   "per-qubit truth is sampled from _TRUTH_RANGES['eps'] instead."),
+        "class_c_rationale": ("Engine-compatibility default with no "
+                              "literature source; recorded on "
+                              "ArchitectureProfile only and not used to sample "
+                              "per-qubit truth."),
     },
     "sc.spam.p0_given_1": {
-        "value": 0.030, "unit": "dimensionless", "evidence_class": "B",
+        "value": 0.030, "unit": "dimensionless", "evidence_class": "C",
         "source": "Sharma & Lau, arXiv:2607.11637 (2026), Table 4; values equal to "
                  "1_inversion.py ARCH_DEFAULTS['superconducting']",
         "location": "Table 4: IBM Heron readout error 1.25e-2 (ibm_marrakesh), "
@@ -255,21 +388,46 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "engine's and is not independently confirmed. REPLACES "
                   "0.0092/0.0009 (0.5% average), 2.5-5x more optimistic than "
                   "cloud Heron readout."),
+        "class_c_rationale": ("The mean (p0|1 + p1|0)/2 = 1.9% sits inside "
+                              "the verified Sharma & Lau Table 4 Heron band "
+                              "(Class A anchor), but the p0|1/p1|0 split is "
+                              "an engine assumption, not independently "
+                              "confirmed."),
     },
     "sc.spam.p1_given_0": {
-        "value": 0.008, "unit": "dimensionless", "evidence_class": "B",
+        "value": 0.008, "unit": "dimensionless", "evidence_class": "C",
         "source": "Sharma & Lau, arXiv:2607.11637, Table 4; see sc.spam.p0_given_1",
         "location": "Table 4 (Heron readout error)",
         "notes": "See sc.spam.p0_given_1 for the derivation.",
+        "class_c_rationale": ("The mean (p0|1 + p1|0)/2 = 1.9% sits inside "
+                              "the verified Sharma & Lau Table 4 Heron band "
+                              "(Class A anchor), but the p0|1/p1|0 split is "
+                              "an engine assumption, not independently "
+                              "confirmed."),
     },
     "sc.gate.duration_ns": {
         "value": 50.0, "unit": "ns", "evidence_class": "C",
         "source": "Consistent with 1_inversion.py ARCH_DEFAULTS['superconducting']['gate_time_ns']",
         "location": "n/a (engine-compatibility default)",
         "notes": ("Order-of-magnitude single-qubit (sx) duration for fixed-frequency "
-                  "transmons; no cloud-device value was independently confirmed "
-                  "for this audit. Sets the gate-time decoherence that "
-                  "effective_gate_epsilon() folds into the epsilon truth."),
+                  "transmons, not a measured cloud-device value. Sets the "
+                  "gate-time decoherence that "
+                  "effective_gate_epsilon() folds into the epsilon truth. "
+                  "Intentionally equal to 1_inversion.py ARCH_DEFAULTS"
+                  "['superconducting']['gate_time_ns'] in simulation: the "
+                  "engine computes its gate-model z* from T1, T2 and "
+                  "gate_time_ns; on IBM hardware it reads the live sx "
+                  "gate_length instead. Live IBM snapshots show 24-32 ns sx "
+                  "durations (qubit 0: ibm_fez 24 ns, ibm_torino 32 ns; "
+                  "qiskit-ibm-runtime 0.50.0 fake-backend calibration "
+                  "snapshots), below this 50 ns. Sensitivity: a +/-30% error "
+                  "in the engine's gate time biases its eps by about +/-4% "
+                  "through z* (median over 50 simulated superconducting "
+                  "truths at infinite shots; worst +/-9.4%)."),
+        "class_c_rationale": ("Engine-compatibility default, not a measured "
+                              "cloud-device sx duration (IBM snapshots show "
+                              "24-32 ns), so 50 ns is an order-of-magnitude "
+                              "value only."),
     },
     "sc.crosstalk.coherent_angle_rad_uncompensated": {
         "value": 14.4e-3, "unit": "rad", "evidence_class": "A",
@@ -458,6 +616,11 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "stress-test envelope calibrated to the right order of "
                   "magnitude, not "
                   "a fit."),
+        "class_c_rationale": ("No published dataset measures calibration-log "
+                              "staleness for cloud hardware; Burnett et al. "
+                              "bound only the scale of T1 wander, and their "
+                              "telegraphic, non-Gaussian structure is not "
+                              "represented by a symmetric envelope."),
     },
     "calib.perturbation.sc_ideal": {
         "value": 0.10, "unit": "dimensionless (envelope half-width)", "evidence_class": "C",
@@ -495,6 +658,9 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "catastrophic, but it measures whole-model agreement on shot "
                   "distributions, not per-parameter drift, so it cannot set "
                   "this number."),
+        "class_c_rationale": ("No direct source; set by construction as a "
+                              "fraction of calib.perturbation.sc_nisq for a "
+                              "freshly calibrated device."),
     },
     "calib.perturbation.ti_nisq": {
         "value": 0.15, "unit": "dimensionless (envelope half-width)", "evidence_class": "C",
@@ -518,6 +684,9 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "trapped-ion calibration-log error for a queued, "
                   "cloud-accessed device; if one exists, this entry should be "
                   "replaced by it."),
+        "class_c_rationale": ("No direct source; the 60% ratio to the "
+                              "superconducting nisq envelope is a judgement "
+                              "call, not a measurement."),
     },
     "calib.perturbation.ti_ideal": {
         "value": 0.05, "unit": "dimensionless (envelope half-width)", "evidence_class": "C",
@@ -531,6 +700,8 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "the tightest value: a freshly calibrated ion trap is the "
                   "most predictable of the four cases modelled here. It is "
                   "still Class C."),
+        "class_c_rationale": ("No direct source; set by construction as one "
+                              "third of calib.perturbation.ti_nisq."),
     },
     "spam.per_qubit_spread_frac": {
         "value": 0.0, "unit": "dimensionless (fractional half-width)", "evidence_class": "C",
@@ -565,6 +736,34 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "the register heterogeneous in a parameter the inversion "
                   "treats as known, which is a deliberate departure from the "
                   "ideal regime's definition and should be labelled as such."),
+        "class_c_rationale": ("Stress-test sweep knob with no published "
+                              "population statistic for cloud readout-error "
+                              "spread; no value of f is endorsed."),
+    },
+    "dw_population.independent_halfwidth_factor": {
+        "value": 2.0, "unit": "dimensionless (multiple of 0.9*pi/(0.5*T2_ref))",
+        "evidence_class": "C",
+        "source": "No literature value. Chosen by construction for the "
+                 "generate_device(dw_population='independent') stress test.",
+        "location": "n/a -- phenomenological stress-test knob",
+        "notes": ("K in the 'independent' detuning population: delta_omega ~ "
+                  "U(-W, W), W = K * 0.9*pi / (0.5*T2_ref), T2_ref = the "
+                  "architecture baseline T2 (sc.T2.baseline_s = 140 us, "
+                  "ti.T2.baseline_s = 1 s). With K = 2.0: superconducting "
+                  "W = 2*0.9*pi/70e-6 = 8.08e4 rad/s (W/2pi = 12.9 kHz); "
+                  "trapped ion W = 2*0.9*pi/0.5 = 11.3 rad/s (W/2pi = 1.8 Hz). "
+                  "The population is independent of each qubit's T2, of the "
+                  "calibration prior and of 1_inversion.py's estimator window, "
+                  "so it includes |dw| ~ 0 and values beyond that window "
+                  "(aliasing instances). Only used when "
+                  "dw_population='independent'; the default "
+                  "'estimator_window' population does not read it."),
+        "class_c_rationale": ("Stress-test sweep knob with no published "
+                              "population statistic for cloud-device "
+                              "detunings; K = 2 is chosen so the population "
+                              "extends to twice the estimator window of a "
+                              "qubit whose T2 prior equals T2_ref, not "
+                              "derived from data."),
     },
     "sc.detuning_1_over_f.psd_reference_hz": {
         "value": 1.0, "unit": "Hz", "evidence_class": "A",
@@ -589,31 +788,44 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "unchanged by this entry."),
     },
     "sc.detuning_1_over_f.alpha": {
-        "value": 0.57, "unit": "dimensionless", "evidence_class": "C",
-        "source": "UNVERIFIED CITATION -- originally specified as 'measured "
-                 "alpha=0.57 from arXiv:1206.6946, fitted to 90 min of "
-                 "repeated Ramsey fringes.' Direct fetch of arXiv:1206.6946 "
-                 "('Measurement-induced qubit state mixing in circuit QED "
-                 "from up-converted dephasing noise') does not contain this "
-                 "value or this experiment: that paper extracts an "
-                 "equivalent flux-noise PSD from the qubit's measurement-"
-                 "induced transition rate at ~1 GHz and compares it to a "
-                 "1/f^alpha extrapolation of separately measured sub-1-Hz "
-                 "flux-noise data, without stating a specific alpha in the "
-                 "retrievable text, and does not describe a 90-minute "
-                 "repeated-Ramsey experiment at all.",
-        "location": "n/a -- citation could not be confirmed; not used as fact",
-        "notes": ("This number is NOT Class A and must not be cited as "
-                  "arXiv:1206.6946's result. It is retained only as a "
-                  "phenomenological default -- sub-1 exponents for near-1/f "
-                  "dephasing are qualitatively common in the superconducting-"
-                  "qubit literature, but this specific value was not "
-                  "independently verified for this audit. Treated as a "
-                  "required sensitivity-sweep parameter (see the module "
-                  "docstring's Sensitivity Sweep Parameters section and "
-                  "generate_device()'s alpha kwarg): the manuscript should "
-                  "report insensitivity to alpha across a swept range, not "
-                  "rely on this single value."),
+        "value": 0.57, "unit": "dimensionless", "evidence_class": "A",
+        "source": "Slichter, Vijay, Weber, Boutin, Boissonneault, Gambetta, "
+                 "Blais, Siddiqi, 'Measurement-induced qubit state mixing in "
+                 "circuit QED from up-converted dephasing noise', Phys. Rev. "
+                 "Lett. 109, 153601 (2012), arXiv:1206.6946",
+        "location": "arXiv:1206.6946v2 p.4 and Fig. 4: Ramsey fringes measured "
+                   "once per second for 90 minutes; 1/f^alpha fit gives "
+                   "alpha = 0.57 +/- 0.03",
+        "notes": ("Verified against the source text in the 2026-09-26 external "
+                  "audit: 'First, we measured Ramsey fringes at a rate of one "
+                  "per second for 90 minutes' and 'The fit coefficients give "
+                  "alpha = 0.57 +/- 0.03' (p.4). An earlier note here stated "
+                  "that the paper contains neither the experiment nor the "
+                  "value; that statement was wrong and has been withdrawn. "
+                  "DEVICE-SPECIFIC: the value describes sub-0.5 Hz flux noise "
+                  "of a flux-biased laboratory transmon, not the detuning "
+                  "noise of a fixed-frequency cloud transmon, and the paper "
+                  "itself notes that other work found alpha = 0.9-1.0. Still "
+                  "a required sensitivity-sweep parameter (see the module "
+                  "docstring's Sensitivity Sweep Parameters section): the "
+                  "manuscript should report insensitivity to alpha across a "
+                  "swept range, not rely on this single value."),
+    },
+    "sc.detuning_1_over_f.f_min_hz": {
+        "value": 1.0 / 86_400.0, "unit": "Hz", "evidence_class": "C",
+        "source": "No source; phenomenological band edge (one-day window)",
+        "location": "n/a -- phenomenological",
+        "notes": ("Low edge f_min_hz of the 1/f^alpha band generated by "
+                  "_proc_one_over_f() when generate_device("
+                  "detuning_1_over_f=True). Fixed (rather than 1/(n*dt)) so "
+                  "the trajectory never depends on how far it is queried. "
+                  "Previously hard-coded in generate_device() without a "
+                  "registry entry; the value is unchanged. Only used when "
+                  "detuning_1_over_f=True (OFF by default)."),
+        "class_c_rationale": ("No source: a one-day low-frequency band edge "
+                              "chosen so the generated trajectory is "
+                              "independent of the query horizon, not a "
+                              "measured spectral corner."),
     },
     # ---------------- Trapped ion ----------------
     "ti.T1.baseline_s": {
@@ -625,12 +837,20 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "Architecture-typical value only (per-qubit truth is sampled "
                   "from _TRUTH_RANGES, 10-200 s). Previously 1000 s while "
                   "claiming to match the engine's 100 s; corrected."),
+        "class_c_rationale": ("Engine-compatibility default matching "
+                              "1_inversion.py ARCH_DEFAULTS; no literature "
+                              "citation is attached to this entry, and "
+                              "per-qubit truth is sampled from "
+                              "ti.truth_range.* instead."),
     },
     "ti.T2.baseline_s": {
         "value": 1.0, "unit": "s", "evidence_class": "C",
         "source": "Consistent with 1_inversion.py ARCH_DEFAULTS['trapped_ion']['T2_s']",
         "location": "n/a (engine-compatibility default)",
         "notes": "Operationally typical value, not Wang et al.'s record. See ti.T2.record_s.",
+        "class_c_rationale": ("Engine-compatibility default matching "
+                              "1_inversion.py ARCH_DEFAULTS; no literature "
+                              "citation is attached to this entry."),
     },
     "ti.T2.record_s": {
         "value": 5500.0, "unit": "s", "evidence_class": "A",
@@ -646,7 +866,7 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "the operational default above."),
     },
     "ti.detuning_drift.amplitude_rad_s": {
-        "value": float(np.sqrt(2.0)), "unit": "rad/s", "evidence_class": "B",
+        "value": float(np.sqrt(2.0)), "unit": "rad/s", "evidence_class": "C",
         "source": "Derived from the sampled trapped-ion coherence (ti.T2.baseline_s "
                  "= 1 s; _TRUTH_RANGES T_phi 0.1-3 s) via the quasi-static "
                  "dephasing relation T2* = sqrt(2)/sigma",
@@ -667,7 +887,32 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "below -- and which, fed in as an OU diffusion coefficient "
                   "without the sqrt(2*theta) conversion, produced a ~212 Hz "
                   "stationary spread: two orders of magnitude above what a "
-                  "1 s T2 allows, and it aliased 290/300 benchmark instances."),
+                  "1 s T2 allows, and it aliased 290/300 benchmark instances. "
+                  "Class C (was B): the bound is derived from the module's "
+                  "own Class C T2 assumption, not from a Class A quantity."),
+        "class_c_rationale": ("Internal-consistency upper bound derived from "
+                              "the Class C trapped-ion T2 default (1 s); no "
+                              "cloud trapped-ion qubit-frequency drift record "
+                              "was found. It is an upper bound, not a "
+                              "measurement."),
+    },
+    "ti.detuning_drift.correlation_time_s": {
+        "value": 100.0, "unit": "s", "evidence_class": "C",
+        "source": "No source found",
+        "location": "n/a -- phenomenological",
+        "notes": ("Mean-reversion time 1/theta of the additive OU detuning "
+                  "deviation attached by generate_device() (trapped ion, "
+                  "regime='nisq'); its stationary std is "
+                  "ti.detuning_drift.amplitude_rad_s. Previously hard-coded "
+                  "there as theta = 1/100 s without a registry entry; the "
+                  "value is unchanged. A trapped-ion probe run lasts hours, "
+                  "so the within-run and shot-to-shot detuning variation of "
+                  "time-resolved execution (simulate_probe(time_resolved="
+                  "True)) is set by this value; 3_benchmark.py therefore "
+                  "keeps that mode OFF by default. Sweep it."),
+        "class_c_rationale": ("No source was found for the correlation time of "
+                              "cloud trapped-ion qubit-frequency drift; 100 s "
+                              "is a phenomenological choice. Sweep it."),
     },
     # ---------------------------------------------------------------------
     # REMOVED (deliberately, do not reintroduce): ti.detuning_drift.powerline_hz
@@ -680,7 +925,7 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
     # (a) CATEGORY ERROR. The paper measures 60 Hz modulation of the
     #     MOTIONAL-MODE SECULAR FREQUENCY (radial mode), not the qubit drive
     #     detuning that delta_omega represents. This module already draws
-    #     exactly this distinction for the Hite et al. heating rates
+    #     exactly this distinction for the Teller et al. heating rates
     #     ("motional heating rate, NOT computational T1"); it was missed here.
     #
     # (b) TIMESCALE ERROR. 60 Hz is a 16.7 ms period, while trapped-ion Ramsey
@@ -709,12 +954,23 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
         "source": "Qualitative bound from Chen et al. (IonQ), 'Benchmarking a "
                  "trapped-ion quantum computer with 30 qubits', Quantum (2024), "
                  "arXiv:2308.05071",
-        "location": "Sec. 4: 'results from gate set tomography (GST) ... indicate "
-                   "the dominant errors are stochastic in nature'; Sec. 2: each "
-                   "single-qubit gate is an SK1 composite sequence",
-        "notes": ("GST on IonQ Forte finds errors predominantly stochastic, and "
+        "location": "Sec. 4: 'This is supported by 1) results from gate set "
+                   "tomography (GST) [31] on just a few qubit pairs that "
+                   "indicate the dominant errors are stochastic in nature'; "
+                   "Sec. 2: each single-qubit gate is an SK1 composite "
+                   "sequence; Conclusion (non-Markovian caveat, see notes)",
+        "notes": ("Chen et al. report GST on just a few qubit PAIRS (the GST "
+                  "data are not published in the paper; [31] is the GST "
+                  "methods paper), finding the dominant errors stochastic; "
                   "SK1 composite pulses are designed to cancel amplitude "
-                  "miscalibration, so the coherent share must be a minority. "
+                  "miscalibration. Together these suggest, only indirectly "
+                  "for single-qubit gates, that the coherent share is a "
+                  "minority. CAVEAT: Chen et al.'s Conclusion hypothesises "
+                  "that the observed noise is stochastic spin-phase noise and "
+                  "states: 'Due to a non-trivial power spectral density, this "
+                  "noise cannot be decomposed into Markovian gate-level noise, "
+                  "which leads to context dependency' -- a limitation for any "
+                  "Markovian model of Forte, including this one. "
                   "0.10 is a phenomenological point inside that qualitative "
                   "bound (no number is reported); sweep 0-0.3. Realised as a "
                   "sign-following amplitude error (see sc.gate.coherent_"
@@ -722,29 +978,56 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "every gate, which did not cancel in a G*G^-1 pair, "
                   "accumulated as 2*N*theta, and drove the gate-repetition "
                   "chi2/dof to 100-250."),
+        "class_c_rationale": ("No coherent fraction is reported; GST on a "
+                              "few qubit pairs bounds it only qualitatively, so "
+                              "0.10 is a phenomenological point. Sweep 0-0.3."),
     },
     "ti.heating.baseline_axial_quanta_per_s": {
         "value": 13.0, "unit": "quanta/s", "evidence_class": "A",
-        "source": "Hite et al., Phys. Rev. Lett. 126, 230505 (2021)",
-        "location": "reported baseline (no dielectric sample) axial-mode heating rate, 13(3) quanta/s at 2*pi*1.5 MHz",
-        "notes": "Motional heating rate, NOT computational T1. Enters only the heating-to-gate-error mapping below.",
+        "source": "M. Teller, D. A. Fioretto, P. C. Holz, P. Schindler, "
+                 "V. Messerer, K. Schueppert, Y. Zou, R. Blatt, J. Chiaverini, "
+                 "J. Sage, T. E. Northup, 'Heating of a Trapped Ion Induced by "
+                 "Dielectric Materials', Phys. Rev. Lett. 126, 230505 (2021), "
+                 "arXiv:2103.13846",
+        "location": "p.4: reference axial-mode heating rate measured before the "
+                   "trap was integrated with the cavity, 13(3) phonons/s at "
+                   "2*pi*1.5 MHz (cited there to their unpublished Ref. [26])",
+        "notes": ("Reference value for a 40Ca+ ion in a room-temperature 3D "
+                  "linear Paul trap before cavity integration -- not a "
+                  "171Yb+ cloud device. Motional heating rate, NOT "
+                  "computational T1. Enters only the heating-to-gate-error "
+                  "mapping below."),
     },
     "ti.heating.baseline_radial_quanta_per_s": {
-        "value": 29.0, "unit": "quanta/s", "evidence_class": "A",
-        "source": "Hite et al., PRL 126, 230505 (2021)",
-        "location": "reported baseline radial-mode heating rates, 26(6) and 32(8) "
-                   "quanta/s at 2*pi*{3.2,3.4} MHz; 29 used as their midpoint",
-        "notes": "See ti.heating.baseline_axial_quanta_per_s.",
+        "value": 29.0, "unit": "quanta/s", "evidence_class": "B",
+        "source": "Teller et al., PRL 126, 230505 (2021), arXiv:2103.13846; "
+                 "see ti.heating.baseline_axial_quanta_per_s",
+        "location": "p.4: reference radial-mode heating rates measured before "
+                   "cavity integration, 26(6) and 32(8) phonons/s at "
+                   "2*pi*{3.2,3.4} MHz",
+        "notes": ("DERIVATION: midpoint (26 + 32)/2 = 29 of the two reported "
+                  "radial rates, hence Class B (was A). Same 40Ca+ "
+                  "reference-trap caveat as "
+                  "ti.heating.baseline_axial_quanta_per_s."),
     },
     "ti.heating.distance_scaling_exponent": {
-        "value": 4.2, "unit": "dimensionless", "evidence_class": "A",
-        "source": "Hite et al., PRL 126, 230505 (2021)",
-        "location": "reported electric-field-noise distance scaling S_E ~ d^-alpha, "
-                   "alpha_axial=4.016(6), alpha_radial=4.413(6); 4.2 used as their midpoint",
-        "notes": ("Explicitly reported as differing from the naive 1/d^3 "
-                  "infinite-dielectric-plane prediction due to finite sample "
-                  "geometry. Used in the optional distance-dependent heating "
-                  "helper heating_rate_at_distance()."),
+        "value": 4.2, "unit": "dimensionless", "evidence_class": "C",
+        "source": "Teller et al., PRL 126, 230505 (2021), arXiv:2103.13846",
+        "location": "p.4 and Suppl.: power-law fit S_E = A*d^-alpha to eight "
+                   "SIMULATED electric-field-noise values, alpha_ax = "
+                   "4.016(6), alpha_rad = 4.413(6); 4.2 used as their midpoint",
+        "notes": ("The exponents are fits to finite-element SIMULATIONS of the "
+                  "specific ion/dielectric-fibre geometry, not measurements. "
+                  "Teller et al. note that they diverge from the 1/d^3 "
+                  "scaling of an infinite dielectric plane, underscoring the "
+                  "need for finite-geometry modelling. Class C (was A). Used "
+                  "in the optional distance-dependent heating helper "
+                  "heating_rate_at_distance()."),
+        "class_c_rationale": ("The source values are power-law fits to "
+                              "simulated field noise for one ion/dielectric "
+                              "geometry, not measured scaling for cloud traps; "
+                              "4.2 is the rounded midpoint (4.016 + 4.413)/2 = "
+                              "4.2145."),
     },
     "ti.heating_to_gate_error.mapping_coefficient": {
         "value": 1e-7, "unit": "dimensionless per (quanta/s)", "evidence_class": "C",
@@ -761,22 +1044,37 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "spec Section 7's explicit warning that 'motional heating "
                   "is not computational T1'; this entry is the analogous "
                   "warning for gate error."),
+        "class_c_rationale": ("No heating-rate-to-single-qubit-gate-"
+                              "infidelity mapping was found in the literature "
+                              "reviewed; illustrative stress-test channel "
+                              "only, off by default."),
     },
     "ti.spam.p0_given_1": {
-        "value": 0.0022, "unit": "dimensionless", "evidence_class": "B",
+        "value": 0.0059, "unit": "dimensionless", "evidence_class": "B",
         "source": "Chen et al. (IonQ Forte), Quantum (2024), arXiv:2308.05071, "
-                 "split by 1_inversion.py's _TI_SPAM_RATIO_P0_OVER_P1",
-        "location": "Sec. 2: 'The average state preparation and measurement "
-                   "(SPAM) error is measured to be 0.5% on each qubit'",
-        "notes": ("DERIVATION: (p0|1 + p1|0)/2 = 0.005 (Class A) with "
-                  "p0|1/p1|0 = 0.2778 (the engine's ratio, itself unvalidated, "
-                  "Class C) gives p0|1 = 0.0022, p1|0 = 0.0078, identical to "
-                  "1_inversion.py ARCH_DEFAULTS['trapped_ion']. The previous "
-                  "0.0005/0.0018 (0.12% average) was 4x below the published "
-                  "Forte figure while claiming to match the engine."),
+                 "split by 1_inversion.py's _TI_SPAM_RATIO_P0_OVER_P1 (Mai, "
+                 "Zhang & Lu, arXiv:2402.18868, Fig. 4, hyperfine detection)",
+        "location": "Chen Sec. 2: 'The average state preparation and measurement "
+                   "(SPAM) error is measured to be 0.5% on each qubit'; Mai "
+                   "Fig. 4 caption: hyperfine detection p(1|0) = 6.4(7)e-3, "
+                   "p(0|1) = 9.3(8)e-3",
+        "notes": ("DERIVATION: (p0|1 + p1|0)/2 = 0.005 (Chen, Class A) with "
+                  "r = p0|1/p1|0 = 0.0093/0.0064 = 1.453 gives p0|1 = "
+                  "0.01*r/(1+r) = 0.0059 and p1|0 = 0.01/(1+r) = 0.0041, "
+                  "identical to 1_inversion.py ARCH_DEFAULTS['trapped_ion']. "
+                  "RATIO SOURCE: Forte reads out by standard hyperfine "
+                  "(resonant-fluorescence) detection (Chen Sec. 2), and r is "
+                  "Mai et al.'s ratio for that scheme, so the ratio is now "
+                  "matched to the detection scheme. Caveats: r comes from a "
+                  "single 171Yb+ ion in a laboratory trap (threshold 0), "
+                  "Forte's own per-state asymmetry is not published, and "
+                  "reading Chen's 'average' as the mean of p0|1 and p1|0 is an "
+                  "interpretation. REPLACES 0.0022/0.0078, which used Mai's "
+                  "2D3/2 shelving-detection ratio (0.0005/0.0018 = 0.278), a "
+                  "scheme Forte does not use, with the opposite asymmetry."),
     },
     "ti.spam.p1_given_0": {
-        "value": 0.0078, "unit": "dimensionless", "evidence_class": "B",
+        "value": 0.0041, "unit": "dimensionless", "evidence_class": "B",
         "source": "Chen et al. (IonQ Forte), arXiv:2308.05071; see ti.spam.p0_given_1",
         "location": "Sec. 2 (0.5% average SPAM)",
         "notes": "See ti.spam.p0_given_1 for the split derivation.",
@@ -789,25 +1087,39 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                    "SK1 dynamical correction sequence'",
         "notes": ("Replaces 135 us (engine default, uncited). Sets the gate-time "
                   "decoherence folded into effective_gate_epsilon(). "
-                  "1_inversion.py's gate_time_ns is not used by the inversion, "
-                  "so the two need not agree."),
+                  "Intentionally equal to 1_inversion.py ARCH_DEFAULTS"
+                  "['trapped_ion']['gate_time_ns'] in simulation: the engine "
+                  "computes its gate-model z* from T1, T2 and gate_time_ns "
+                  "(on IBM hardware the engine reads the live sx gate_length "
+                  "instead; from_ionq_backend keeps this value)."),
     },
     "ti.gate.error_range": {
         "value": (1e-4, 2e-3), "unit": "dimensionless (1_inversion epsilon convention)",
-        "evidence_class": "B",
+        "evidence_class": "C",
         "source": "Chen et al. (IonQ Forte), arXiv:2308.05071, Fig. 3; "
                  "Wright et al. (IonQ 11-qubit), arXiv:1903.08181, Table I",
         "location": "Forte single-qubit DRB error: median 2.0e-4, 10th/90th "
                    "percentile 1.8e-4/2.6e-4. 11-qubit system: RB fidelities "
                    "99.18-99.64% (average 99.5%).",
-        "notes": ("CONVERSION: a depolarizing channel with Bloch shrink (1-2*eps) "
-                  "has entanglement infidelity 1.5*eps, so Forte's median DRB "
-                  "rate maps to eps ~ 1.3e-4 (10-90%: 1.2e-4-1.7e-4); the 2019 "
-                  "11-qubit system sits at eps ~ 2.4e-3-5.5e-3. The sampled "
-                  "log-uniform range 1e-4-2e-3 spans Forte-class devices up to "
-                  "just below the 2019 generation (so worst-case older ions are "
-                  "not sampled). Recorded for provenance; the sampler reads "
-                  "_TRUTH_RANGES['trapped_ion']['eps']."),
+        "notes": ("CONVERSIONS (per-source conventions). Chen: the DRB error "
+                  "rate is an entanglement infidelity, and a depolarizing "
+                  "channel with Bloch shrink (1-2*eps) has entanglement "
+                  "infidelity 1.5*eps, so Forte's median maps to eps ~ 1.3e-4 "
+                  "(10-90%: 1.2e-4-1.7e-4). Wright: the tabulated 'Gate "
+                  "Fidelity' is the RB decay base p of the fit B*p^L + 1/2 "
+                  "('the base p is the gate fidelity'); with p = 1 - 2*eps, "
+                  "eps = (1-p)/2 = 1.8e-3 (99.64%) to 4.1e-3 (99.18%), 2.5e-3 "
+                  "at the 99.5% average. Each RB step also contains a random "
+                  "pi rotation or identity, so the per-pi/2 eps is at most "
+                  "(1-p)/2. The sampled log-uniform range 1e-4-2e-3 spans "
+                  "Forte-class devices and overlaps only the best 2019 qubits "
+                  "(1.8e-3, 1.9e-3); most of the 2019 generation is not "
+                  "sampled. Class C (was B): a chosen sampling support, not a "
+                  "derived number. The sampler reads the identical value from "
+                  "ti.truth_range.eps (via _TRUTH_RANGES)."),
+        "class_c_rationale": ("A chosen log-uniform sampling support "
+                              "bracketed by, not derived from, the Chen and "
+                              "Wright figures."),
     },
     "ti.crosstalk.coherent_angle_rad_low": {
         "value": 33e-3, "unit": "rad", "evidence_class": "A",
@@ -826,6 +1138,93 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                   "ion crosstalk magnitude in regime='nisq' since it is the "
                   "reported, not a hypothetical worst case."),
     },
+    # ---------------- Per-qubit truth-sampling ranges ----------------
+    # generate_device() draws per-qubit T1, T_phi and eps log-uniform from
+    # these (lo, hi) ranges; _TRUTH_RANGES is built from these entries (see
+    # the comment above _TRUTH_RANGES for the full rationale).
+    "sc.truth_range.T1_s": {
+        "value": (80e-6, 400e-6), "unit": "s", "evidence_class": "C",
+        "source": "Chosen sampling support, compared with Sharma & Lau, "
+                 "arXiv:2607.11637 (2026), Table 4",
+        "location": "Table 4: representative IBM Heron T1 100-300 us",
+        "notes": ("Per-qubit truth T1 is drawn log-uniform in this range. It "
+                  "covers the reported Heron T1 band (100-300 us, see "
+                  "sc.T1.baseline_s) and extends beyond it on both sides."),
+        "class_c_rationale": ("A chosen sampling range wider than the "
+                              "reported band, not derived from a reported "
+                              "number."),
+    },
+    "sc.truth_range.T_phi_s": {
+        "value": (40e-6, 200e-6), "unit": "s", "evidence_class": "C",
+        "source": "Chosen sampling support, compared with Sharma & Lau, "
+                 "arXiv:2607.11637 (2026), Table 4",
+        "location": "Table 4: representative IBM Heron T1 100-300 us, "
+                   "T2 80-200 us",
+        "notes": ("PURE DEPHASING time; T2 is derived as 1/T2 = 1/(2*T1) + "
+                  "1/T_phi and capped at 2*T1. Read back through that "
+                  "relation, the Heron bands give T_phi ~133-300 us (100/80 "
+                  "us -> 133 us; 300/200 us -> 300 us). The sampled 40-200 us "
+                  "range is deliberately broader toward WEAKER coherence: it "
+                  "also represents older/weaker cloud transmons. Measured with "
+                  "generate_device('superconducting', 5000 qubits, "
+                  "seed=12345): derived T2 32.1-158.8 us, median 69.6 us, "
+                  "61.4% below 80 us (the lower edge of the Heron T2 band), "
+                  "none above 160 us. The population is therefore NOT "
+                  "Heron-representative."),
+        "class_c_rationale": ("A chosen sampling range, not derived from a "
+                              "source; it deliberately extends below the "
+                              "coherence implied by Sharma & Lau Table 4."),
+    },
+    "sc.truth_range.eps": {
+        "value": (1e-4, 2e-3), "unit": "dimensionless (1_inversion epsilon convention)",
+        "evidence_class": "C",
+        "source": "No literature source registered for this range",
+        "location": "n/a -- chosen sampling support",
+        "notes": ("Per-qubit truth gate error is drawn log-uniform in this "
+                  "range. The engine default eps_typical (3.0e-4) and "
+                  "sc.gate.stochastic_error (3.5e-4) lie inside it."),
+        "class_c_rationale": ("No superconducting gate-error range is cited; "
+                              "a chosen sampling support."),
+    },
+    "ti.truth_range.T1_s": {
+        "value": (10.0, 200.0), "unit": "s", "evidence_class": "C",
+        "source": "IonQ vendor specification (Aria and Forte product pages "
+                 "list T1 & T2 as '10-100s, ~1s'; checked in the 2026-09-26 "
+                 "audit), upper bound widened",
+        "location": "ionq.com Aria / Forte product pages",
+        "notes": ("The vendor states T1 10-100 s; the upper bound is widened "
+                  "to 200 s for per-qubit spread. The previous (100, 10_000) "
+                  "s range had no citation and put its upper end 100x above "
+                  "the stated 100 s maximum."),
+        "class_c_rationale": ("Vendor range widened by choice (200 s vs the "
+                              "stated 100 s); a sampling support, not a "
+                              "measured per-qubit distribution."),
+    },
+    "ti.truth_range.T_phi_s": {
+        "value": (0.1, 3.0), "unit": "s", "evidence_class": "C",
+        "source": "Chosen sampling support around the IonQ vendor T2 "
+                 "(~1 s); see ti.truth_range.T1_s",
+        "location": "ionq.com Aria / Forte product pages",
+        "notes": ("Because T1 >> T_phi here, the 1/(2*T1) term is negligible "
+                  "and T2 ~ T_phi to within ~1%. Measured with "
+                  "generate_device('trapped_ion', 5000 qubits, seed=12345): "
+                  "derived T2 0.100-2.96 s, median 0.53 s."),
+        "class_c_rationale": ("A chosen range bracketing the vendor's ~1 s "
+                              "T2, not derived from a reported distribution."),
+    },
+    "ti.truth_range.eps": {
+        "value": (1e-4, 2e-3), "unit": "dimensionless (1_inversion epsilon convention)",
+        "evidence_class": "C",
+        "source": "Same range as ti.gate.error_range (Chen et al., "
+                 "arXiv:2308.05071; Wright et al., arXiv:1903.08181)",
+        "location": "see ti.gate.error_range",
+        "notes": ("Operative sampling range for trapped-ion gate error. "
+                  "ti.gate.error_range records the same value together with "
+                  "the per-source conversions; the two must stay equal."),
+        "class_c_rationale": ("Same chosen sampling support as "
+                              "ti.gate.error_range: bracketed by, not derived "
+                              "from, the Chen and Wright figures."),
+    },
 }
 
 
@@ -841,9 +1240,9 @@ def get_parameter_provenance(key: Optional[str] = None) -> Dict[str, Any]:
 def validate_parameter_provenance() -> List[str]:
     """Structural validation of MODEL_PROVENANCE (field completeness and
     internal consistency). This checks the registry's own bookkeeping, not
-    whether the citations are correct -- that verification was done by hand
-    against the source papers when each entry was written; see each entry's
-    'notes' for what was and was not independently confirmed."""
+    whether the citations are correct: the citations were checked in an
+    external audit (2026-09-26), and each entry's 'notes' record what was
+    verified. Class C entries must carry a non-empty 'class_c_rationale'."""
     issues: List[str] = []
     required = {"value", "unit", "evidence_class", "source", "location", "notes"}
     for key, entry in MODEL_PROVENANCE.items():
@@ -856,12 +1255,9 @@ def validate_parameter_provenance() -> List[str]:
         if ec == "A" and not entry.get("source"):
             issues.append(f"{key}: evidence_class A requires a source")
         if ec == "C":
-            haystack = " ".join(str(entry.get(f, "")) for f in ("notes", "source", "location")).lower()
-            disclosed = any(kw in haystack for kw in (
-                "phenomenological", "stress-test", "not independently confirmed",
-                "no ", "engine-compatibility", "order-of-magnitude"))
-            if not disclosed:
-                issues.append(f"{key}: evidence_class C entries must disclose why in notes/source/location")
+            rationale = entry.get("class_c_rationale")
+            if not (isinstance(rationale, str) and rationale.strip()):
+                issues.append(f"{key}: evidence_class C requires a non-empty 'class_c_rationale'")
     return issues
 
 
@@ -997,19 +1393,34 @@ class CalibrationPrior:
 @dataclass
 class SimulationResult:
     """Output of simulate_probe(): counts_list is directly compatible with
-    1_inversion.py's lindblad_inversion(counts_list, meta, profile, ...)."""
+    1_inversion.py's lindblad_inversion(counts_list, meta, profile, ...).
+
+    The fields after truth_evaluation_time_s are filled only by
+    simulate_probe(..., time_resolved=True); truth_evaluation_time_s is then
+    the start time of the run. circuit_start_times_s / circuit_end_times_s
+    are per-circuit wall-clock times (s), run_duration_s is their total span,
+    and chunk_records[i] lists circuit i's shot chunks as dicts with keys
+    t_start_s, t_end_s, t_mid_s, shots, seed and truth (evaluate_truth_at()
+    at t_mid_s for every qubit: the exact parameters that chunk was
+    simulated with)."""
     counts_list: List[Dict[str, int]]
     shots_list: List[int]
     circuit_names: List[str]
     manifest_id: str
     truth_evaluation_time_s: float
+    time_resolved: bool = False
+    circuit_start_times_s: Optional[List[float]] = None
+    circuit_end_times_s: Optional[List[float]] = None
+    run_duration_s: Optional[float] = None
+    chunk_records: Optional[List[List[Dict[str, Any]]]] = None
 
 
 @dataclass
 class SimulationManifest:
     """Full reproducibility record. truth and calibration are recorded as
-    separate top-level fields so a consumer can audit that the calibration
-    branch never read the truth branch's exact values."""
+    separate top-level fields. The calibration T1/T2/epsilon priors are
+    perturbed from truth, but the calibration SPAM fields ARE copied verbatim
+    from truth (oracle SPAM; see generate_calibration_prior's docstring)."""
     instance_id: str
     seed: int
     architecture: str
@@ -1293,21 +1704,30 @@ def get_architecture_profile(architecture: str) -> ArchitectureProfile:
 # span is recorded alongside it so the distribution that experiments actually
 # see is documented rather than inferred.
 #
-# superconducting: T_phi 40-200 us is consistent with published medians on
-#   cloud-deployed IBM hardware (Heron ~168/130 us, Eagle ~268/183 us,
-#   ibm_washington ~100/95 us) once those reported T2 figures are read back
-#   through the decomposition above, widened modestly for per-qubit spread.
-#   DERIVED T2, measured over 2000 sampled qubits: ~32-159 us.
+# superconducting: T_phi 40-200 us. Reading the Sharma & Lau (arXiv:2607.11637)
+#   Table 4 Heron bands (T1 100-300 us, T2 80-200 us) back through the
+#   decomposition above gives T_phi ~133-300 us, so the sampled range is
+#   deliberately broader toward WEAKER coherence than Heron: it also
+#   represents older/weaker cloud transmons. (An earlier version of this
+#   comment called the range consistent with uncited IBM median T1/T2 figures;
+#   read back through the decomposition, those medians did not support it.)
+#   DERIVED T2, generate_device('superconducting', 5000 qubits, seed=12345):
+#   32.1-158.8 us, median 69.6 us, 61.4% below 80 us, none above 160 us.
 # trapped_ion: IonQ's published Aria specification states T1 10-100 s and
 #   T2 ~1 s; T1's upper bound widened to 200 s for per-qubit spread. The
 #   previous (100, 10_000) s range had no citation and put its upper end
 #   50-100x above any measured cloud trapped-ion T1 -- it is what produced
 #   true-T1 ~ 100 s paired with a ~10,000 s prior. Because T1 >> T_phi here,
 #   the 1/(2*T1) term is negligible and T2 ~ T_phi to within ~1%.
-#   DERIVED T2, measured over 2000 sampled qubits: ~0.100-2.94 s.
+#   DERIVED T2, generate_device('trapped_ion', 5000 qubits, seed=12345):
+#   0.100-2.96 s, median 0.53 s.
+#
+# The numbers are registered in MODEL_PROVENANCE ("sc./ti.truth_range.*",
+# with evidence class and rationale) and _TRUTH_RANGES is built from them.
 _TRUTH_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
-    "superconducting": {"T1_s": (80e-6, 400e-6), "T_phi_s": (40e-6, 200e-6), "eps": (1e-4, 2e-3)},
-    "trapped_ion":     {"T1_s": (10.0, 200.0),   "T_phi_s": (0.1, 3.0),      "eps": (1e-4, 2e-3)},
+    arch: {q: tuple(MODEL_PROVENANCE[f"{pfx}.truth_range.{q}"]["value"])
+           for q in ("T1_s", "T_phi_s", "eps")}
+    for arch, pfx in (("superconducting", "sc"), ("trapped_ion", "ti"))
 }
 
 
@@ -1322,6 +1742,9 @@ def generate_device(
     detuning_1_over_f: bool = False,
     enable_heating_gate_error: bool = False,
     spam_spread_frac: float = 0.0,
+    perturbation_frac: Optional[float] = None,
+    dw_population: str = "estimator_window",
+    t1_telegraph: bool = False,
 ) -> DeviceTruth:
     """Sample a complete, hidden DeviceTruth.
 
@@ -1330,9 +1753,10 @@ def generate_device(
     the sampled T1 and T_phi via 1/T2 = 1/(2*T1) + 1/T_phi and then capped at
     2*T1, so the T2 values a caller sees are narrower than, and shifted below,
     the declared T_phi range (superconducting: T_phi 40-200 us in, T2 ~32-159
-    us out). delta_omega is drawn uniform in [-dw_max, dw_max] with random
-    sign, below an aliasing ceiling that accounts for prior inflation (see
-    the comment at the sampling site). regime='ideal' attaches no drift/crosstalk processes at all
+    us out). delta_omega is drawn according to dw_population (below); by
+    default |delta_omega| ~ U[0.2, 1] * ceiling with a random sign, where the
+    ceiling is an aliasing bound that accounts for prior inflation (see the
+    comment at the sampling site). regime='ideal' attaches no drift/crosstalk processes at all
     (stationary Markovian noise -- the chi2/dof null baseline) and is
     unaffected by every parameter below; regime='nisq' attaches the
     architecture-specific mechanisms in Sections 6-8 of the module spec,
@@ -1348,10 +1772,11 @@ def generate_device(
         added (a single-pole low-frequency-colored process, see
         _proc_lowpass_filtered). When True, uses the genuine 1/f^alpha
         generator (_proc_one_over_f) instead, with alpha from
-        sc.detuning_1_over_f.alpha (itself Class C -- see that entry's
-        notes -- so alpha should be swept, not fixed, when this is enabled).
+        sc.detuning_1_over_f.alpha (Class A but device-specific -- see that
+        entry's notes -- so alpha should be swept, not fixed, when this is
+        enabled).
     enable_heating_gate_error: trapped-ion only, default False. When False,
-        Hite et al.'s (Class A) motional-heating rates are still recorded in
+        Teller et al.'s (PRL 126, 230505) motional-heating rates are still recorded in
         DeviceTruth.architecture_specific for reference, but the ungrounded
         heating-to-gate-error mapping (Class C, self-documented as "not a
         validated physical prediction") contributes zero extra gate error.
@@ -1366,6 +1791,40 @@ def generate_device(
         do not fix it (see spam.per_qubit_spread_frac). Leave it at 0.0 for
         regime='ideal', which is defined as a correctly-specified forward
         model and whose prior passes SPAM through unperturbed.
+    perturbation_frac: default None, which reproduces the historical
+        behaviour exactly: the "estimator_window" ceiling is divided by
+        (1 + resolve_calibration_perturbation(architecture, regime)). Pass the
+        same explicit value given to generate_calibration_prior(...,
+        perturbation_frac=...) so that the ceiling matches the prior envelope
+        actually used. Ignored when dw_max_rad_s is given or when
+        dw_population="independent".
+    dw_population: how delta_omega is drawn.
+        "estimator_window" (default, bit-for-bit the historical draw):
+            |dw| ~ U[0.2, 1] * ceiling with a random sign, ceiling =
+            0.9*pi / (0.5*T2) / (1 + perturbation_frac) per qubit (or
+            dw_max_rad_s if given). Without dw_max_rad_s, and with
+            perturbation_frac equal to the prior's envelope, every drawn
+            (static) value lies inside the window 1_inversion.py resolves
+            for any prior that envelope can produce.
+        "independent": dw ~ U(-W, W) with W = K * 0.9*pi / (0.5*T2_ref),
+            T2_ref = get_architecture_profile(architecture).T2_s (the
+            architecture baseline T2) and K from
+            dw_population.independent_halfwidth_factor in MODEL_PROVENANCE.
+            This is an architecture-level population independent of each
+            qubit's T2, of the prior and of the estimator window: it includes
+            |dw| ~ 0 and values beyond the window (i.e. aliasing instances).
+            It is drawn as random sign * U(0, W), which has the same
+            distribution as U(-W, W) and consumes the same random numbers as
+            the default draw, so every later draw is unchanged.
+            Incompatible with dw_max_rad_s (raises ValueError).
+    t1_telegraph: superconducting, regime='nisq' only (ignored otherwise,
+        like detuning_1_over_f); default False, which changes nothing. When
+        True, attaches drift_processes["T1_telegraph"]: two-state T1
+        switching (Burnett et al., npj QI 5, 54), combined multiplicatively
+        with the OU log-T1 drift in evaluate_truth_at(). The switching rate
+        is drawn from the Class A range sc.T1_telegraph.switching_rate_hz on
+        a separate RNG stream (no other draw moves); the switching amplitude
+        sc.T1_telegraph.amplitude_frac is Class C, hence opt-in.
     """
     if architecture not in ARCHITECTURES:
         raise ValueError(f"Invalid architecture: {architecture!r}")
@@ -1422,15 +1881,42 @@ def generate_device(
     #
     # Dividing the ceiling by the worst-case inflation (1+frac) makes the bound
     # hold for every draw the prior can produce, so no instance is
-    # unrecoverable by construction. An explicit dw_max_rad_s still overrides
+    # unrecoverable by construction at the prior time t0 with the default
+    # prior envelope and the prior-informed delay grid. Drift after t0 (e.g.
+    # nisq at T_MEASURE_S=3600 s: 4/300 SC, 19/300 TI aliased in the
+    # 300-instance benchmark), the arch_default
+    # (cold-start) grid, a larger swept perturbation_frac, or
+    # dw_population='independent' can alias -- flagged by the benchmark
+    # dw_aliased column. An explicit dw_max_rad_s still overrides
     # this entirely.
-    if dw_max_rad_s is not None:
-        dw_max_per_q = np.full(n_qubits, float(dw_max_rad_s))
+    if dw_population == "estimator_window":
+        if dw_max_rad_s is not None:
+            dw_max_per_q = np.full(n_qubits, float(dw_max_rad_s))
+        else:
+            if perturbation_frac is None:
+                _prior_frac = resolve_calibration_perturbation(architecture, regime)
+            else:
+                if not 0.0 <= perturbation_frac < 1.0:
+                    raise ValueError(f"perturbation_frac must be in [0,1), got {perturbation_frac}")
+                _prior_frac = float(perturbation_frac)
+            dw_max_per_q = 0.9 * np.pi / (0.5 * T2) / (1.0 + _prior_frac)
+        dw = rng.choice([-1.0, 1.0], size=n_qubits) * rng.uniform(
+            0.2 * dw_max_per_q, dw_max_per_q, size=n_qubits)
+    elif dw_population == "independent":
+        if dw_max_rad_s is not None:
+            raise ValueError("dw_max_rad_s cannot be combined with dw_population='independent'")
+        # Architecture-level half-width, independent of the sampled T2, the
+        # prior and the estimator window (see the docstring and the
+        # dw_population.independent_halfwidth_factor provenance entry).
+        _K = MODEL_PROVENANCE["dw_population.independent_halfwidth_factor"]["value"]
+        _W = _K * 0.9 * np.pi / (0.5 * profile.T2_s)
+        # sign * U(0, W) is distributed as U(-W, W) and consumes the same
+        # draws as the estimator_window branch, keeping later draws aligned.
+        dw = rng.choice([-1.0, 1.0], size=n_qubits) * rng.uniform(
+            0.0, _W, size=n_qubits)
     else:
-        _prior_frac = resolve_calibration_perturbation(architecture, regime)
-        dw_max_per_q = 0.9 * np.pi / (0.5 * T2) / (1.0 + _prior_frac)
-    dw = rng.choice([-1.0, 1.0], size=n_qubits) * rng.uniform(
-        0.2 * dw_max_per_q, dw_max_per_q, size=n_qubits)
+        raise ValueError(f"Unknown dw_population {dw_population!r}; "
+                         "expected 'estimator_window' or 'independent'")
 
     if not 0.0 <= spam_spread_frac < 1.0:
         raise ValueError(f"spam_spread_frac must be in [0,1), got {spam_spread_frac}")
@@ -1463,6 +1949,18 @@ def generate_device(
                 "sigma": profile.extra["T1_drift_amplitude_frac"],  # fractional units on log(T1)
                 "theta": 1.0 / profile.extra["T1_drift_timescale_s"],
             }, seed_salt="T1_ou")
+            if t1_telegraph:
+                # One Lorentzian rate 1/tau_0 per device, log-uniform over the
+                # reported range, from its own RNG stream so that the main
+                # truth stream (and hence every other draw) is not advanced.
+                lo_hz, hi_hz = MODEL_PROVENANCE["sc.T1_telegraph.switching_rate_hz"]["value"]
+                inv_tau0 = float(10.0 ** _sub_rng(seed, "T1_telegraph", architecture, n_qubits)
+                                 .uniform(np.log10(lo_hz), np.log10(hi_hz)))
+                drift["T1_telegraph"] = DriftProcess("telegraph", {
+                    "rate": 0.5 * inv_tau0,  # per-direction rate r = (1/tau_0)/2
+                    "amplitude_frac": MODEL_PROVENANCE["sc.T1_telegraph.amplitude_frac"]["value"],
+                    "lorentzian_rate_hz": inv_tau0,
+                }, seed_salt="T1_telegraph")
             if detuning_1_over_f:
                 drift["detuning"] = DriftProcess("one_over_f", {
                     "amplitude": profile.extra["detuning_drift_amplitude_rad_s"],
@@ -1471,7 +1969,7 @@ def generate_device(
                     # the band's low edge (one-day window, phenomenological)
                     # so the trajectory never depends on how far it is queried.
                     "cutoff_hz": 1.0 / profile.extra["T1_drift_timescale_s"],
-                    "f_min_hz": 1.0 / 86_400.0,
+                    "f_min_hz": MODEL_PROVENANCE["sc.detuning_1_over_f.f_min_hz"]["value"],
                 }, seed_salt="detuning_1overf")
             else:
                 drift["detuning"] = DriftProcess("lowpass_filtered", {
@@ -1506,7 +2004,7 @@ def generate_device(
             # diffusion coefficient with sqrt(2*theta), exactly as for T1.
             drift["detuning"] = DriftProcess("ou", {
                 "mean": 0.0, "sigma": profile.extra["detuning_drift_amplitude_rad_s"],
-                "theta": 1.0 / 100.0,
+                "theta": 1.0 / MODEL_PROVENANCE["ti.detuning_drift.correlation_time_s"]["value"],
             }, seed_salt="detuning_ou")
             # No power-line term on detuning: the cited 60 Hz measurement is of
             # the MOTIONAL-mode secular frequency, not qubit detuning, and a
@@ -1566,6 +2064,19 @@ def evaluate_truth_at(truth: DeviceTruth, qubit: int, t_s: float) -> Dict[str, f
                                           seed_salt=proc.seed_salt),
                              truth.seed, ("T1", qubit), t_s, log_T1_0, dt_s=dt_fixed)
         T1 = float(np.exp(walked))
+    if "T1_telegraph" in truth.drift_processes:
+        # Two-state switching, multiplicative on top of the OU drift: T1 is
+        # scaled by x(t)/x(0) of a telegraph trajectory with levels 1 and
+        # 1 + amplitude_frac, so T1(0) is the sampled (OU) value and each
+        # switch moves T1 between two levels a factor (1 + amplitude_frac)
+        # apart. Grid fixed by the process's correlation time 1/(2*rate).
+        proc = truth.drift_processes["T1_telegraph"]
+        rate = proc.params.get("rate", 1e-3)
+        dt_fixed = max(1.0, (1.0 / (2.0 * rate)) / 20.0) if rate > 0 else 1.0
+        n_steps = max(1, int(round(max(t_s, 0.0) / dt_fixed)) + 1)
+        x_tel = sample_trajectory(proc, truth.seed, ("T1_telegraph", qubit),
+                                  n_steps, dt_fixed, 1.0)
+        T1 = T1 * float(x_tel[-1] / x_tel[0])
     if "detuning" in truth.drift_processes:
         # Every detuning process is a stationary zero-mean fluctuation x(t)
         # whose amplitude/sigma is its STATIONARY std, and the truth drifts
@@ -1664,11 +2175,13 @@ def generate_calibration_prior(
     each derivation, including the two candidate anchors that were considered
     and withdrawn.
 
-    SPAM is passed through unperturbed. Readout error is read from the
-    provider at run time rather than inherited from a stale calibration
-    record, and 1_inversion.py treats it as a known constant in its forward
-    models. Perturbing it here would inject a forward-model misspecification,
-    which is precisely what the ideal regime is defined to exclude.
+    SPAM is passed through exactly: the prior's spam_p0_given_1_prior /
+    spam_p1_given_0_prior are copied verbatim from truth. This is an
+    oracle-SPAM idealisation -- the inversion, which treats SPAM as a known
+    constant in its forward models, is given perfect readout calibration.
+    Misspecified SPAM is tested separately by the benchmark flags
+    --spam-scale / --spam-swap (2_ideal_parity.py, 3_benchmark.py), which
+    alter only the SPAM handed to the inversion.
     """
     if perturbation_frac is None:
         perturbation_frac = resolve_calibration_perturbation(truth.architecture,
@@ -1856,12 +2369,32 @@ def _fractional_power(op, f: float):
     return _FRACTIONAL_POWER_CACHE[key]
 
 
+def _h_amplitude_error(f: float):
+    """Amplitude error of a Hadamard executed as hardware does: one pi/2
+    pulse between virtual Z frame changes, H = Rz(pi/2)*SX*Rz(pi/2) up to a
+    global phase. Only the SX pulse is over-rotated (SX -> SX^f*SX), so the
+    executed gate is Rz(pi/2)*SX^f*SX*Rz(pi/2) = E*H with
+    E = Rz(pi/2)*SX^f*Rz(-pi/2): a (pi/2)*f rotation, not the pi*f rotation
+    H^f. E does not depend on which Z-pi/2-Z decomposition is used."""
+    from qiskit.circuit.library import SXGate, UnitaryGate
+    from qiskit.quantum_info import Operator
+    key = ("h_native_pi2", round(f, 15))
+    if key not in _FRACTIONAL_POWER_CACHE:
+        rz_p, rz_m = _rotation_unitary("z", np.pi / 2), _rotation_unitary("z", -np.pi / 2)
+        e_mat = rz_p @ Operator(SXGate()).power(f).data @ rz_m
+        _FRACTIONAL_POWER_CACHE[key] = UnitaryGate(e_mat, label="amp_err")
+    return _FRACTIONAL_POWER_CACHE[key]
+
+
 def _inject_amplitude_errors(circuit, truth: DeviceTruth, t_s: float = 0.0):
     """Return a copy of `circuit` with G^f appended after every native
     single-qubit rotation G, f = _amplitude_error_frac(). Because the error
     follows the sign of the rotation (as a miscalibrated drive amplitude
     does), G(theta)*G(-theta) cancels exactly, as the gate-repetition probe's
     G*G^-1 design assumes; errors between non-inverse gates still accumulate.
+    "h" is not a native pulse: it receives _h_amplitude_error(f), the error of
+    its single pi/2 pulse, instead of H^f. ("x" keeps X^f: X^f*X equals the
+    two-sx execution (SX^f*SX)^2 up to a global phase.)
     No-op when every qubit has f = 0 (always, in the ideal regime)."""
     fracs = {q: _amplitude_error_frac(truth, q, t_s) for q in range(truth.n_qubits)}
     if not any(f > 0.0 for f in fracs.values()):
@@ -1874,7 +2407,9 @@ def _inject_amplitude_errors(circuit, truth: DeviceTruth, t_s: float = 0.0):
         q_idx = circuit.find_bit(inst.qubits[0]).index
         f = fracs.get(q_idx, 0.0)
         if f > 0.0:
-            new_qc.append(_fractional_power(inst.operation, f), inst.qubits, [])
+            err_gate = (_h_amplitude_error(f) if inst.operation.name == "h"
+                        else _fractional_power(inst.operation, f))
+            new_qc.append(err_gate, inst.qubits, [])
     return new_qc
 
 
@@ -1897,12 +2432,19 @@ def effective_gate_epsilon(truth: DeviceTruth, qubit: int = 0, t_s: float = 0.0)
 
     The native pair G, noise, G^f, G^-1, noise, (G^-1)^f is composed as a
     superoperator; its Pauli-transfer-matrix element R_zz is the per-pair
-    survival of the Z Bloch component, and forward_gate()'s model
-    (1 - 2*eps)^2 = R_zz defines eps. This is the quantity the gate-repetition
-    probe -- and a provider's randomized benchmarking -- actually measures: it
-    INCLUDES decoherence during the gate (the coherence-limited error of
-    McKay et al., arXiv:2311.05933, Eq. B2) and any coherent residual that
-    survives the pair. DeviceTruth.epsilon_gate is only the sampled
+    survival of the Z Bloch component, and (1 - 2*eps)^2 = R_zz defines eps.
+    R_zz is exactly the rate parameter of the affine gate-repetition model
+    the engine fits (1_inversion.forward_gate_affine, z -> R_zz*z + R_z0);
+    the non-unital offset R_z0 (amplitude damping toward |0> during the
+    gates) enters through that model's asymptote z*, which the engine
+    computes from its T1/T2 estimates and the gate time (same channel
+    form: relaxation over t_g then depolarizing). This is the
+    quantity the gate-repetition probe measures: it INCLUDES decoherence
+    during the gate (the coherence-limited error of McKay et al.,
+    arXiv:2311.05933, Eq. B2) and any coherent residual that survives the
+    pair. It is not identical to a randomized-benchmarking average gate
+    infidelity, which differs from it by (t_g/12)*(1/T2 - 1/T1) (to first
+    order in t_g/T1, t_g/T2) plus any coherent residual. DeviceTruth.epsilon_gate is only the sampled
     depolarizing budget; comparing a recovered epsilon against it omits the
     gate-time T1/T2 contribution (~1e-4 for a 50 ns gate on a ~100 us
     transmon) and biases every epsilon benchmark high."""
@@ -2133,10 +2675,114 @@ def simulate_circuit(
     return result.get_counts(0)
 
 
+# Time-resolved probe execution (simulate_probe(time_resolved=True)).
+# Per-shot repetition overhead: 0.0 s is a documented LOWER BOUND, not a
+# measurement. IBM's Qiskit Runtime documentation gives no single value
+# ("Default is given by backend.default_rep_delay"; "Each backend has a
+# different default rep_delay"), and no per-shot overhead was verified for
+# IonQ systems. Readout duration is not counted either, so every run
+# duration computed below is a lower bound.
+_DEFAULT_REP_DELAY_S = 0.0
+# Each shot chunk spans at most this fraction of the shortest correlation
+# time of the truth's drift processes, so parameters are near-constant within
+# a chunk (a discretisation choice, not a physical parameter).
+_CHUNK_FRACTION_OF_CORRELATION_TIME = 0.1
+# Runtime cap on chunks per circuit (each chunk is one Aer run); when it
+# binds, chunks span more than the fraction above.
+_DEFAULT_MAX_CHUNKS_PER_CIRCUIT = 100
+
+
+def _shortest_drift_correlation_time_s(truth: DeviceTruth) -> float:
+    """Shortest correlation time (s) of truth's attached drift processes, as
+    evaluate_truth_at() realises them; inf when there are none (ideal). OU:
+    1/theta. lowpass_filtered: y[i] = a*y[i-1] + ..., a = exp(-2*pi*cutoff*dt),
+    decorrelates as exp(-2*pi*cutoff*t), i.e. 1/(2*pi*cutoff). one_over_f:
+    its fastest Lorentzian has its corner at the Nyquist frequency of the
+    evaluation grid dt, i.e. dt/pi. telegraph (rate r per direction):
+    1/(2r)."""
+    taus: List[float] = []
+    for proc in truth.drift_processes.values():
+        p, pt = proc.params, proc.process_type
+        if pt == "ou":
+            theta = p.get("theta", 1.0)
+            if theta > 0:
+                taus.append(1.0 / theta)
+        elif pt == "lowpass_filtered":
+            taus.append(1.0 / (2.0 * np.pi * max(p.get("cutoff_hz", 1e-3), 1e-9)))
+        elif pt == "one_over_f":
+            dt_grid = max(1.0, (1.0 / max(p.get("cutoff_hz", 1e-3), 1e-9)) / 20.0)
+            taus.append(dt_grid / np.pi)
+        elif pt == "telegraph":
+            rate = p.get("rate", 1e-3)
+            if rate > 0:
+                taus.append(1.0 / (2.0 * rate))
+        else:
+            raise ValueError(f"no correlation time defined for process_type {pt!r}")
+    return min(taus) if taus else float("inf")
+
+
+def _probe_schedule(circuits: List[Any], truth: DeviceTruth, shots_list: List[int],
+                    t_s: float, dt_ns: Optional[float], rep_delay_s: float,
+                    max_chunks: int) -> List[Dict[str, Any]]:
+    """Wall-clock schedule of a probe run: circuits execute one after another
+    from t_s in list order (circuit-major, all shots of circuit i before
+    circuit i+1 -- an assumption; a provider may interleave). One shot of a
+    circuit lasts the sum of its delay durations (exact for single-qubit
+    probes, an upper bound if delays on different qubits run in parallel)
+    plus truth.gate_duration_ns per noisy native gate (the gates the noise
+    model charges gate-time relaxation) plus rep_delay_s. Each circuit's
+    shots are split into K near-equal consecutive chunks, K = ceil(duration /
+    (_CHUNK_FRACTION_OF_CORRELATION_TIME * shortest correlation time)),
+    capped by max_chunks and by the shot count."""
+    max_span = _CHUNK_FRACTION_OF_CORRELATION_TIME * _shortest_drift_correlation_time_s(truth)
+    t_now = float(t_s)
+    schedule: List[Dict[str, Any]] = []
+    for qc, sh in zip(circuits, shots_list):
+        qn = _to_aer_native(qc)
+        idle_s = sum(_delay_seconds(inst, dt_ns) for inst in qn.data
+                     if inst.operation.name == "delay")
+        n_gates = sum(1 for inst in qn.data if inst.operation.name in _NOISY_GATES)
+        per_shot_s = idle_s + n_gates * truth.gate_duration_ns * 1e-9 + rep_delay_s
+        duration_s = per_shot_s * int(sh)
+        k_need = (int(np.ceil(duration_s / max_span))
+                  if np.isfinite(max_span) and max_span > 0 else 1)
+        n_chunks = max(1, min(k_need, int(max_chunks), int(sh)))
+        base, rem = divmod(int(sh), n_chunks)
+        chunks, done = [], 0
+        for k in range(n_chunks):
+            n_k = base + (1 if k < rem else 0)
+            c0, c1 = t_now + done * per_shot_s, t_now + (done + n_k) * per_shot_s
+            chunks.append({"t_start_s": c0, "t_end_s": c1, "t_mid_s": 0.5 * (c0 + c1),
+                           "shots": n_k})
+            done += n_k
+        schedule.append({"t_start_s": t_now, "t_end_s": t_now + duration_s,
+                         "chunks": chunks})
+        t_now += duration_s
+    return schedule
+
+
+def _truth_snapshot(truth: DeviceTruth, t_s: float):
+    """(snapshot, per-qubit truth): a drift-free copy of truth whose stored
+    T1/T2/delta_omega equal evaluate_truth_at(truth, q, t_s) for every qubit.
+    evaluate_truth_at() returns identical values for the snapshot at any
+    time, so simulating it equals simulating truth at t_s, while each drift
+    trajectory is materialised once instead of at every internal call."""
+    from dataclasses import replace as _dc_replace
+    tvs = [evaluate_truth_at(truth, q, t_s) for q in range(truth.n_qubits)]
+    snap = _dc_replace(
+        truth, drift_processes={},
+        T1_s=np.array([tv["T1_s"] for tv in tvs]),
+        T2_s=np.array([tv["T2_s"] for tv in tvs]),
+        delta_omega_rad_s=np.array([tv["delta_omega_rad_s"] for tv in tvs]))
+    return snap, tvs
+
+
 def simulate_probe(
     circuits: List[Any], truth: DeviceTruth, shots: Any = 1024, t_s: float = 0.0,
     native_gate_names: Optional[List[str]] = None, seed: Optional[int] = None,
-    dt_ns: Optional[float] = None,
+    dt_ns: Optional[float] = None, time_resolved: bool = False,
+    rep_delay_s: float = _DEFAULT_REP_DELAY_S,
+    max_chunks_per_circuit: int = _DEFAULT_MAX_CHUNKS_PER_CIRCUIT,
 ) -> SimulationResult:
     """Simulate a list of probe circuits (e.g. from 1_inversion.py's
     build_probe_circuits()) and return counts directly compatible with
@@ -2148,19 +2794,62 @@ def simulate_probe(
     `dt_ns` should be the originating profile's dt_ns, so delays emitted in
     hardware "dt" units are converted to seconds correctly for both the
     thermal-relaxation channel and the injected detuning phase.
+
+    Circuit i is simulated with Aer seed `seed + i` when `seed` is given;
+    when `seed` is None it gets a distinct deterministic seed derived from
+    (truth.seed, i), so circuits never share one Aer RNG stream.
+
+    time_resolved=False (default): every circuit and shot sees the truth
+    frozen at t_s. time_resolved=True: the run starts at t_s and follows
+    _probe_schedule() (circuit-major order; shot duration = delays + noisy
+    gates * gate duration + rep_delay_s, default 0.0 = lower bound). Each
+    circuit's shots are split into chunks spanning at most 1/10 of the
+    shortest drift correlation time (at most max_chunks_per_circuit chunks);
+    chunk k is simulated with the truth at its mid-time and Aer seed
+    circ_seed for k = 0, else one derived from (circ_seed, k), and the chunk
+    counts are summed. This realises within-run drift and shot-to-shot
+    quasi-static noise from the drift processes already attached to truth
+    (no new parameter); with no drift (ideal) or K = 1 for every circuit
+    and no change of truth, it reproduces the frozen counts. The schedule
+    and per-chunk truth are returned in the SimulationResult.
     """
     n = len(circuits)
     shots_list = [shots] * n if isinstance(shots, int) else list(shots)
     if len(shots_list) != n:
         raise ValueError(f"shots list length {len(shots_list)} != number of circuits {n}")
+    if time_resolved:
+        if rep_delay_s < 0.0 or int(max_chunks_per_circuit) < 1:
+            raise ValueError("rep_delay_s must be >= 0 and max_chunks_per_circuit >= 1")
+        schedule = _probe_schedule(circuits, truth, shots_list, t_s, dt_ns,
+                                   rep_delay_s, max_chunks_per_circuit)
+        chunk_records: List[List[Dict[str, Any]]] = []
 
     counts_list: List[Dict[str, int]] = []
     names: List[str] = []
     for i, (qc, sh) in enumerate(zip(circuits, shots_list)):
-        raw = simulate_circuit(qc, truth, shots=sh, t_s=t_s,
-                               native_gate_names=native_gate_names,
-                               seed=(seed + i) if seed is not None else None,
-                               dt_ns=dt_ns)
+        # seed=None: per-circuit seed from a salted sub-stream of truth.seed
+        # (never the bare truth.seed for every circuit); upper bound 2**31 - 1
+        # keeps it a non-negative 32-bit int for Aer's seed_simulator.
+        circ_seed = ((seed + i) if seed is not None
+                     else int(_sub_rng(truth.seed, "aer_circuit", i).integers(0, 2**31 - 1)))
+        if not time_resolved:
+            raw = simulate_circuit(qc, truth, shots=sh, t_s=t_s,
+                                   native_gate_names=native_gate_names,
+                                   seed=circ_seed,
+                                   dt_ns=dt_ns)
+        else:
+            raw, recs = {}, []
+            for k, chunk in enumerate(schedule[i]["chunks"]):
+                ch_seed = (circ_seed if k == 0 else
+                           int(_sub_rng(circ_seed, "aer_chunk", k).integers(0, 2**31 - 1)))
+                snap, tvs = _truth_snapshot(truth, chunk["t_mid_s"])
+                part = simulate_circuit(qc, snap, shots=chunk["shots"], t_s=chunk["t_mid_s"],
+                                        native_gate_names=native_gate_names,
+                                        seed=ch_seed, dt_ns=dt_ns)
+                for bitstring, cnt in part.items():
+                    raw[bitstring] = raw.get(bitstring, 0) + cnt
+                recs.append(dict(chunk, seed=ch_seed, truth=tvs))
+            chunk_records.append(recs)
         norm: Dict[str, int] = {}
         for bitstring, cnt in raw.items():
             b = bitstring.replace(" ", "")[-1]
@@ -2170,6 +2859,14 @@ def simulate_probe(
 
     manifest_id = str(uuid.uuid5(uuid.NAMESPACE_OID,
                                  f"{truth.seed}:{truth.architecture}:{truth.n_qubits}:{truth.regime}:{t_s}"))
+    if time_resolved:
+        return SimulationResult(
+            counts_list=counts_list, shots_list=shots_list, circuit_names=names,
+            manifest_id=manifest_id, truth_evaluation_time_s=t_s, time_resolved=True,
+            circuit_start_times_s=[s["t_start_s"] for s in schedule],
+            circuit_end_times_s=[s["t_end_s"] for s in schedule],
+            run_duration_s=(schedule[-1]["t_end_s"] - float(t_s)) if schedule else 0.0,
+            chunk_records=chunk_records)
     return SimulationResult(counts_list=counts_list, shots_list=shots_list,
                             circuit_names=names, manifest_id=manifest_id,
                             truth_evaluation_time_s=t_s)
@@ -2184,8 +2881,9 @@ def make_manifest(
     simulation_config: Optional[Dict[str, Any]] = None,
 ) -> SimulationManifest:
     """Full reproducibility record. truth and calibration are recorded under
-    separate top-level keys, and calibration never contains any field copied
-    verbatim from truth (see generate_calibration_prior's docstring)."""
+    separate top-level keys. Calibration T1/T2/epsilon are perturbed from
+    truth; the calibration SPAM fields ARE copied verbatim from truth (oracle
+    SPAM; see generate_calibration_prior's docstring)."""
     return SimulationManifest(
         instance_id=str(uuid.uuid4()), seed=truth.seed, architecture=truth.architecture,
         regime=truth.regime, n_qubits=truth.n_qubits,
@@ -2808,8 +3506,9 @@ def _run_validation_tests() -> None:
         # engine's own forward_gate() with eps = effective_gate_epsilon
         # matches the simulation, while the sampled depolarizing budget alone
         # does not. (For transmons, amplitude damping toward |0> over ~50 us
-        # of gates adds an offset forward_gate() does not model; that is a
-        # property of the engine's forward model, reported, not asserted.)
+        # of gates adds an offset forward_gate() does not model; the engine's
+        # affine model forward_gate_affine() computes z* from T1, T2 and the
+        # gate time, so R2 is asserted only for the trapped ion, reported otherwise.)
         from qiskit.quantum_info import Operator, PTM, SuperOp
         r1_ok, r2_ok, r_detail = True, True, []
         for arch_k, t2_k in (("superconducting", 60e-6), ("trapped_ion", 0.2)):
