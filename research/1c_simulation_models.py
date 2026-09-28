@@ -34,10 +34,17 @@ the MODEL_PROVENANCE keys named (see EVIDENCE CLASSES below).
     [OFF] two-state T1 switching (t1_telegraph=True): rate range
           sc.T1_telegraph.switching_rate_hz (A); amplitude
           sc.T1_telegraph.amplitude_frac (C), hence opt-in.
+    [ON]  quasi-static (shot-to-shot) low-frequency dephasing
+          (generate_device(quasi_static_dephasing=True); library default
+          False, ON in 3_benchmark.py): each shot sees its own static
+          detuning offset delta ~ N(0, sigma_q), which gives Ramsey a
+          Gaussian envelope (T2* < T2) while the Hahn echo refocuses it.
+          sigma_q is set per qubit from a measured T2R/T2E ratio,
+          sc.quasi_static.t2_ramsey_over_echo (B, Place et al.).
   Trapped ion:
     [ON]  detuning drift, additive OU: std ti.detuning_drift.amplitude_rad_s
           (C); mean-reversion time ti.detuning_drift.correlation_time_s
-          (C, no source found).
+          (C, from the drift band Proctor et al. detected on a 171Yb+ qubit).
     [ON]  coherent drive-amplitude error: ti.gate.coherent_fraction (C).
     [OFF] coherent crosstalk kicks (needs >= 2 qubits):
           ti.crosstalk.coherent_angle_rad_high (A).
@@ -47,19 +54,36 @@ the MODEL_PROVENANCE keys named (see EVIDENCE CLASSES below).
   Both architectures:
     [ON]  stale calibration prior: calib.perturbation.* (C), plus the drift
           accumulated up to the benchmark's measurement time.
-    [OFF] time-resolved probe execution (simulate_probe(time_resolved=True);
-          library default False, benchmark opt-in --time-resolved): circuits
-          run sequentially and each shot chunk sees the truth at its own
-          time, so the drift processes above act within a run and shot to
-          shot. No new physical parameter: shot durations use the circuits'
+    [ON]  stale SPAM in the calibration prior (generate_calibration_prior(
+          spam_perturbation_frac=f); library default 0.0 = oracle SPAM, ON in
+          3_benchmark.py with f equal to the prior's own envelope,
+          calib.spam_perturbation (C)).
+    [ON]  detuning during gate pulses (generate_device(detuning_during_gates=
+          True); library default False, ON in 3_benchmark.py): the qubit's
+          detuning keeps acting while a pulse is played, implemented as
+          Rz(dw*t_g/2) G Rz(dw*t_g/2). No new parameter (dw and the gate
+          durations above). It does not cancel in the G*G^-1 pair of the
+          gate-repetition probe, so it tests that probe's claim to isolate
+          incoherent error.
+    [ON]  literature detuning population (generate_device(dw_population=
+          "literature"); library default "estimator_window", ON in
+          3_benchmark.py): dw ~ U(-W, W) with W from measured frequency
+          excursions (sc/ti.dw_population.literature_halfwidth_hz, C),
+          independent of the estimator's window and of each qubit's truth.
+    [ON in 3_benchmark.py] time-resolved probe execution (simulate_probe(
+          time_resolved=True); library default False): circuits run
+          sequentially and each shot chunk sees the truth at its own time,
+          so the drift processes above act within a run and shot to shot.
+          No new physical parameter: shot durations use the circuits'
           delays and the gate durations sc.gate.duration_ns (C) /
           ti.gate.duration_ns (A); the repetition overhead is 0 s (a lower
-          bound, see _DEFAULT_REP_DELAY_S). Available but OFF by default:
-          a superconducting run (~1 s) is far shorter than its drift times,
-          so the mode's effect there is negligible, and its trapped-ion
-          effect is set by the Class C ti.detuning_drift.correlation_time_s.
-  Gate-time decoherence, readout error and detuning phase evolution act in
-  both regimes. The ideal regime is unaffected by every NISQ option.
+          bound, see _DEFAULT_REP_DELAY_S). A superconducting run (~1 s) is
+          far shorter than its drift times, so the mode's effect there is
+          negligible; a trapped-ion run lasts hours, and there it realises
+          the Proctor-anchored detuning drift inside the run.
+  Gate-time decoherence, readout error and detuning phase evolution during
+  free evolution act in both regimes. The ideal regime is unaffected by
+  every NISQ option.
 
 
 SCOPE (see spec Section 17 for the full list): this module is the physics/
@@ -104,6 +128,16 @@ truth would misrepresent a stress-test parameter as a measurement.
       flux-biased laboratory transmon, and the paper itself notes other work
       finding alpha = 0.9-1.0. Still sweep it across a plausible range
       (e.g. 0.5-1.5) instead of relying on one point value.
+  spam_perturbation_frac (generate_calibration_prior): staleness of the
+      readout errors in the calibration record (calib.spam_perturbation,
+      Class C). No measured readout-error staleness for cloud devices was
+      found; 3_benchmark.py reuses the prior's own envelope. Sweep it,
+      including 0 (oracle SPAM) as the ablation.
+  literature detuning half-width (generate_device(dw_population=
+      "literature"), sc/ti.dw_population.literature_halfwidth_hz): Class C
+      supports built on measured excursion bounds (Dhieb et al., Proctor et
+      al.). Sweep it (overrides={"dw_halfwidth_hz": W}); detuning also
+      drives the gate-repetition bias when detuning_during_gates=True.
 
 -----------------------------------------------------------------------------
 EVIDENCE CLASSES (see MODEL_PROVENANCE)
@@ -765,6 +799,118 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                               "qubit whose T2 prior equals T2_ref, not "
                               "derived from data."),
     },
+    "sc.dw_population.literature_halfwidth_hz": {
+        "value": 15.0e3, "unit": "Hz", "evidence_class": "C",
+        "source": "Dhieb et al., 'Stability studies on subtractively-fabricated "
+                 "CMOS-compatible superconducting transmon qubits', "
+                 "arXiv:2512.18037 (2025); recalibration cadence: Dasgupta & "
+                 "Humble, 'Characterizing the Stability of NISQ Devices', IEEE "
+                 "QCE 2020, arXiv:2008.09612",
+        "location": "Dhieb Sec. III A: Ramsey-tracked frequency of qubit A.2 over "
+                   "95 h, 'the observed frequency shift was small (below 15 "
+                   "kHz)'; across all qubits it 'remains below 100 kHz' (same "
+                   "location as sc.detuning_drift.amplitude_rad_s). Dasgupta & "
+                   "Humble Sec. III: 'IBM has been re-calibrating only once per "
+                   "day' (IBM Yorktown, Mar 2019 - Mar 2020).",
+        "notes": ("W/2pi in generate_device(dw_population='literature'): "
+                  "dw ~ U(-W, W), W = 2*pi*15 kHz = 9.42e4 rad/s, drawn "
+                  "independently of the qubit's T2, the calibration prior and "
+                  "1_inversion.py's estimator window. The support is the "
+                  "typical-qubit frequency excursion over 95 h WITHOUT "
+                  "recalibration; a cloud qubit is recalibrated about daily, "
+                  "so this is a pessimistic (wide) support for the residual "
+                  "detuning at job time. It excludes the rare TLS-driven jumps "
+                  "(< 100 kHz). The uniform shape is a choice (only a bound is "
+                  "reported). With 1_inversion.py's window 0.9*pi/(0.5*T2_prior) "
+                  "(12.9 kHz at T2_prior = 70 us), qubits with longer T2 alias "
+                  "for part of this support; the benchmark flags them "
+                  "(dw_aliased). Laboratory device, not an IBM Heron qubit. "
+                  "Override with overrides={'dw_halfwidth_hz': W} to sweep."),
+        "class_c_rationale": ("Dhieb et al. report a bound on the total "
+                              "frequency excursion of a laboratory device, not "
+                              "a distribution of residual detunings on cloud "
+                              "hardware; using it as a uniform support is a "
+                              "modelling choice. Sweep it."),
+    },
+    "ti.dw_population.literature_halfwidth_hz": {
+        "value": 0.5, "unit": "Hz", "evidence_class": "C",
+        "source": "Proctor et al., Nat. Commun. 11, 5396 (2020), arXiv:1907.13608",
+        "location": "p.4 (Fig. 1E discussion): the estimated qubit detuning of a "
+                   "171Yb+ ion 'varies slowly between approximately -0.5 Hz and "
+                   "0.5 Hz' over ~8 h of uncompensated Ramsey data",
+        "notes": ("W/2pi in generate_device(dw_population='literature') for "
+                  "trapped ions: dw ~ U(-W, W), W = 2*pi*0.5 Hz = 3.14 rad/s. "
+                  "The support equals the measured excursion range of an "
+                  "uncompensated qubit; Proctor et al. then added feedback, so "
+                  "a frequency-locked cloud device may be tighter. Laboratory "
+                  "surface trap, not a cloud IonQ system. The uniform shape is "
+                  "a choice. Override with overrides={'dw_halfwidth_hz': W}."),
+        "class_c_rationale": ("A measured excursion range of one laboratory "
+                              "ion used as a uniform support; not a "
+                              "distribution of cloud-device detunings. Sweep "
+                              "it."),
+    },
+    "calib.spam_perturbation": {
+        "value": "perturbation_frac (same envelope as calib.perturbation.*)",
+        "unit": "dimensionless (envelope half-width)", "evidence_class": "C",
+        "source": "No quantitative source for readout-error staleness on cloud "
+                 "devices. Recalibration cadence: Dasgupta & Humble, IEEE QCE "
+                 "2020, arXiv:2008.09612 (Sec. III: once per day on IBM "
+                 "Yorktown); the readout error there drifts over the 13-month "
+                 "record (Sec. III A, Fig. 5), shown only graphically.",
+        "location": "n/a -- rule, see notes",
+        "notes": ("Used by generate_calibration_prior(spam_perturbation_frac=f): "
+                  "the SPAM handed to the inversion becomes truth * U(1-f, 1+f), "
+                  "independently for p0|1 and p1|0, from its own RNG stream (no "
+                  "other prior draw moves). Library default f = 0.0 keeps the "
+                  "historical oracle SPAM, so every existing caller is "
+                  "unchanged; 3_benchmark.py sets f equal to the prior's own "
+                  "envelope (calib.perturbation.*), on the reasoning that a "
+                  "provider's readout-error record is refreshed on the same "
+                  "cadence as its T1/T2/gate-error record and is as stale. "
+                  "The ideal regime is defined by oracle SPAM and is not "
+                  "changed. Sweep f, with 0 as the oracle ablation."),
+        "class_c_rationale": ("No published number measures how far a cloud "
+                              "provider's reported readout error sits from the "
+                              "true value at job time; reusing the prior's "
+                              "Class C envelope is a consistency choice, not a "
+                              "measurement."),
+    },
+    "sc.quasi_static.t2_ramsey_over_echo": {
+        "value": (98 / 153, 40 / 44, 47 / 76, 18 / 49, 41 / 53, 101 / 144,
+                  68 / 87, 53 / 71, 58 / 78, 105 / 201),
+        "unit": "dimensionless (T2 Ramsey / T2 echo, same qubit and cycle)",
+        "evidence_class": "B",
+        "source": "Place, Rodgers, Mundada, ..., de Leon, Houck, 'New material "
+                 "platform for superconducting transmon qubits with coherence "
+                 "times exceeding 0.3 milliseconds', arXiv:2003.00024 "
+                 "(published in Nature Communications, 2021)",
+        "location": "arXiv:2003.00024v1 Supplementary Table S1, columns "
+                   "'Average T2R (us)' and 'Average T2E (us)', every 2D device "
+                   "with both: 2b 98/153, 4a 40/44, 5a 47/76, 7a 18/49, 11a "
+                   "41/53, 11b 101/144, 11c 68/87, 12a 53/71, 17a 58/78, 18a "
+                   "105/201 (3D device 3D1 excluded)",
+        "notes": ("DERIVATION: the ten ratios r = T2R/T2E span 0.367-0.909, "
+                  "median 0.722. generate_device(quasi_static_dephasing=True) "
+                  "draws one r per superconducting qubit from these ten values "
+                  "(an empirical distribution, own RNG stream) and sets a "
+                  "quasi-static detuning std sigma so that the Ramsey 1/e time "
+                  "is r*T2: with the envelope exp(-t/T2 - sigma^2 t^2/2) "
+                  "(a Gaussian-distributed static offset averages the fringe "
+                  "to its characteristic function exp(-sigma^2 t^2/2)), the "
+                  "1/e condition at t = r*T2 gives sigma = sqrt(2*(1 - r)) / "
+                  "(r*T2). T2 (the sampled Markovian T2) plays the role of "
+                  "T2E: a Hahn echo cancels any static offset exactly. "
+                  "Place et al. fit T2R with a pure exponential and T2E with a "
+                  "stretched exponential; both fitted times are 1/e times, so "
+                  "the ratio is read as a ratio of 1/e times. CAVEATS: "
+                  "laboratory tantalum transmons, not IBM Heron qubits; "
+                  "entries 7a (both) and 17a, 18a (T2R) had three or fewer "
+                  "repetitions; real low-frequency noise also degrades the "
+                  "echo slightly (the quasi-static limit refocuses it "
+                  "perfectly); shot-to-shot independence is assumed, so run-"
+                  "to-run correlation (over-dispersion) is not modelled."),
+    },
     "sc.detuning_1_over_f.psd_reference_hz": {
         "value": 1.0, "unit": "Hz", "evidence_class": "A",
         "source": "Confirmed by direct fetch of arXiv:2404.02989 (Dephasing in "
@@ -897,22 +1043,40 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                               "measurement."),
     },
     "ti.detuning_drift.correlation_time_s": {
-        "value": 100.0, "unit": "s", "evidence_class": "C",
-        "source": "No source found",
-        "location": "n/a -- phenomenological",
+        "value": 1.0 / (2.0 * np.pi * 250e-6), "unit": "s", "evidence_class": "C",
+        "source": "Derived from Proctor, Revelle, Nielsen, Rudinger, Lobser, "
+                 "Maunz, Blume-Kohout, Young, 'Detecting and tracking drift in "
+                 "quantum information processors', Nat. Commun. 11, 5396 "
+                 "(2020), arXiv:1907.13608",
+        "location": "p.3: Ramsey on a 171Yb+ qubit (surface trap, microwave "
+                   "control), 6000 rasters over ~8 h; 'The detected frequencies "
+                   "range from the lowest Fourier basis frequency for this "
+                   "experiment duration -- approximately 15 uHz -- up to "
+                   "approximately 250 uHz.' p.4: the detuning 'varies slowly "
+                   "between approximately -0.5 Hz and 0.5 Hz', correlated with "
+                   "lab temperature (Spearman |rho| = 0.92).",
         "notes": ("Mean-reversion time 1/theta of the additive OU detuning "
                   "deviation attached by generate_device() (trapped ion, "
                   "regime='nisq'); its stationary std is "
-                  "ti.detuning_drift.amplitude_rad_s. Previously hard-coded "
-                  "there as theta = 1/100 s without a registry entry; the "
-                  "value is unchanged. A trapped-ion probe run lasts hours, "
-                  "so the within-run and shot-to-shot detuning variation of "
-                  "time-resolved execution (simulate_probe(time_resolved="
-                  "True)) is set by this value; 3_benchmark.py therefore "
-                  "keeps that mode OFF by default. Sweep it."),
-        "class_c_rationale": ("No source was found for the correlation time of "
-                              "cloud trapped-ion qubit-frequency drift; 100 s "
-                              "is a phenomenological choice. Sweep it."),
+                  "ti.detuning_drift.amplitude_rad_s. DERIVATION: tau = "
+                  "1/(2*pi*f_max) with f_max = 250 uHz, the highest drift "
+                  "frequency Proctor et al. detected, gives 636.6 s: the "
+                  "SHORTEST correlation time their data support, so it is the "
+                  "most aggressive choice consistent with the measurement "
+                  "(slower components were also present). Cross-check of the "
+                  "amplitude: an excursion of +/-0.5 Hz has a std of ~0.35 Hz "
+                  "for a sinusoid, within a factor 1.6 of the 0.225 Hz "
+                  "(sqrt(2) rad/s) used by ti.detuning_drift.amplitude_rad_s. "
+                  "REPLACES 100 s, which had no source. Caveat: a laboratory "
+                  "surface trap, not a cloud IonQ system. A trapped-ion probe "
+                  "run lasts hours, so time-resolved execution (simulate_probe("
+                  "time_resolved=True), ON in 3_benchmark.py) realises this "
+                  "drift inside the run. Sweep it."),
+        "class_c_rationale": ("A single OU correlation time cannot reproduce "
+                              "the multi-frequency drift spectrum Proctor et "
+                              "al. report; 1/(2*pi*f_max) is an interpretation "
+                              "of their detected band, on a laboratory trap, "
+                              "not a cloud-device measurement. Sweep it."),
     },
     # ---------------------------------------------------------------------
     # REMOVED (deliberately, do not reintroduce): ti.detuning_drift.powerline_hz
@@ -1419,8 +1583,9 @@ class SimulationResult:
 class SimulationManifest:
     """Full reproducibility record. truth and calibration are recorded as
     separate top-level fields. The calibration T1/T2/epsilon priors are
-    perturbed from truth, but the calibration SPAM fields ARE copied verbatim
-    from truth (oracle SPAM; see generate_calibration_prior's docstring)."""
+    perturbed from truth; the calibration SPAM fields are copied verbatim
+    from truth (oracle SPAM) unless generate_calibration_prior was given
+    spam_perturbation_frac > 0 (see its docstring)."""
     instance_id: str
     seed: int
     architecture: str
@@ -1745,6 +1910,8 @@ def generate_device(
     perturbation_frac: Optional[float] = None,
     dw_population: str = "estimator_window",
     t1_telegraph: bool = False,
+    quasi_static_dephasing: bool = False,
+    detuning_during_gates: bool = False,
 ) -> DeviceTruth:
     """Sample a complete, hidden DeviceTruth.
 
@@ -1817,6 +1984,13 @@ def generate_device(
             distribution as U(-W, W) and consumes the same random numbers as
             the default draw, so every later draw is unchanged.
             Incompatible with dw_max_rad_s (raises ValueError).
+        "literature": dw ~ U(-W, W) with W = 2*pi times
+            sc/ti.dw_population.literature_halfwidth_hz (measured frequency
+            excursions: 15 kHz, Dhieb et al.; 0.5 Hz, Proctor et al.), or
+            2*pi*overrides["dw_halfwidth_hz"]. Independent of each qubit's
+            truth, of the prior and of the estimator window; same draw
+            consumption as the other branches. Incompatible with
+            dw_max_rad_s (raises ValueError).
     t1_telegraph: superconducting, regime='nisq' only (ignored otherwise,
         like detuning_1_over_f); default False, which changes nothing. When
         True, attaches drift_processes["T1_telegraph"]: two-state T1
@@ -1825,6 +1999,23 @@ def generate_device(
         is drawn from the Class A range sc.T1_telegraph.switching_rate_hz on
         a separate RNG stream (no other draw moves); the switching amplitude
         sc.T1_telegraph.amplitude_frac is Class C, hence opt-in.
+    quasi_static_dephasing: superconducting, regime='nisq' only (ignored
+        otherwise); default False, which changes nothing. When True, each
+        qubit draws a Ramsey/echo ratio r from sc.quasi_static.t2_ramsey_
+        over_echo (Place et al., own RNG stream, no other draw moves) and
+        gets a quasi-static detuning std sigma = sqrt(2*(1 - r))/(r*T2),
+        stored in architecture_specific["quasi_static_dw_std_rad_s"].
+        simulate_circuit() then gives every shot its own static offset
+        delta ~ N(0, sigma) (exact per-shot sampling) in any circuit where
+        free evolution is followed by a pulse (Ramsey, echo). The truth T2
+        stays the Markovian (echo) T2; T2* = r*T2 is not a truth parameter.
+    detuning_during_gates: regime='nisq' only (ignored otherwise); default
+        False. When True, the detuning (plus any quasi-static offset) also
+        acts during every native pulse, as Rz(dw*t_g/2) G Rz(dw*t_g/2)
+        (architecture_specific["detuning_during_gates"]). This is a
+        coherent error that does NOT cancel in the gate-repetition probe's
+        G*G^-1 pair; effective_gate_epsilon() deliberately excludes it, so a
+        benchmark measures how well the probe rejects it.
     """
     if architecture not in ARCHITECTURES:
         raise ValueError(f"Invalid architecture: {architecture!r}")
@@ -1914,9 +2105,20 @@ def generate_device(
         # draws as the estimator_window branch, keeping later draws aligned.
         dw = rng.choice([-1.0, 1.0], size=n_qubits) * rng.uniform(
             0.0, _W, size=n_qubits)
+    elif dw_population == "literature":
+        if dw_max_rad_s is not None:
+            raise ValueError("dw_max_rad_s cannot be combined with dw_population='literature'")
+        _W_hz = ov.get("dw_halfwidth_hz", MODEL_PROVENANCE[
+            f"{'sc' if architecture == 'superconducting' else 'ti'}"
+            ".dw_population.literature_halfwidth_hz"]["value"])
+        if not (np.isfinite(_W_hz) and _W_hz > 0):
+            raise ValueError(f"dw_halfwidth_hz must be positive and finite, got {_W_hz!r}")
+        # Same draw consumption as the other branches (later draws aligned).
+        dw = rng.choice([-1.0, 1.0], size=n_qubits) * rng.uniform(
+            0.0, 2.0 * np.pi * float(_W_hz), size=n_qubits)
     else:
-        raise ValueError(f"Unknown dw_population {dw_population!r}; "
-                         "expected 'estimator_window' or 'independent'")
+        raise ValueError(f"Unknown dw_population {dw_population!r}; expected "
+                         "'estimator_window', 'independent' or 'literature'")
 
     if not 0.0 <= spam_spread_frac < 1.0:
         raise ValueError(f"spam_spread_frac must be in [0,1), got {spam_spread_frac}")
@@ -2022,6 +2224,21 @@ def generate_device(
                 heating_axial * profile.extra["heating_to_gate_error_coeff"]
             ) if enable_heating_gate_error else 0.0
             arch_specific["coherent_fraction"] = profile.extra["coherent_fraction"]
+
+        if quasi_static_dephasing and architecture == "superconducting":
+            # One measured T2R/T2E ratio per qubit (Place et al., Table S1),
+            # from its own RNG stream so no other draw moves. sigma sets the
+            # Ramsey 1/e time to r*T2 for the envelope
+            # exp(-t/T2 - sigma^2 t^2 / 2) (see the provenance entry).
+            ratios = np.asarray(MODEL_PROVENANCE[
+                "sc.quasi_static.t2_ramsey_over_echo"]["value"], dtype=float)
+            r_q = _sub_rng(seed, "quasi_static", architecture, n_qubits).choice(
+                ratios, size=n_qubits)
+            arch_specific["t2_ramsey_over_echo"] = r_q
+            arch_specific["quasi_static_dw_std_rad_s"] = (
+                np.sqrt(2.0 * (1.0 - r_q)) / (r_q * T2))
+        if detuning_during_gates:
+            arch_specific["detuning_during_gates"] = True
 
     return DeviceTruth(
         architecture=architecture, n_qubits=n_qubits, seed=seed, regime=regime,
@@ -2138,6 +2355,7 @@ def generate_calibration_prior(
     truth: DeviceTruth, qubit: int = 0, t0_s: float = 0.0,
     perturbation_frac: Optional[float] = None,
     calibration_seed: Optional[int] = None,
+    spam_perturbation_frac: float = 0.0,
 ) -> CalibrationPrior:
     """Produce what a provider's calibration log would report for this qubit.
 
@@ -2175,13 +2393,16 @@ def generate_calibration_prior(
     each derivation, including the two candidate anchors that were considered
     and withdrawn.
 
-    SPAM is passed through exactly: the prior's spam_p0_given_1_prior /
-    spam_p1_given_0_prior are copied verbatim from truth. This is an
-    oracle-SPAM idealisation -- the inversion, which treats SPAM as a known
-    constant in its forward models, is given perfect readout calibration.
-    Misspecified SPAM is tested separately by the benchmark flags
-    --spam-scale / --spam-swap (2_ideal_parity.py, 3_benchmark.py), which
-    alter only the SPAM handed to the inversion.
+    SPAM: with spam_perturbation_frac = 0.0 (the default) the prior's
+    spam_p0_given_1_prior / spam_p1_given_0_prior are copied verbatim from
+    truth. This is an oracle-SPAM idealisation -- the inversion, which treats
+    SPAM as a known constant in its forward models, is given perfect readout
+    calibration. With spam_perturbation_frac = f > 0 each readout error is
+    instead truth * U(1-f, 1+f) (calib.spam_perturbation, Class C), drawn
+    from a separate RNG stream so the T1/T2/epsilon draws are unchanged.
+    3_benchmark.py uses f = the prior's envelope; the ideal regime keeps
+    oracle SPAM. Deterministic misspecification is tested separately by the
+    benchmark flags --spam-scale / --spam-swap.
     """
     if perturbation_frac is None:
         perturbation_frac = resolve_calibration_perturbation(truth.architecture,
@@ -2202,12 +2423,24 @@ def generate_calibration_prior(
     eps_prior = float(np.clip(effective_gate_epsilon(truth, qubit, t0_s)
                               * rng.uniform(lo, hi), 1e-9, 0.5))
 
+    if not 0.0 <= spam_perturbation_frac < 1.0:
+        raise ValueError(f"spam_perturbation_frac must be in [0,1), "
+                         f"got {spam_perturbation_frac}")
+    p01_prior = float(tv["spam_p0_given_1"])
+    p10_prior = float(tv["spam_p1_given_0"])
+    if spam_perturbation_frac > 0.0:
+        # Own stream: the T1/T2/epsilon draws above are unchanged.
+        rng_spam = _sub_rng(seed, "calib_prior_spam", qubit, t0_s)
+        s_lo, s_hi = 1.0 - spam_perturbation_frac, 1.0 + spam_perturbation_frac
+        p01_prior = float(np.clip(p01_prior * rng_spam.uniform(s_lo, s_hi), 0.0, 1.0))
+        p10_prior = float(np.clip(p10_prior * rng_spam.uniform(s_lo, s_hi), 0.0, 1.0))
+
     return CalibrationPrior(
         T1_prior_s=T1_prior,
         T2_prior_s=T2_prior,
         epsilon_prior=eps_prior,
-        spam_p0_given_1_prior=float(tv["spam_p0_given_1"]),
-        spam_p1_given_0_prior=float(tv["spam_p1_given_0"]),
+        spam_p0_given_1_prior=p01_prior,
+        spam_p1_given_0_prior=p10_prior,
         t0_s=t0_s,
     )
 
@@ -2447,7 +2680,14 @@ def effective_gate_epsilon(truth: DeviceTruth, qubit: int = 0, t_s: float = 0.0)
     order in t_g/T1, t_g/T2) plus any coherent residual. DeviceTruth.epsilon_gate is only the sampled
     depolarizing budget; comparing a recovered epsilon against it omits the
     gate-time T1/T2 contribution (~1e-4 for a 50 ns gate on a ~100 us
-    transmon) and biases every epsilon benchmark high."""
+    transmon) and biases every epsilon benchmark high.
+
+    Detuning (static dw, drift and the quasi-static offset) is EXCLUDED by
+    construction: it is a coherent frame error, not the incoherent per-gate
+    error the engine's epsilon claims to be. With
+    generate_device(detuning_during_gates=True) the simulated gate-repetition
+    probe therefore also carries a detuning-induced rotation that this truth
+    does not contain, and any resulting epsilon bias is scored as error."""
     from qiskit.quantum_info import Operator, PTM, SuperOp
     err, f = _gate_noise_channel(truth, qubit, t_s)
     noise = SuperOp(err)
@@ -2491,6 +2731,10 @@ def _circuit_layers(circuit) -> List[List[Tuple[int, Tuple[int, ...]]]]:
     layers: Dict[int, List[Tuple[int, Tuple[int, ...]]]] = {}
     for idx, inst in enumerate(circuit.data):
         name = inst.operation.name
+        if getattr(inst.operation, "label", None) == _DETUNE_GATE_LABEL:
+            # Detuning phase accumulated DURING an adjacent pulse: part of
+            # that pulse's time window, not an operation of its own.
+            continue
         q_idxs = tuple(circuit.find_bit(q).index for q in inst.qubits)
         if name == "barrier":
             # A barrier is a synchronization point, not a gap: every qubit it
@@ -2557,8 +2801,42 @@ def _inject_crosstalk_kicks(circuit, truth: DeviceTruth):
 
 
 def _inject_detuning_phases(circuit, truth: DeviceTruth, t_s: float = 0.0,
-                            dt_ns: Optional[float] = None):
-    """Return a copy of `circuit` with an explicit Rz(delta_omega * delta_t)
+                            dt_ns: Optional[float] = None,
+                            during_gates: bool = False):
+    """_inject_detuning() without per-shot parameters: returns only the
+    circuit (the historical interface; during_gates=False is the historical
+    behaviour exactly)."""
+    return _inject_detuning(circuit, truth, t_s=t_s, dt_ns=dt_ns,
+                            during_gates=during_gates)[0]
+
+
+def _phase_reaches_measurement(circuit, q_idx: int) -> bool:
+    """True iff qubit q_idx has a free-evolution delay followed later by a
+    physical pulse, so that a Z phase accumulated in the delay is mapped onto
+    the measured Z basis (Ramsey, echo). False for a T1-type circuit (pulse,
+    delay, measure): its initial |0> is invariant under Rz and thermal
+    relaxation is phase covariant, so every detuning phase commutes to the
+    Z-basis measurement and has no effect. False for delay-free gate trains
+    (see simulate_circuit for that limitation)."""
+    seen_delay = False
+    for inst in circuit.data:
+        if q_idx not in [circuit.find_bit(qb).index for qb in inst.qubits]:
+            continue
+        name = inst.operation.name
+        if name == "delay" and float(inst.operation.params[0]) > 0:
+            seen_delay = True
+        elif seen_delay and name in _NOISY_GATES:
+            return True
+    return False
+
+
+_DETUNE_GATE_LABEL = "detune_gate"
+
+
+def _inject_detuning(circuit, truth: DeviceTruth, t_s: float = 0.0,
+                     dt_ns: Optional[float] = None, during_gates: bool = False,
+                     parametrize_qubits: Any = ()):
+    """Return (circuit_copy, plan). The copy carries an explicit Rz(delta_omega * delta_t)
     inserted immediately after every delay instruction, implementing the
     coherent detuning evolution
 
@@ -2583,15 +2861,64 @@ def _inject_detuning_phases(circuit, truth: DeviceTruth, t_s: float = 0.0,
     commit b1a8385 (_inject_ramsey_detuning), generalized to apply each
     qubit's own delta_omega to the delays acting on that qubit rather than
     hardcoding qubit 0.
-    """
-    if not any(inst.operation.name == "delay" for inst in circuit.data):
-        return circuit
 
+    during_gates=True (NISQ, generate_device(detuning_during_gates=True))
+    also lets the detuning act while each native single-qubit pulse
+    (_NOISY_GATES) is played, as Rz(dw*t_g/2) G Rz(dw*t_g/2) with t_g =
+    truth.gate_duration_ns: the symmetric split of a pulse played on a
+    detuned qubit, exact to first order in dw*t_g. These Rz carry the label
+    _DETUNE_GATE_LABEL and no gate noise (rz is virtual here). Virtual gates
+    (rz, s, sdg) take no time and get none. The echo stays refocused
+    (Rz(a) X Rz(a) = X), and so does any static phase around a single pulse,
+    but the phases between the two pulses of a G*G^-1 pair do not cancel.
+
+    parametrize_qubits: for these qubits every inserted Rz angle is a
+    qiskit Parameter instead of a number, and `plan` lists (Parameter,
+    qubit, duration_s); simulate_circuit binds each to (dw_q + delta)*
+    duration_s with a per-shot quasi-static offset delta. For all other
+    qubits plan is empty and angles are dw_q * duration_s, as before.
+    """
+    has_delay = any(inst.operation.name == "delay" for inst in circuit.data)
+    if not has_delay and not during_gates:
+        return circuit, []
+    from qiskit.circuit import Parameter
+    from qiskit.circuit.library import RZGate
+
+    t_g_s = float(truth.gate_duration_ns) * 1e-9
+    param_q = set(int(q) for q in parametrize_qubits)
+    plan: List[Tuple[Any, int, float]] = []
+    gate_params: Dict[int, Any] = {}
     dw_cache: Dict[int, float] = {}
+
+    def _dw(q: int) -> float:
+        if q not in dw_cache:
+            dw_cache[q] = evaluate_truth_at(truth, q, t_s)["delta_omega_rad_s"]
+        return dw_cache[q]
+
+    def _gate_angle(q: int):
+        if q in param_q:
+            if q not in gate_params:
+                gate_params[q] = Parameter(f"detune_gate_q{q}")
+                plan.append((gate_params[q], q, 0.5 * t_g_s))
+            return gate_params[q]
+        return _dw(q) * 0.5 * t_g_s
+
     new_qc = circuit.copy_empty_like()
     for inst in circuit.data:
+        name = inst.operation.name
+        gate_q = None
+        if during_gates and t_g_s > 0.0 and name in _NOISY_GATES and len(inst.qubits) == 1:
+            q = circuit.find_bit(inst.qubits[0]).index
+            if q < truth.n_qubits and (q in param_q or _dw(q) != 0.0):
+                gate_q = q
+        if gate_q is not None:
+            new_qc.append(RZGate(_gate_angle(gate_q), label=_DETUNE_GATE_LABEL),
+                          [new_qc.qubits[gate_q]], [])
         new_qc.append(inst.operation, inst.qubits, inst.clbits)
-        if inst.operation.name != "delay":
+        if gate_q is not None:
+            new_qc.append(RZGate(_gate_angle(gate_q), label=_DETUNE_GATE_LABEL),
+                          [new_qc.qubits[gate_q]], [])
+        if name != "delay":
             continue
         ds = _delay_seconds(inst, dt_ns)
         if ds <= 0.0:
@@ -2600,12 +2927,15 @@ def _inject_detuning_phases(circuit, truth: DeviceTruth, t_s: float = 0.0,
             q_idx = circuit.find_bit(qb).index
             if q_idx >= truth.n_qubits:
                 continue
-            if q_idx not in dw_cache:
-                dw_cache[q_idx] = evaluate_truth_at(truth, q_idx, t_s)["delta_omega_rad_s"]
-            phase = dw_cache[q_idx] * ds
+            if q_idx in param_q:
+                p = Parameter(f"detune_delay_q{q_idx}_{len(plan)}")
+                plan.append((p, q_idx, ds))
+                new_qc.rz(p, new_qc.qubits[q_idx])
+                continue
+            phase = _dw(q_idx) * ds
             if phase != 0.0:
                 new_qc.rz(phase, new_qc.qubits[q_idx])
-    return new_qc
+    return new_qc, plan
 
 
 _AER_NATIVE = frozenset({"sx", "sxdg", "x", "h", "id", "rx", "ry", "rz", "r", "u",
@@ -2645,6 +2975,21 @@ def simulate_circuit(
     delays whenever a profile carries a non-None dt_ns, i.e. for
     superconducting). Pass profile.dt_ns; leaving it None falls back to
     0.2222 ns, which is only coincidentally correct for superconducting.
+
+    NISQ options read from truth.architecture_specific (both absent, hence
+    no change, unless generate_device() was asked for them):
+      detuning_during_gates: detuning also acts during pulses
+        (see _inject_detuning).
+      quasi_static_dw_std_rad_s: every SHOT gets its own static offset
+        delta_q ~ N(0, sigma_q) added to dw_q, sampled exactly (one Aer
+        experiment per shot via parameter binding), in circuits where a
+        delay is followed by a pulse on that qubit (_phase_reaches_
+        measurement: Ramsey, echo). In T1-type circuits the offset provably
+        has no effect and is not sampled. LIMITATION: in delay-free gate
+        trains (the gate-repetition probe) only the static dw acts during
+        the pulses; per-shot sampling there costs ~60 ms per shot and a
+        fixed quadrature misrepresents the long-time average, so the
+        offset's dephasing of the detuning-induced rotation is omitted.
     """
     try:
         from qiskit_aer import AerSimulator
@@ -2652,8 +2997,18 @@ def simulate_circuit(
     except ImportError as e:
         raise ImportError("qiskit-aer is required for simulate_circuit().") from e
 
-    qc = _inject_detuning_phases(_to_aer_native(circuit), truth, t_s=t_s, dt_ns=dt_ns)
-    if truth.regime == "nisq":
+    nisq = truth.regime == "nisq"
+    during_gates = nisq and bool(truth.architecture_specific.get("detuning_during_gates", False))
+    base = _to_aer_native(circuit)
+    qs_std = truth.architecture_specific.get("quasi_static_dw_std_rad_s") if nisq else None
+    qs_qubits: List[int] = []
+    if qs_std is not None:
+        qs_std = np.asarray(qs_std, dtype=float)
+        qs_qubits = [q for q in range(min(base.num_qubits, truth.n_qubits))
+                     if qs_std[q] > 0.0 and _phase_reaches_measurement(base, q)]
+    qc, plan = _inject_detuning(base, truth, t_s=t_s, dt_ns=dt_ns,
+                                during_gates=during_gates, parametrize_qubits=qs_qubits)
+    if nisq:
         qc = _inject_crosstalk_kicks(qc, truth)
         qc = _inject_amplitude_errors(qc, truth, t_s=t_s)
     nm = build_noise_model(truth, t_s=t_s, native_gate_names=native_gate_names,
@@ -2671,8 +3026,23 @@ def simulate_circuit(
         tqc = qc
     else:
         tqc = transpile(qc, sim, optimization_level=0)
-    result = sim.run(tqc, shots=shots).result()
-    return result.get_counts(0)
+    if not plan:
+        result = sim.run(tqc, shots=shots).result()
+        return result.get_counts(0)
+    if int(shots) <= 0:
+        return {}
+    # Quasi-static offsets: one independent draw per shot and qubit, from a
+    # stream salted by this run's seed; each shot is one bound experiment.
+    rng_qs = _sub_rng(sim_seed, "quasi_static_delta")
+    delta = {q: rng_qs.normal(0.0, float(qs_std[q]), size=int(shots)) for q in qs_qubits}
+    dw_q = {q: evaluate_truth_at(truth, q, t_s)["delta_omega_rad_s"] for q in qs_qubits}
+    binds = {p: ((dw_q[q] + delta[q]) * dur).tolist() for p, q, dur in plan}
+    result = sim.run(tqc, parameter_binds=[binds], shots=1).result()
+    counts: Dict[str, int] = {}
+    for i in range(int(shots)):
+        for bitstring, cnt in result.get_counts(i).items():
+            counts[bitstring] = counts.get(bitstring, 0) + cnt
+    return counts
 
 
 # Time-resolved probe execution (simulate_probe(time_resolved=True)).
@@ -2759,6 +3129,20 @@ def _probe_schedule(circuits: List[Any], truth: DeviceTruth, shots_list: List[in
                          "chunks": chunks})
         t_now += duration_s
     return schedule
+
+
+def probe_run_duration_s(circuits: List[Any], truth: DeviceTruth, shots_list: List[int],
+                         t_s: float = 0.0, dt_ns: Optional[float] = None,
+                         rep_delay_s: float = _DEFAULT_REP_DELAY_S) -> float:
+    """Wall-clock length (s) of running `circuits` one after another, with
+    the same accounting as simulate_probe(time_resolved=True) (_probe_
+    schedule: delays + noisy gates * gate duration + rep_delay_s per shot).
+    A LOWER BOUND (rep_delay_s = 0 and readout time is not counted).
+    Available in the frozen mode too, so a benchmark can always report how
+    long its probe would occupy the device."""
+    schedule = _probe_schedule(circuits, truth, list(shots_list), t_s, dt_ns,
+                               rep_delay_s, 1)
+    return float(schedule[-1]["t_end_s"] - float(t_s)) if schedule else 0.0
 
 
 def _truth_snapshot(truth: DeviceTruth, t_s: float):
@@ -2882,8 +3266,9 @@ def make_manifest(
 ) -> SimulationManifest:
     """Full reproducibility record. truth and calibration are recorded under
     separate top-level keys. Calibration T1/T2/epsilon are perturbed from
-    truth; the calibration SPAM fields ARE copied verbatim from truth (oracle
-    SPAM; see generate_calibration_prior's docstring)."""
+    truth; the calibration SPAM fields are the prior's (verbatim truth,
+    i.e. oracle SPAM, unless spam_perturbation_frac > 0; see
+    generate_calibration_prior's docstring)."""
     return SimulationManifest(
         instance_id=str(uuid.uuid4()), seed=truth.seed, architecture=truth.architecture,
         regime=truth.regime, n_qubits=truth.n_qubits,
@@ -2920,7 +3305,7 @@ __all__ = [
     "get_architecture_profile", "generate_device", "evaluate_truth_at",
     "generate_calibration_prior", "effective_gate_epsilon",
     "build_noise_model",
-    "simulate_circuit", "simulate_probe", "make_manifest",
+    "simulate_circuit", "simulate_probe", "probe_run_duration_s", "make_manifest",
     "sample_trajectory", "evaluate_at", "evaluate_deviation_at",
 ]
 
@@ -3548,6 +3933,151 @@ def _run_validation_tests() -> None:
 
     check("S. virtual Z-type gates (s, sdg, rz) carry no gate noise",
           not ({"s", "sdg", "rz"} & set(_NOISY_GATES)), str(_NOISY_GATES))
+
+    # T-X. NISQ options used by 3_benchmark.py (all opt-in in this library).
+    # T. Quasi-static dephasing: per-shot offsets reproduce the Ramsey
+    # envelope exp(-t/T2 - sigma^2 t^2/2), the echo keeps the Markovian
+    # exp(-t/T2), and T1-type circuits are left untouched.
+    try:
+        from qiskit import QuantumCircuit
+        t_q = generate_device("superconducting", 1, seed=3, regime="nisq",
+                              quasi_static_dephasing=True,
+                              overrides={"T1_range_s": (300e-6, 300e-6),
+                                         "T_phi_range_s": (100e-6, 100e-6),
+                                         "eps_range": (1e-12, 1e-12)})
+        t_q.architecture_specific["coherent_fraction"] = 0.0
+        t_q.drift_processes = {}
+        t_q.spam_p0_given_1[:] = 0.0
+        t_q.spam_p1_given_0[:] = 0.0
+        t_q.gate_duration_ns = 0.0
+        sig_q = 2.0e4
+        t_q.architecture_specific["quasi_static_dw_std_rad_s"] = np.array([sig_q])
+        # dw = 0 puts the full envelope on P(1) (cos = 1), so the check is
+        # sensitive to it: analytic 0.379 vs Markov-only 0.252 here.
+        t_q.delta_omega_rad_s[:] = 0.0
+        T2_q, n_q = float(t_q.T2_s[0]), 6000
+        tau_q = 0.7 * T2_q
+        qc_r = QuantumCircuit(1, 1); qc_r.h(0); qc_r.delay(tau_q, 0, unit="s"); qc_r.h(0); qc_r.measure(0, 0)
+        qc_e = QuantumCircuit(1, 1); qc_e.h(0); qc_e.delay(tau_q / 2, 0, unit="s"); qc_e.x(0)
+        qc_e.delay(tau_q / 2, 0, unit="s"); qc_e.h(0); qc_e.measure(0, 0)
+        qc_t = QuantumCircuit(1, 1); qc_t.x(0); qc_t.delay(tau_q, 0, unit="s"); qc_t.measure(0, 0)
+        cosp = np.cos(t_q.delta_omega_rad_s[0] * tau_q)
+        p_r = simulate_circuit(qc_r, t_q, shots=n_q, seed=101).get("1", 0) / n_q
+        p_e = simulate_circuit(qc_e, t_q, shots=n_q, seed=102).get("1", 0) / n_q
+        pa_r = 0.5 * (1 - np.exp(-tau_q / T2_q) * np.exp(-(sig_q * tau_q) ** 2 / 2) * cosp)
+        pm_r = 0.5 * (1 - np.exp(-tau_q / T2_q) * cosp)       # Markov-only Ramsey
+        pa_e = 0.5 * (1 - np.exp(-tau_q / T2_q))
+        sd_r, sd_e = np.sqrt(pa_r * (1 - pa_r) / n_q), np.sqrt(pa_e * (1 - pa_e) / n_q)
+        check("T. quasi-static offsets: Ramsey envelope exact, echo refocused, T1 untouched",
+              abs(p_r - pa_r) < 4 * sd_r and abs(p_r - pm_r) > 6 * sd_r
+              and abs(p_e - pa_e) < 4 * sd_e
+              and not _phase_reaches_measurement(qc_t, 0) and _phase_reaches_measurement(qc_r, 0),
+              f"Ramsey sim={p_r:.4f} analytic={pa_r:.4f} markov-only={pm_r:.4f}; "
+              f"echo sim={p_e:.4f} analytic={pa_e:.4f}")
+        t_q2 = generate_device("superconducting", 50, seed=8, regime="nisq",
+                               quasi_static_dephasing=True)
+        r_q2 = t_q2.architecture_specific["t2_ramsey_over_echo"]
+        s_q2 = t_q2.architecture_specific["quasi_static_dw_std_rad_s"]
+        # 1/e time of exp(-t/T2 - s^2 t^2/2) must be r*T2 (the drawn ratio).
+        e_q2 = r_q2 + 0.5 * (s_q2 * r_q2 * t_q2.T2_s) ** 2
+        t_q3 = generate_device("superconducting", 50, seed=8, regime="nisq")
+        check("T2. quasi-static sigma realises the drawn T2R/T2E ratio; other draws unmoved",
+              bool(np.allclose(e_q2, 1.0)
+                   and set(np.round(r_q2, 12)) <= set(np.round(MODEL_PROVENANCE[
+                       "sc.quasi_static.t2_ramsey_over_echo"]["value"], 12))
+                   and np.array_equal(t_q2.T1_s, t_q3.T1_s)
+                   and np.array_equal(t_q2.delta_omega_rad_s, t_q3.delta_omega_rad_s)
+                   and "quasi_static_dw_std_rad_s" not in t_q3.architecture_specific
+                   and "quasi_static_dw_std_rad_s" not in generate_device(
+                       "trapped_ion", 2, seed=8, regime="nisq",
+                       quasi_static_dephasing=True).architecture_specific),
+              f"max|1/e condition - 1| = {np.max(np.abs(e_q2 - 1.0)):.2e}")
+
+        # U. Detuning during pulses: the gate-repetition circuit follows the
+        # exact product of Rz(a) G Rz(a) Rz(a) G^-1 Rz(a) (no other noise),
+        # and is untouched with the option off.
+        import importlib.util as _ilu3, pathlib as _pl3, sys as _sys3
+        _spec3 = _ilu3.spec_from_file_location(
+            "inversion_u", _pl3.Path(__file__).parent / "1_inversion.py")
+        _inv3 = _ilu3.module_from_spec(_spec3)
+        _sys3.modules["inversion_u"] = _inv3
+        _spec3.loader.exec_module(_inv3)
+        from qiskit.quantum_info import Operator as _Op
+        u_ok, u_detail = True, []
+        for arch_k, dw_k in (("superconducting", 2 * np.pi * 5e3), ("trapped_ion", 2 * np.pi * 0.5)):
+            t_u = generate_device(arch_k, 1, seed=4, regime="nisq", detuning_during_gates=True,
+                                  overrides={"T1_range_s": (1e3, 1e3), "T_phi_range_s": (1e3, 1e3),
+                                             "eps_range": (1e-12, 1e-12)})
+            t_u.architecture_specific["coherent_fraction"] = 0.0
+            t_u.drift_processes = {}
+            t_u.spam_p0_given_1[:] = 0.0
+            t_u.spam_p1_given_0[:] = 0.0
+            t_u.delta_omega_rad_s[:] = dw_k
+            a_k = dw_k * t_u.gate_duration_ns * 1e-9 / 2
+            rz_k = np.diag([np.exp(-1j * a_k / 2), np.exp(1j * a_k / 2)])
+            g_k, gi_k = _native_inverse_pair(arch_k)
+            u_pair = rz_k @ _Op(gi_k).data @ rz_k @ rz_k @ _Op(g_k).data @ rz_k
+            n_u = 400
+            psi = np.linalg.matrix_power(u_pair, n_u) @ np.array([1.0, 0.0])
+            qc_u = _inv3._build_gate_rep_circuit(n_u, arch_k)
+            p_on = simulate_circuit(qc_u, t_u, shots=20_000, seed=5).get("0", 0) / 20_000
+            t_u.architecture_specific["detuning_during_gates"] = False
+            p_off = simulate_circuit(qc_u, t_u, shots=20_000, seed=5).get("0", 0) / 20_000
+            u_ok &= abs(p_on - abs(psi[0]) ** 2) < 0.012 and p_off > 0.99
+            u_detail.append(f"{arch_k[:2]}: P0 on={p_on:.4f} exact={abs(psi[0]) ** 2:.4f} off={p_off:.4f}")
+        check("U. detuning during pulses matches the exact pair unitary; off changes nothing",
+              u_ok, "  ".join(u_detail))
+    except ImportError:
+        print("[SKIP] T/U quasi-static and gate-detuning physics (qiskit-aer not installed)")
+
+    # V. Stale SPAM in the prior: default oracle; f > 0 stays in its envelope,
+    # differs from truth, and moves no other prior draw.
+    t_v = generate_device("superconducting", 1, seed=77, regime="nisq")
+    pv0 = generate_calibration_prior(t_v, 0, calibration_seed=3)
+    pv_list = [generate_calibration_prior(t_v, 0, calibration_seed=s, spam_perturbation_frac=0.25)
+               for s in range(200)]
+    rv = np.array([p.spam_p0_given_1_prior / t_v.spam_p0_given_1[0] for p in pv_list])
+    pv1 = generate_calibration_prior(t_v, 0, calibration_seed=3, spam_perturbation_frac=0.25)
+    check("V. spam_perturbation_frac: oracle by default, bounded when on, no other draw moved",
+          pv0.spam_p0_given_1_prior == t_v.spam_p0_given_1[0]
+          and bool(np.all(rv >= 0.75 - 1e-9) and np.all(rv <= 1.25 + 1e-9) and np.all(rv != 1.0))
+          and (rv.max() - rv.min()) > 0.85 * 0.5
+          and pv1.T1_prior_s == pv0.T1_prior_s and pv1.epsilon_prior == pv0.epsilon_prior
+          and _raises(lambda: generate_calibration_prior(t_v, 0, spam_perturbation_frac=1.0)),
+          f"p0|1 prior/truth in [{rv.min():.3f}, {rv.max():.3f}]")
+
+    # W. Literature detuning population: inside +/-2*pi*W, fills it, is
+    # independent of T2, and leaves every other draw aligned.
+    w_ok, w_detail = True, []
+    for arch_k, key_k in (("superconducting", "sc"), ("trapped_ion", "ti")):
+        w_k = 2 * np.pi * MODEL_PROVENANCE[f"{key_k}.dw_population.literature_halfwidth_hz"]["value"]
+        t_w = generate_device(arch_k, 2000, seed=13, regime="nisq", dw_population="literature")
+        t_w0 = generate_device(arch_k, 2000, seed=13, regime="nisq")
+        dw_w = t_w.delta_omega_rad_s
+        w_ok &= bool(np.all(np.abs(dw_w) <= w_k) and np.max(np.abs(dw_w)) > 0.99 * w_k
+                     and np.min(np.abs(dw_w)) < 0.01 * w_k
+                     and np.array_equal(t_w.T1_s, t_w0.T1_s)
+                     and np.array_equal(t_w.epsilon_gate, t_w0.epsilon_gate))
+        w_detail.append(f"{arch_k[:2]}: |dw| in [{np.min(np.abs(dw_w)):.3g}, "
+                        f"{np.max(np.abs(dw_w)):.4g}] vs W={w_k:.4g} rad/s")
+    t_wo = generate_device("superconducting", 50, seed=13, regime="nisq",
+                           dw_population="literature", overrides={"dw_halfwidth_hz": 1.0e3})
+    w_ok &= bool(np.all(np.abs(t_wo.delta_omega_rad_s) <= 2 * np.pi * 1.0e3))
+    check("W. literature detuning population bounded, filled, overridable, draws aligned",
+          w_ok, "  ".join(w_detail))
+
+    # X. probe_run_duration_s: the frozen-mode run length equals the
+    # time-resolved schedule's, and a trapped-ion T1 delay dominates it.
+    try:
+        from qiskit import QuantumCircuit
+        t_x = generate_device("trapped_ion", 1, seed=2, regime="ideal")
+        qc_x = QuantumCircuit(1, 1); qc_x.x(0); qc_x.delay(10.0, 0, unit="s"); qc_x.measure(0, 0)
+        d_x = probe_run_duration_s([qc_x, qc_x], t_x, [300, 300])
+        d_expect = 2 * 300 * (10.0 + t_x.gate_duration_ns * 1e-9)
+        check("X. probe_run_duration_s matches delays + gate time per shot (lower bound)",
+              abs(d_x - d_expect) < 1e-6 * d_expect, f"{d_x:.3f} s vs {d_expect:.3f} s")
+    except ImportError:
+        print("[SKIP] X. probe_run_duration_s (qiskit not installed)")
 
     # End-to-end chain into the frozen engine: DeviceTruth -> simulate_probe -> lindblad_inversion
     try:

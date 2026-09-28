@@ -17,6 +17,16 @@ SPAM is not benchmarked: the inversion consumes it as a known constant and
 never estimates it. delta_omega has no prior: CalibrationPrior deliberately
 omits it, so prior_value is NaN for that parameter.
 
+delta_omega is compared SIGNED (a wrong-sign estimate is an error). The CSV
+carries signed_error and z_score = (canary - truth)/sigma_canary, and the
+printed summary reports R2 of Canary next to R2 of the calibration prior
+alone, the paired error against the prior and the |z| coverage. In this
+regime the prior's envelope is only +/-10% (SC) / +/-5% (TI) over wide
+log-uniform truth ranges, so the prior alone reaches R2 ~ 0.98-0.998: a high
+R2 here is expected and does not by itself show that Canary measures well.
+This is the correctly specified (model-consistent) regime by design: the
+model-mismatched test is 3_benchmark.py.
+
 Output: one CSV, no figures.
 """
 
@@ -63,6 +73,7 @@ CSV_COLUMNS = [
     "timestamp_utc",
     "perturbation_frac", "spam_scale", "spam_swap", "spam_spread", "cold_start",
     "dw_population", "dw_aliased",
+    "signed_error", "z_score",
 ]
 NAN = float("nan")
 
@@ -92,6 +103,30 @@ def _rel_error(value: float, truth_value: float) -> float:
     if not np.isfinite(value) or not np.isfinite(truth_value) or truth_value == 0:
         return NAN
     return abs(value - truth_value) / abs(truth_value)
+
+
+def _signed_error(value: float, truth_value: float) -> float:
+    if not np.isfinite(value) or not np.isfinite(truth_value):
+        return NAN
+    return value - truth_value
+
+
+def _z_score(value: float, truth_value: float, sigma: float) -> float:
+    """(estimate - truth) / reported sigma; NaN when either is non-finite or
+    sigma is not positive. Calibrated uncertainties give |z| <= 1 (<= 2) in
+    ~68.3% (~95.4%) of instances."""
+    if not (np.isfinite(value) and np.isfinite(truth_value)
+            and np.isfinite(sigma) and sigma > 0):
+        return NAN
+    return (value - truth_value) / sigma
+
+
+def _r2(truth: np.ndarray, estimate: np.ndarray) -> float:
+    """1 - SS_res/SS_tot of estimate against truth (NaN if SS_tot = 0)."""
+    ss_tot = float(np.sum((truth - truth.mean()) ** 2))
+    if ss_tot <= 0.0:
+        return NAN
+    return 1.0 - float(np.sum((estimate - truth) ** 2)) / ss_tot
 
 
 def _row(architecture: str, instance_id: int, seed: int, parameter: str,
@@ -192,13 +227,14 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
             shots_echo=SHOTS_ECHO, qubit_id=0, timestamp=timestamp)
 
         tv_now = sim.evaluate_truth_at(truth, 0, 0.0)
+        # delta_omega is compared SIGNED: a wrong-sign estimate is an error.
         true_values = {"T1_s": float(tv_now["T1_s"]),
                        "T2_s": float(tv_now["T2_s"]),
-                       "delta_omega": abs(float(tv_now["delta_omega_rad_s"])),
+                       "delta_omega": float(tv_now["delta_omega_rad_s"]),
                        "epsilon_sx": sim.effective_gate_epsilon(truth, 0, 0.0)}
         canary = {"T1_s": float(result.T1_s),
                   "T2_s": float(result.T2_s),
-                  "delta_omega": abs(float(result.delta_omega)),
+                  "delta_omega": float(result.delta_omega),
                   "epsilon_sx": float(result.epsilon_sx)}
         sigmas = {"T1_s": float(result.T1_sigma_s),
                   "T2_s": float(result.T2_sigma_s),
@@ -215,7 +251,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                   "epsilon_sx": float(prior.epsilon_prior)}
         # Post-inversion comparison only: would the true |delta_omega| alias
         # (accumulate > pi) at the shortest Ramsey delay actually probed?
-        dw_aliased = {"delta_omega": bool(true_values["delta_omega"]
+        dw_aliased = {"delta_omega": bool(abs(true_values["delta_omega"])
                                           * meta["ramsey_delays_s"][0] > np.pi)}
 
         rows = []
@@ -233,7 +269,8 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                 shots_total=sum(shots_list), prior_value=pv,
                 prior_absolute_error=_abs_error(pv, tv),
                 prior_relative_error=_rel_error(pv, tv),
-                dw_aliased=dw_aliased.get(param, NAN), **cfg_cols))
+                dw_aliased=dw_aliased.get(param, NAN), **cfg_cols,
+                signed_error=_signed_error(cv, tv), z_score=_z_score(cv, tv, sg)))
         return rows
 
     except Exception as exc:
@@ -320,20 +357,51 @@ def write_csv(rows: List[Dict[str, Any]], path: pathlib.Path) -> None:
 
 
 def summarize(rows: List[Dict[str, Any]]) -> None:
-    print("\n[ideal_parity] median relative error, all instances, nothing removed")
+    """Per architecture and parameter: failures (never dropped silently),
+    median relative error of Canary and of the calibration prior alone, the
+    fraction of instances where Canary beats the prior, R2 of each (the
+    prior's R2 shows how much of R2 needs no measurement at all), and the
+    coverage of |z| <= 1 / <= 2 (nominal 68.3% / 95.4%)."""
+    print("\n[ideal_parity] summary, all instances, nothing removed "
+          "(R2 and errors over converged instances; failures counted)")
+    print("  R2(prior) is the score of the calibration prior with NO measurement: "
+          "compare against it, never read R2 alone.")
     by_arch: Dict[str, List[Dict[str, Any]]] = {}
     for r in rows:
         by_arch.setdefault(r["architecture"], []).append(r)
+
+    def _fmt(x: float, pct: bool = False) -> str:
+        if not np.isfinite(x):
+            return "--"
+        return f"{100 * x:.1f}%" if pct else f"{x:.3f}"
+
     for architecture, arch_rows in sorted(by_arch.items()):
         n_inst = len({r["instance_id"] for r in arch_rows})
         n_bad = len({r["instance_id"] for r in arch_rows if not r["success"]})
         print(f"  {architecture} ({n_inst} instances, {n_bad} with a failed parameter)")
+        print(f"     {'parameter':12s} {'fail':>5s} {'medRE':>8s} {'medRE_prior':>11s} "
+              f"{'beats_prior':>11s} {'R2':>7s} {'R2_prior':>8s} {'|z|<=1':>7s} {'|z|<=2':>7s}")
         for param in PARAMETERS:
-            vals = np.array([r["relative_error"] for r in arch_rows
-                             if r["parameter"] == param], dtype=float)
-            finite = vals[np.isfinite(vals)]
-            med = float(np.median(finite)) * 100 if len(finite) else NAN
-            print(f"     {param:12s} {med:8.2f}%   ({len(finite)}/{len(vals)} finite)")
+            pr = [r for r in arch_rows if r["parameter"] == param]
+            tv = np.array([r["true_value"] for r in pr], dtype=float)
+            cv = np.array([r["canary_value"] for r in pr], dtype=float)
+            pv = np.array([r["prior_value"] for r in pr], dtype=float)
+            re = np.array([r["relative_error"] for r in pr], dtype=float)
+            pre = np.array([r["prior_relative_error"] for r in pr], dtype=float)
+            z = np.array([r["z_score"] for r in pr], dtype=float)
+            ok = np.array([bool(r["success"]) for r in pr]) & np.isfinite(cv) & np.isfinite(tv)
+            both = ok & np.isfinite(pv)
+            fin_re = ok & np.isfinite(re)
+            fin_pair = both & np.isfinite(re) & np.isfinite(pre)
+            fin_z = np.isfinite(z)
+            print(f"     {param:12s} {len(pr) - int(ok.sum()):5d} "
+                  f"{_fmt(float(np.median(re[fin_re])) if fin_re.any() else NAN, True):>8s} "
+                  f"{_fmt(float(np.median(pre[fin_pair])) if fin_pair.any() else NAN, True):>11s} "
+                  f"{_fmt(float(np.mean(re[fin_pair] < pre[fin_pair])) if fin_pair.any() else NAN, True):>11s} "
+                  f"{_fmt(_r2(tv[ok], cv[ok]) if ok.sum() > 1 else NAN):>7s} "
+                  f"{_fmt(_r2(tv[both], pv[both]) if both.sum() > 1 else NAN):>8s} "
+                  f"{_fmt(float(np.mean(np.abs(z[fin_z]) <= 1)) if fin_z.any() else NAN, True):>7s} "
+                  f"{_fmt(float(np.mean(np.abs(z[fin_z]) <= 2)) if fin_z.any() else NAN, True):>7s}")
         n_aliased = sum(1 for r in arch_rows
                         if r["parameter"] == "delta_omega" and r["dw_aliased"] is True)
         print(f"     dw_aliased: {n_aliased}/{n_inst} instances")
@@ -353,7 +421,8 @@ def _read_csv(path: pathlib.Path) -> List[Dict[str, Any]]:
             for key in ("true_value", "canary_value", "absolute_error", "relative_error",
                         "sigma_canary", "chi2_dof", "chi2_dof_secondary",
                         "prior_value", "prior_absolute_error", "prior_relative_error",
-                        "perturbation_frac", "spam_scale", "spam_spread"):
+                        "perturbation_frac", "spam_scale", "spam_spread",
+                        "signed_error", "z_score"):
                 row[key] = float(row[key]) if row[key] not in ("", None) else NAN
             for key in ("spam_swap", "cold_start"):
                 row[key] = str(row[key]).strip().lower() == "true"
