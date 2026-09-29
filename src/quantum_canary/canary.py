@@ -17,11 +17,12 @@ from .decision import Decision, SequentialTest, Status
 from .design import BatchDesigner
 from .estimator import HealthModel
 from .executors import Executor
-from .probes import echo_observations, echo_program, z2_flags
+from .probes import return_probe_observations, return_probe_program, z2_flags
 from .program import LogicalProgram
 from .resources import Resource, ions_of, pair, to_error, to_key
 from .results import (
     AssignmentRun,
+    BatchPlan,
     BatchResult,
     ProbeRun,
     expectation,
@@ -89,14 +90,13 @@ class Canary:
         """Run one Canary batch for a single circuit."""
         return self.run_many([circuit], shots, [symmetry], [observables])[0]
 
-    def run_many(
+    def _validate_batch(
         self,
         circuits: Sequence[CircuitLike],
         shots: int,
-        symmetry: Sequence[str | None] | str | None = None,
-        observables: Sequence[Iterable[Sequence[int]]] | None = None,
-    ) -> list[BatchResult]:
-        """Run one co-scheduled batch (one job) for several circuits; shots are per circuit."""
+        symmetry: Sequence[str | None] | str | None,
+        observables: Sequence[Iterable[Sequence[int]]] | None,
+    ) -> tuple[list[LogicalProgram], list[str | None], list[tuple]]:
         programs = [self.prepare(c) for c in circuits]
         if not programs:
             raise ValueError("no circuits given")
@@ -109,6 +109,11 @@ class Canary:
         extra = [tuple(o) for o in observables] if observables is not None else [()] * nprog
         if len(extra) != nprog:
             raise ValueError("observables needs one entry per circuit")
+        return programs, syms, extra
+
+    def _build_batch(
+        self, programs: Sequence[LogicalProgram], shots: int
+    ) -> tuple[list, list[QuantumCircuit], list[tuple[Any, ...]], int, list[tuple[int, int]]]:
         cfg = self.config
         slots = cfg.assignments_per_batch * cfg.twirls_per_assignment
         shots_per = max(1, math.ceil(shots / slots))
@@ -125,14 +130,56 @@ class Canary:
             for ai, assignment in enumerate(design):
                 for t in range(reps):
                     name = f"{prog.name}_p{pi}_a{ai}_t{t}"
-                    circuits_out.append(compile_native(prog, assignment, rng=self.rng, twirl=True, name=name))
+                    circuits_out.append(compile_native(prog, assignment, rng=self.rng, twirl=cfg.twirl, name=name))
                     tags.append(("alg", pi, ai))
         probe_pairs = self._select_probes(programs, designs, len(circuits_out), shots_per)
         for i, j in probe_pairs:
             for depth in cfg.probe_depths:
-                name = f"canary_echo_{i}_{j}_{depth}"
-                circuits_out.append(compile_native(echo_program(depth), (i, j), rng=self.rng, twirl=True, name=name))
+                name = f"canary_return_{i}_{j}_{depth}"
+                circuits_out.append(
+                    compile_native(return_probe_program(depth), (i, j), rng=self.rng, twirl=cfg.twirl, name=name)
+                )
                 tags.append(("probe", (i, j), depth))
+        return designs, circuits_out, tags, shots_per, probe_pairs
+
+    def plan(
+        self,
+        circuits: CircuitLike | Sequence[CircuitLike],
+        shots: int,
+    ) -> BatchPlan:
+        """Preview the next batch (circuits, shots, gate-shot cost) without running it or changing state."""
+        items = [circuits] if isinstance(circuits, (QuantumCircuit, LogicalProgram)) else list(circuits)
+        programs, _, _ = self._validate_batch(items, shots, None, None)
+        state = self.rng.bit_generator.state
+        try:
+            designs, circuits_out, tags, shots_per, probe_pairs = self._build_batch(programs, shots)
+        finally:
+            self.rng.bit_generator.state = state
+        one_q = sum(1 for qc in circuits_out for inst in qc.data if inst.operation.name in ("gpi", "gpi2"))
+        two_q = sum(1 for qc in circuits_out for inst in qc.data if inst.operation.name in ("zz", "ms"))
+        n_probe = sum(1 for t in tags if t[0] == "probe")
+        return BatchPlan(
+            circuits=circuits_out,
+            shots_per_circuit=shots_per,
+            algorithm_circuits=len(circuits_out) - n_probe,
+            probe_circuits=n_probe,
+            probe_pairs=tuple(probe_pairs),
+            assignments=tuple(tuple(d) for d in designs),
+            single_qubit_gate_shots=one_q * shots_per,
+            two_qubit_gate_shots=two_q * shots_per,
+        )
+
+    def run_many(
+        self,
+        circuits: Sequence[CircuitLike],
+        shots: int,
+        symmetry: Sequence[str | None] | str | None = None,
+        observables: Sequence[Iterable[Sequence[int]]] | None = None,
+    ) -> list[BatchResult]:
+        """Run one co-scheduled batch (one job) for several circuits; shots are per circuit."""
+        programs, syms, extra = self._validate_batch(circuits, shots, symmetry, observables)
+        cfg = self.config
+        designs, circuits_out, tags, shots_per, probe_pairs = self._build_batch(programs, shots)
         raw = self.executor.run(circuits_out, shots_per)
         if len(raw) != len(circuits_out):
             raise RuntimeError("executor returned a different number of results")
@@ -211,7 +258,7 @@ class Canary:
                     self.model.add_relative(group)
         absolute = []
         for run in probe_runs:
-            absolute.extend(echo_observations(run.ions, run.depth, run.frequencies, run.shots, cfg.model_sd))
+            absolute.extend(return_probe_observations(run.ions, run.depth, run.frequencies, run.shots, cfg.model_sd))
         self.model.add_absolute(absolute)
         self.decisions = self.tester.decide(self.model)
 
@@ -251,7 +298,7 @@ class Canary:
         return chosen
 
     def probe(self, pairs: Iterable[tuple[int, int]], shots: int) -> list[ProbeRun]:
-        """Run echo probes on explicit ion pairs (shots per circuit) and update health."""
+        """Run ZZ return probes on explicit ion pairs (shots per circuit) and update health."""
         allowed = set(self.ions)
         todo = [(min(i, j), max(i, j)) for i, j in pairs]
         if not todo:
@@ -262,7 +309,9 @@ class Canary:
         for i, j in todo:
             for depth in self.config.probe_depths:
                 circuits.append(
-                    compile_native(echo_program(depth), (i, j), rng=self.rng, twirl=True, name=f"canary_echo_{i}_{j}_{depth}")
+                    compile_native(
+                        return_probe_program(depth), (i, j), rng=self.rng, twirl=self.config.twirl, name=f"canary_return_{i}_{j}_{depth}"
+                    )
                 )
                 tags.append(((i, j), depth))
         raw = self.executor.run(circuits, int(shots))
@@ -304,7 +353,12 @@ class Canary:
         )
 
     def report(self) -> list[dict[str, Any]]:
-        """Per-resource health estimates, sorted from worst to best."""
+        """Per-resource health estimates, sorted from worst to best.
+
+        'error' is process infidelity for ion pairs and symmetric readout-flip probability for ions.
+        'probe_calibrated' is False when an estimate rests only on algorithm contrasts, whose
+        lightcone exposure model can dilute damping; treat such values as effective lower bounds.
+        """
         rows = []
         for r, (mean, sd) in self.model.estimates().items():
             d = self.decisions.get(r)
@@ -317,8 +371,10 @@ class Canary:
                     "error_upper": to_error(r, mean + 2.0 * sd),
                     "damping": mean,
                     "damping_sd": sd,
+                    "probe_calibrated": self.model.probe_information(r) > 0.0,
                     "status": (d.status if d else Status.UNDECIDED).value,
                     "llr": d.llr if d else 0.0,
+                    "llr_probe": d.llr_probe if d else 0.0,
                 }
             )
         return sorted(rows, key=lambda row: (-row["error"], row["resource"]))

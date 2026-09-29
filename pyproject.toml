@@ -26,9 +26,14 @@ dependencies = [
 
 [project.optional-dependencies]
 aer = ["qiskit-aer>=0.15"]
+test = ["pytest>=7", "qiskit-aer>=0.15"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/quantum_canary"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/quantum_canary", "README.md", "LICENSE", "pyproject.toml"]
+include = ["src/quantum_canary", "tests", "README.md", "LICENSE", "CITATION.cff", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]

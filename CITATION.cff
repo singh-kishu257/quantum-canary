@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "quantum-canary: online ion-health learning and qubit-to-ion assignment for trapped-ion quantum computers"
+authors:
+  - name: "Kanishka"
+version: "0.1.0"
+license: MIT
+repository-code: "https://github.com/<your-account>/quantum-canary"

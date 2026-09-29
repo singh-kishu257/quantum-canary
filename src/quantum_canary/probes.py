@@ -1,4 +1,4 @@
-"""Echo probes for ion pairs and the Z2 symmetry sentinel."""
+"""ZZ return probes for ion pairs and the Z2 symmetry sentinel (gates and measurement only, no delays)."""
 
 from __future__ import annotations
 
@@ -12,24 +12,24 @@ from .results import expectation, floored_log_signal
 
 
 @lru_cache(maxsize=None)
-def echo_program(depth: int) -> LogicalProgram:
-    """H.H, then depth ZZ(pi/2) gates (identity for depth % 4 == 0), then H.H and measure."""
+def return_probe_program(depth: int) -> LogicalProgram:
+    """H.H, then depth ZZ(pi/2) gates (identity when depth % 4 == 0), then H.H and measure; ideal outcome |00>."""
     if depth < 4 or depth % 4:
-        raise ValueError("echo depth must be a positive multiple of 4")
+        raise ValueError("return-probe depth must be a positive multiple of 4")
     h = [Gate("rz", (0,), (math.pi / 2,)), Gate("sx", (0,)), Gate("rz", (0,), (math.pi / 2,))]
     hh = h + [Gate(g.name, (1,), g.params) for g in h]
     gates = hh + [Gate("rzz", (0, 1), (math.pi / 2,)) for _ in range(depth)] + hh
-    return LogicalProgram(2, 2, gates, [(0, 0), (1, 1)], name=f"canary_echo_{depth}")
+    return LogicalProgram(2, 2, gates, [(0, 0), (1, 1)], name=f"canary_return_{depth}")
 
 
-def echo_observations(
+def return_probe_observations(
     ions: tuple[int, int],
     depth: int,
     freqs: Mapping[str, float],
     shots: float,
     model_sd: float,
 ) -> list[tuple[dict[Resource, float], float, float, float]]:
-    """Known-ideal (+1) observations of <Z_0> and <Z_1> for an echo probe."""
+    """Known-ideal (+1) observations of <Z_0> and <Z_1> for a return probe."""
     i, j = ions
     out = []
     for clbit, target in ((0, i), (1, j)):

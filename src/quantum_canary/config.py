@@ -12,6 +12,7 @@ class CanaryConfig:
 
     assignments_per_batch: int = 4
     twirls_per_assignment: int = 2
+    twirl: bool = True
     optimization_level: int = 1
     half_life_s: float = 7200.0
     prior_pair_infidelity: float = 0.005
@@ -56,8 +57,8 @@ class CanaryConfig:
         if self.model_sd < 0:
             raise ValueError("model_sd must be non-negative")
         for name in ("prior_pair_infidelity", "healthy_pair_infidelity", "degraded_pair_infidelity"):
-            if not 0.0 <= getattr(self, name) < 0.75:
-                raise ValueError(f"{name} must lie in [0, 0.75)")
+            if not 0.0 <= getattr(self, name) < 0.9375:
+                raise ValueError(f"{name} must lie in [0, 0.9375)")
         for name in ("prior_readout_error", "healthy_readout_error", "degraded_readout_error"):
             if not 0.0 <= getattr(self, name) < 0.5:
                 raise ValueError(f"{name} must lie in [0, 0.5)")

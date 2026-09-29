@@ -88,12 +88,37 @@ class AssignmentRun:
 
 @dataclass
 class ProbeRun:
-    """Echo-probe results for one ion pair at one depth."""
+    """Return-probe results for one ion pair at one depth."""
 
     ions: tuple[int, int]
     depth: int
     frequencies: dict[str, float]
     shots: int
+
+
+@dataclass
+class BatchPlan:
+    """Preview of one batch: what would be submitted and what it would cost in gate-shots."""
+
+    circuits: list[Any]
+    shots_per_circuit: int
+    algorithm_circuits: int
+    probe_circuits: int
+    probe_pairs: tuple[tuple[int, int], ...]
+    assignments: tuple[tuple[tuple[int, ...], ...], ...]
+    single_qubit_gate_shots: int
+    two_qubit_gate_shots: int
+
+    @property
+    def total_shots(self) -> int:
+        """Total shots across all circuits in the job."""
+        return self.shots_per_circuit * len(self.circuits)
+
+    @property
+    def probe_shot_fraction(self) -> float:
+        """Fraction of the job's shots spent on return probes."""
+        n = len(self.circuits)
+        return self.probe_circuits / n if n else 0.0
 
 
 @dataclass

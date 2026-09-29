@@ -32,13 +32,13 @@ def ions_of(resource: Resource) -> tuple[int, ...]:
 
 
 def pair_damping(infidelity: float) -> float:
-    """Damping rate of a two-qubit depolarizing gate with given average infidelity."""
-    return -math.log1p(-4.0 * infidelity / 3.0)
+    """Damping rate of a two-qubit depolarizing gate with given process (entanglement) infidelity."""
+    return -math.log1p(-16.0 * infidelity / 15.0)
 
 
 def pair_infidelity(damping: float) -> float:
-    """Average infidelity of a two-qubit depolarizing gate with given damping rate."""
-    return 0.75 * (1.0 - math.exp(-max(damping, 0.0)))
+    """Process (entanglement) infidelity of a two-qubit depolarizing gate with given damping rate."""
+    return (15.0 / 16.0) * (1.0 - math.exp(-max(damping, 0.0)))
 
 
 def readout_damping(error: float) -> float:

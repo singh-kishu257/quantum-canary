@@ -8,10 +8,10 @@ from .decision import Decision, SequentialTest, Status
 from .design import BatchDesigner
 from .estimator import HealthModel
 from .executors import BackendExecutor, Executor, IonQExecutor
-from .probes import echo_program
+from .probes import return_probe_program
 from .program import Gate, LogicalProgram, Observable
 from .resources import ion, pair
-from .results import AssignmentRun, BatchResult, ProbeRun
+from .results import AssignmentRun, BatchPlan, BatchResult, ProbeRun
 
 __version__ = "0.1.0"
 
@@ -20,6 +20,7 @@ __all__ = [
     "AssignmentSolver",
     "BackendExecutor",
     "BatchDesigner",
+    "BatchPlan",
     "BatchResult",
     "Canary",
     "CanaryConfig",
@@ -35,7 +36,7 @@ __all__ = [
     "Status",
     "__version__",
     "compile_native",
-    "echo_program",
+    "return_probe_program",
     "ion",
     "pair",
 ]
