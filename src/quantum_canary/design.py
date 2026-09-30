@@ -30,7 +30,10 @@ class BatchDesigner:
     typical population component with ``explore_typical``, else from the population mixture, whose wide outlier
     component makes exploratory seatings nearly random). Degraded resources carry a large additive penalty.
     Resources without Tier-1 evidence and a positive screening suspicion z carry ``screen_scale * z`` more in the
-    pessimistic and sampled costs, which only breaks ties among uncalibrated resources.
+    pessimistic and sampled costs, which only breaks ties among uncalibrated resources. Pairs without Tier-1 evidence
+    that have a dilution-calibrated screening estimate instead use the population mixture updated with that estimate
+    as a Gaussian reading (moment-matched mean plus ``pessimism`` sd; draws come from the more probable component
+    with ``explore_typical``). None of this reaches the health model.
     """
 
     def __init__(self, config: CanaryConfig, rng: np.random.Generator) -> None:
@@ -46,6 +49,7 @@ class BatchDesigner:
         mode: str,
         now: float | None = None,
         suspicion: Mapping[Resource, float] | None = None,
+        screened: Mapping[Resource, tuple[float, float]] | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Per-ion and per-pair damping scores ('pessimistic', 'mean' or 'sample')."""
         if mode not in ("pessimistic", "mean", "sample"):
@@ -78,10 +82,15 @@ class BatchDesigner:
                 a = pos.get(r[1])
                 if a is not None:
                     iv[a] = value
+        screened = {r: v for r, v in (screened or {}).items() if is_pair(r) and r not in known}
+        for r, (x, sd) in screened.items():
+            a, b = pos.get(r[1]), pos.get(r[2])
+            if a is not None and b is not None:
+                pv[a, b] = pv[b, a] = self._screened_cost(model, x, sd, mode, kappa)
         if suspicion and mode != "mean":
             scale = self.config.screen_scale
             for r, z in suspicion.items():
-                if z <= 0.0 or r in known:
+                if z <= 0.0 or r in known or r in screened:
                     continue
                 if is_pair(r):
                     a, b = pos.get(r[1]), pos.get(r[2])
@@ -110,6 +119,23 @@ class BatchDesigner:
         np.fill_diagonal(pv, 0.0)
         return iv, pv
 
+    def _screened_cost(self, model: HealthModel, x: float, sd: float, mode: str, kappa: float) -> float:
+        """Pair cost from the population mixture updated with a calibrated screening reading x +- sd."""
+        post = []
+        for w, m, s in model.components("pair"):
+            total = s * s + sd * sd
+            loglik = -0.5 * (math.log(2.0 * math.pi * total) + (x - m) ** 2 / total)
+            post.append((math.log(w) + loglik, (m * sd * sd + x * s * s) / total, math.sqrt(s * s * sd * sd / total)))
+        top = max(p[0] for p in post)
+        weights = np.array([math.exp(p[0] - top) for p in post])
+        weights /= weights.sum()
+        if mode == "sample":
+            k = int(np.argmax(weights)) if self.config.explore_typical else int(self.rng.choice(len(post), p=weights))
+            return float(self.rng.normal(post[k][1], post[k][2]))
+        mean = float(sum(wt * p[1] for wt, p in zip(weights, post)))
+        second = float(sum(wt * (p[2] ** 2 + p[1] ** 2) for wt, p in zip(weights, post)))
+        return mean + kappa * math.sqrt(max(second - mean * mean, 0.0))
+
     def best(
         self,
         program: LogicalProgram,
@@ -119,10 +145,11 @@ class BatchDesigner:
         mode: str = "pessimistic",
         now: float | None = None,
         suspicion: Mapping[Resource, float] | None = None,
+        screened: Mapping[Resource, tuple[float, float]] | None = None,
     ) -> tuple[int, ...]:
         """Single best assignment under the chosen scoring mode."""
         wp, wi = program.weights(self.config.angle_exponent)
-        iv, pv = self.cost_tables(model, decisions, ions, mode, now, suspicion)
+        iv, pv = self.cost_tables(model, decisions, ions, mode, now, suspicion, screened)
         perm = self.solver.solve(wp, wi, pv, iv)
         return tuple(int(ions[k]) for k in perm)
 
@@ -135,6 +162,7 @@ class BatchDesigner:
         k: int,
         now: float | None = None,
         suspicion: Mapping[Resource, float] | None = None,
+        screened: Mapping[Resource, tuple[float, float]] | None = None,
     ) -> list[tuple[int, ...]]:
         """Return up to k distinct assignments; the first is the exploit choice."""
         n, m = program.num_qubits, len(ions)
@@ -153,16 +181,16 @@ class BatchDesigner:
             out.append(a)
             return True
 
-        iv, pv = self.cost_tables(model, decisions, ions, "pessimistic", now, suspicion)
+        iv, pv = self.cost_tables(model, decisions, ions, "pessimistic", now, suspicion, screened)
         base = self.solver.solve(wp, wi, pv, iv)
         add(base)
         if self.config.explore_mode == "local":
-            for perm in self._local(wp, wi, base, model, decisions, ions, k - 1, now, suspicion):
+            for perm in self._local(wp, wi, base, model, decisions, ions, k - 1, now, suspicion, screened):
                 add(perm)
         tries = 0
         while self.config.explore_mode == "thompson" and len(out) < k and tries < 4 * k:
             tries += 1
-            iv, pv = self.cost_tables(model, decisions, ions, "sample", now, suspicion)
+            iv, pv = self.cost_tables(model, decisions, ions, "sample", now, suspicion, screened)
             add(self.solver.solve(wp, wi, pv, iv))
         walk = base
         while len(out) < k:
@@ -181,6 +209,7 @@ class BatchDesigner:
         count: int,
         now: float | None,
         suspicion: Mapping[Resource, float] | None,
+        screened: Mapping[Resource, tuple[float, float]] | None = None,
     ) -> list[np.ndarray]:
         """Up to ``count`` distinct exploit neighbours chosen for information (see the class docstring)."""
         n, m = base.size, len(ions)
@@ -222,7 +251,7 @@ class BatchDesigner:
         covered: set[Resource] = set()
         chosen: list[np.ndarray] = []
         while len(chosen) < count and moves:
-            iv, pv = self.cost_tables(model, decisions, ions, "sample", now, suspicion)
+            iv, pv = self.cost_tables(model, decisions, ions, "sample", now, suspicion, screened)
 
             def score(mv: tuple[np.ndarray, dict[Resource, float], dict[Resource, float]]) -> tuple[float, float]:
                 nb, added, removed = mv

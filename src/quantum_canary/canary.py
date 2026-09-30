@@ -59,7 +59,7 @@ from .results import (
     merge_frequencies,
     normalize_counts,
 )
-from .screening import ScreeningModel
+from .screening import ScreeningModel, program_key
 
 CircuitLike = Union[QuantumCircuit, LogicalProgram]
 
@@ -217,7 +217,10 @@ class Canary:
         """Best current logical-to-ion assignment under pessimistic calibrated costs."""
         now = float(self.clock())
         prog = self.prepare(circuit)
-        return self.designer.best(prog, self.model, self.decisions, self.ions, now=now, suspicion=self._suspicion(now))
+        suspicion, screened = self._guidance(prog, now)
+        return self.designer.best(
+            prog, self.model, self.decisions, self.ions, now=now, suspicion=suspicion, screened=screened
+        )
 
     def compile(self, circuit: CircuitLike, assignment: Sequence[int], twirl: str | bool = False) -> QuantumCircuit:
         """Compile a circuit onto the given ions in IonQ native gates (angle corrections applied if enabled)."""
@@ -239,8 +242,25 @@ class Canary:
         return offset
 
     def _suspicion(self, now: float) -> dict[Resource, float]:
-        """Screening suspicion per resource (empty when screening is off); guidance only."""
+        """Largest screening suspicion per resource over all programs (empty when screening is off); guidance only."""
         return self.screening.suspicion(now) if self.config.screening else {}
+
+    def _guidance(
+        self, program: LogicalProgram, now: float
+    ) -> tuple[dict[Resource, float], dict[Resource, tuple[float, float]]]:
+        """Screening suspicion and dilution-calibrated pair estimates of one program; guidance only."""
+        if not self.config.screening:
+            return {}, {}
+        key = program_key(program)
+        suspicion = self.screening.suspicion(now, key)
+        if not self.config.screen_calibration:
+            return suspicion, {}
+        tier1 = {}
+        for r in self.model.resources:
+            summary = self.model.summary(r, now)
+            if r[0] == "pair" and summary is not None:
+                tier1[r] = summary
+        return suspicion, self.screening.calibrated(key, tier1, now)[1]
 
     def _available(self, i: int, now: float) -> float:
         cap = float(self.config.max_probe_shots_per_ion)
@@ -278,7 +298,8 @@ class Canary:
             frames = []
             for k in range(len(pack)):
                 flips += [c for c in (2 * k, 2 * k + 1) if self.rng.random() < 0.5]
-                frames.append((float(self.rng.uniform(0.0, 2.0 * math.pi)), float(self.rng.uniform(0.0, 2.0 * math.pi))))
+                beta_a = float(self.rng.uniform(0.0, 2.0 * math.pi))
+                frames.append((beta_a, float(self.rng.uniform(0.0, 2.0 * math.pi))))
             label = "_".join(f"{i}_{j}_{b[0]}{b[1]}" for (i, j), b in zip(pack, pair_bases))
             bases_all = tuple(x for b in pair_bases for x in b)
             for depth in self.config.probe_depths:
@@ -386,7 +407,9 @@ class Canary:
             scores[r] = gain
         return self._pack_ranked(sorted(scores, key=lambda r: (-scores[r], to_key(r))), budget, cost, now)
 
-    def _pack_ranked(self, ranked: Sequence[Resource], budget: int, cost: float, now: float) -> list[list[tuple[int, int]]]:
+    def _pack_ranked(
+        self, ranked: Sequence[Resource], budget: int, cost: float, now: float
+    ) -> list[list[tuple[int, int]]]:
         """Fill up to ``budget`` packs of ``probe_pack`` disjoint pairs, best first, within each ion's token budget."""
         committed: dict[int, float] = {}
         remaining = list(ranked)
@@ -465,9 +488,14 @@ class Canary:
         shots_per = max(1, math.ceil(shots / slots))
         if self.executor.max_shots is not None and shots_per > self.executor.max_shots:
             raise ValueError(f"{shots_per} shots per circuit exceeds the backend limit")
-        suspicion = self._suspicion(now)
         k = len(self._allocation(slots, cfg.assignments_per_batch))
-        designs = [self.designer.design(p, self.model, self.decisions, self.ions, k, now, suspicion) for p in programs]
+        designs = []
+        for p in programs:
+            p_suspicion, p_screened = self._guidance(p, now)
+            designs.append(
+                self.designer.design(p, self.model, self.decisions, self.ions, k, now, p_suspicion, p_screened)
+            )
+        suspicion = self._suspicion(now)
         offset = self._angle_offset(now)
         jobs: list[_Job] = []
         for pi, (prog, design) in enumerate(zip(programs, designs)):
@@ -682,7 +710,6 @@ class Canary:
         if cfg.screening:
             for pi, (prog, design) in enumerate(zip(programs, designs)):
                 self.screening.update(prog, design, [merged[(pi, ai)] for ai in range(len(design))], extra[pi], now)
-        suspicion = self._suspicion(now)
         tests = sum(len(p.measurements) * len(d) for p, d, s in zip(programs, designs, syms) if s == "z2")
         flagged: set[int] = set()
         if tests:
@@ -698,6 +725,7 @@ class Canary:
         gamma = cfg.angle_exponent
         results = []
         for pi, (prog, design) in enumerate(zip(programs, designs)):
+            suspicion, screened = self._guidance(prog, now)
             runs = []
             for ai, assignment in enumerate(design):
                 f, n = merged[(pi, ai)]
@@ -709,7 +737,7 @@ class Canary:
                     name=prog.name,
                     runs=runs,
                     recommended=self.designer.best(
-                        prog, self.model, self.decisions, self.ions, now=now, suspicion=suspicion
+                        prog, self.model, self.decisions, self.ions, now=now, suspicion=suspicion, screened=screened
                     ),
                     probes=probe_runs,
                     flagged_ions=tuple(sorted(flagged)),

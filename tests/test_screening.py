@@ -107,6 +107,7 @@ def test_screening_never_changes_tier1_evidence_or_verdicts(monkeypatch):
         assert all(on.model.evidence(r) == off.model.evidence(r) for r in on.model.resources)
         assert on.decisions == off.decisions
     assert on.screening.suspicion() and not off.screening.resources
+    assert on._guidance(on.prepare(circuit), times[True][0])[1]
     assert designs[True] != designs[False]
 
     def forbidden(*args, **kwargs):
@@ -161,3 +162,51 @@ def test_screening_state_round_trips(tmp_path):
     del data["screening"]
     path.write_text(json.dumps(data))
     assert Canary.load(path, ex, clock=lambda: 0.0).screening.resources == ()
+
+
+def _diluted_groups(rng, model, truth, dilution):
+    keys = list(truth)
+    for _ in range(300):
+        ideal = rng.uniform(-1.0, 0.0)
+        rows = []
+        for k in rng.permutation(len(keys))[:3]:
+            r = keys[int(k)]
+            rows.append(({r: 5.0}, math.exp(ideal - 5.0 * dilution * truth[r]), 1e9))
+        model.add_group(rows)
+
+
+@pytest.mark.parametrize("dilution, expected", [(0.3, 0.3), (2.0, 1.0), (-0.5, 0.05)])
+def test_dilution_calibration_recovers_factor(rng, dilution, expected):
+    truth = {pair(0, k): x for k, x in zip(range(1, 8), (0.004, 0.006, 0.003, 0.05, 0.005, 0.02, 0.008))}
+    model = ScreeningModel(CanaryConfig(screen_model_sd=1e-4), clock=lambda: 0.0)
+    _diluted_groups(rng, model, truth, dilution)
+    vetted = [pair(0, 1), pair(0, 2), pair(0, 4), pair(0, 6)]
+    tier1 = {r: (truth[r], 1e-8) for r in vetted}
+    factor, calibrated = model.calibrated("", tier1)
+    assert factor == pytest.approx(expected, abs=0.01)
+    if dilution == 0.3:
+        for r in (pair(0, 3), pair(0, 5), pair(0, 7)):
+            assert calibrated[r][0] == pytest.approx(truth[r], abs=2e-3)
+    assert model.calibrated("", dict(list(tier1.items())[:2])) == (None, {})
+    assert model.calibrated("other", tier1) == (None, {})
+
+
+def test_calibrated_costs_follow_the_reading():
+    cfg = CanaryConfig(seed=0)
+    model = HealthModel(cfg, clock=lambda: 0.0)
+    designer = BatchDesigner(cfg, np.random.default_rng(0))
+    ions = range(4)
+    _, prior = designer.cost_tables(model, {}, ions, "pessimistic", 0.0)
+    bad = {pair(0, 1): (pair_damping(0.05), 0.005)}
+    good = {pair(0, 1): (pair_damping(0.003), 0.001)}
+    vague = {pair(0, 1): (pair_damping(0.003), 1.0)}
+    _, with_bad = designer.cost_tables(model, {}, ions, "pessimistic", 0.0, {pair(0, 1): 9.0}, bad)
+    _, with_good = designer.cost_tables(model, {}, ions, "pessimistic", 0.0, None, good)
+    _, with_vague = designer.cost_tables(model, {}, ions, "pessimistic", 0.0, None, vague)
+    assert with_bad[0, 1] > pair_damping(0.04) > prior[0, 1]
+    assert with_good[0, 1] < pair_damping(0.006) < prior[0, 1]
+    assert with_vague[0, 1] == pytest.approx(prior[0, 1], rel=1e-2)
+    assert with_bad[2, 3] == prior[2, 3]
+    model.update(pair(0, 1), pair_damping(0.004), 1e-6, t=0.0)
+    _, vetted = designer.cost_tables(model, {}, ions, "pessimistic", 0.0, None, bad)
+    assert vetted[0, 1] < pair_damping(0.006)
