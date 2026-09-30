@@ -16,7 +16,12 @@ from .resources import Resource, ion, is_pair, pair
 
 
 class BatchDesigner:
-    """One pessimistic (exploit) assignment plus Thompson-sampled (explore) assignments."""
+    """One pessimistic (exploit) assignment plus Thompson-sampled (explore) assignments.
+
+    Costs are calibrated damping rates: the posterior mean plus ``pessimism`` standard deviations for the exploit
+    assignment, and a posterior draw for each exploratory assignment (resources without evidence are drawn from the
+    population mixture). Degraded resources carry a large additive penalty.
+    """
 
     def __init__(self, config: CanaryConfig, rng: np.random.Generator) -> None:
         self.config = config
@@ -29,6 +34,7 @@ class BatchDesigner:
         decisions: Mapping[Resource, Decision],
         ions: Sequence[int],
         mode: str,
+        now: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Per-ion and per-pair damping scores ('pessimistic', 'mean' or 'sample')."""
         if mode not in ("pessimistic", "mean", "sample"):
@@ -39,15 +45,15 @@ class BatchDesigner:
         im, isd = model.prior(ion(0))
         pm, psd = model.prior(pair(0, 1))
         if mode == "sample":
-            iv = self.rng.normal(im, isd, m)
-            pv = self.rng.normal(pm, psd, (m, m))
+            iv = model.sample_prior("ion", self.rng, m)
+            pv = model.sample_prior("pair", self.rng, (m, m))
             pv = np.triu(pv, 1)
             pv = pv + pv.T
-            known = model.sample(self.rng)
+            known = model.sample(self.rng, now)
         else:
             iv = np.full(m, im + kappa * isd)
             pv = np.full((m, m), pm + kappa * psd)
-            known = {r: mu + kappa * sd for r, (mu, sd) in model.estimates().items()}
+            known = {r: mu + kappa * sd for r, (mu, sd) in model.estimates(now).items()}
         for r, value in known.items():
             if is_pair(r):
                 a, b = pos.get(r[1]), pos.get(r[2])
@@ -82,10 +88,11 @@ class BatchDesigner:
         decisions: Mapping[Resource, Decision],
         ions: Sequence[int],
         mode: str = "pessimistic",
+        now: float | None = None,
     ) -> tuple[int, ...]:
         """Single best assignment under the chosen scoring mode."""
-        wp, wi = program.weights()
-        iv, pv = self.cost_tables(model, decisions, ions, mode)
+        wp, wi = program.weights(self.config.angle_exponent)
+        iv, pv = self.cost_tables(model, decisions, ions, mode, now)
         perm = self.solver.solve(wp, wi, pv, iv)
         return tuple(int(ions[k]) for k in perm)
 
@@ -96,13 +103,14 @@ class BatchDesigner:
         decisions: Mapping[Resource, Decision],
         ions: Sequence[int],
         k: int,
+        now: float | None = None,
     ) -> list[tuple[int, ...]]:
         """Return up to k distinct assignments; the first is the exploit choice."""
         n, m = program.num_qubits, len(ions)
         if n > m:
             raise ValueError(f"program needs {n} qubits but only {m} ions are available")
         k = min(int(k), math.perm(m, n))
-        wp, wi = program.weights()
+        wp, wi = program.weights(self.config.angle_exponent)
         out: list[tuple[int, ...]] = []
         seen: set[tuple[int, ...]] = set()
 
@@ -114,13 +122,13 @@ class BatchDesigner:
             out.append(a)
             return True
 
-        iv, pv = self.cost_tables(model, decisions, ions, "pessimistic")
+        iv, pv = self.cost_tables(model, decisions, ions, "pessimistic", now)
         base = self.solver.solve(wp, wi, pv, iv)
         add(base)
         tries = 0
         while len(out) < k and tries < 4 * k:
             tries += 1
-            iv, pv = self.cost_tables(model, decisions, ions, "sample")
+            iv, pv = self.cost_tables(model, decisions, ions, "sample", now)
             add(self.solver.solve(wp, wi, pv, iv))
         walk = base
         while len(out) < k:

@@ -1,198 +1,252 @@
-"""Gaussian health model over per-ion and per-pair damping rates."""
+"""Health model over per-resource damping rates, and the coherent ZZ over-rotation model.
+
+Only calibrated (Tier-1) evidence enters these models: each observation is an independent per-batch estimate of
+one resource's damping (from cycle-benchmarking or SPAM probes) with the sampling model of its variance. Algorithm
+circuits are never used here, because for non-Clifford circuits the damping of an observable is not a known linear
+function of the per-gate rates.
+
+Drift is modelled as an Ornstein-Uhlenbeck process: between observations the deviation of a resource from the
+population mean shrinks by 2^(-elapsed / half_life) and the variance relaxes to the population variance. The
+posterior of a resource is obtained by Kalman filtering its evidence under a two-component (typical plus outlier)
+population mixture, so estimates, Thompson samples and reports all come from one generative model. The measurement
+variance of each observation is evaluated at the filter's one-step prediction (as in an extended Kalman filter),
+never at the observed value, so an estimate's weight does not depend on its own noise.
+"""
 
 from __future__ import annotations
 
 import math
 import time
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Mapping
 
 import numpy as np
 
 from .config import CanaryConfig
-from .resources import Resource, from_key, is_pair, pair_damping, readout_damping, to_key
+from .probes import Observation
+from .resources import Resource, from_key, kind, pair_damping, readout_damping, to_key
 
-Exposure = Mapping[Resource, float]
+PRUNE_HALF_LIVES = 20.0
 
 
 class HealthModel:
-    """Linear-Gaussian model log|<O>| = log|ideal| - sum_r c_r x_r with exponential forgetting.
+    """Per-resource damping rates filtered from calibrated evidence under Ornstein-Uhlenbeck drift.
 
-    Evidence from algorithm contrasts and from return probes is pooled for estimation; probe
-    evidence is also kept separately because only it is on a calibrated absolute scale.
+    The population distribution of each resource kind is a two-component Gaussian mixture: a typical component
+    (mean and spread from the configuration or, with ``empirical_bayes``, from robust estimates over calibrated
+    resources) and a wide outlier component with weight ``outlier_weight`` and standard deviation
+    ``outlier_sd``. Device error distributions are heavy-tailed (a few ion pairs are far worse than the median),
+    and a single Gaussian prior would shrink a genuinely bad resource towards the median; the mixture lets such a
+    resource leave the typical component after one or two probes. Each component is Kalman-filtered separately and
+    weighted by its marginal likelihood.
     """
 
     def __init__(self, config: CanaryConfig | None = None, clock: Callable[[], float] = time.time) -> None:
         self.config = config or CanaryConfig()
         self.clock = clock
-        self._keys: list[Resource] = []
-        self._index: dict[Resource, int] = {}
-        self._a = np.zeros((0, 0))
-        self._b = np.zeros(0)
-        self._a_probe = np.zeros((0, 0))
-        self._b_probe = np.zeros(0)
-        self._t: float | None = None
-        self._cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._evidence: dict[Resource, list[Observation]] = {}
+        self._population: dict[str, tuple[float, float]] = {}
 
     @property
     def resources(self) -> tuple[Resource, ...]:
-        """Resources with at least one observation."""
-        return tuple(self._keys)
+        """Resources with at least one observation, in a stable order."""
+        return tuple(sorted(self._evidence, key=to_key))
 
-    def prior(self, resource: Resource) -> tuple[float, float]:
-        """Prior mean and standard deviation of a resource damping rate."""
+    def _now(self, now: float | None) -> float:
+        return float(self.clock()) if now is None else float(now)
+
+    def configured_prior(self, resource_kind: str) -> tuple[float, float]:
+        """Mean and standard deviation of the typical component from the configuration."""
         c = self.config
-        if is_pair(resource):
+        if resource_kind == "pair":
             return pair_damping(c.prior_pair_infidelity), c.prior_pair_sd
         return readout_damping(c.prior_readout_error), c.prior_ion_sd
 
-    def _ensure(self, resources: Iterable[Resource]) -> None:
-        new = [r for r in resources if r not in self._index]
-        if not new:
-            return
-        n0 = len(self._keys)
-        for r in new:
-            self._index[r] = len(self._keys)
-            self._keys.append(r)
-        n = len(self._keys)
-        self._a, self._b = self._grow(self._a, self._b, n0, n)
-        self._a_probe, self._b_probe = self._grow(self._a_probe, self._b_probe, n0, n)
-        self._cache = {}
+    def typical(self, resource_kind: str) -> tuple[float, float]:
+        """Mean and standard deviation of the typical population component."""
+        return self._population.get(resource_kind, self.configured_prior(resource_kind))
 
-    @staticmethod
-    def _grow(a0: np.ndarray, b0: np.ndarray, n0: int, n: int) -> tuple[np.ndarray, np.ndarray]:
-        a = np.zeros((n, n))
-        a[:n0, :n0] = a0
-        b = np.zeros(n)
-        b[:n0] = b0
-        return a, b
+    def components(self, resource_kind: str) -> list[tuple[float, float, float]]:
+        """Population mixture as (weight, mean, sd) components."""
+        mean, sd = self.typical(resource_kind)
+        w = self.config.outlier_weight
+        comps = [(1.0 - w, mean, sd)]
+        if w > 0.0:
+            comps.append((w, mean, self.config.outlier_sd))
+        return comps
 
-    def decay(self, now: float | None = None) -> None:
-        """Discount past evidence by 2^(-elapsed / half_life)."""
-        now = self.clock() if now is None else float(now)
-        if self._t is not None and now > self._t:
-            f = 0.5 ** ((now - self._t) / self.config.half_life_s)
-            self._a *= f
-            self._b *= f
-            self._a_probe *= f
-            self._b_probe *= f
-            self._cache = {}
-        if self._t is None or now > self._t:
-            self._t = now
+    def prior(self, resource: Resource) -> tuple[float, float]:
+        """Moment-matched mean and standard deviation of the population mixture for the resource's kind."""
+        comps = self.components(kind(resource))
+        mean = sum(w * m for w, m, _ in comps)
+        second = sum(w * (s * s + m * m) for w, m, s in comps)
+        return mean, math.sqrt(max(second - mean * mean, 0.0))
 
-    def _stamp(self) -> None:
-        if self._t is None:
-            self._t = float(self.clock())
+    def sample_prior(self, resource_kind: str, rng: np.random.Generator, size: Any = None) -> np.ndarray:
+        """Draws from the population mixture."""
+        comps = self.components(resource_kind)
+        weights = np.array([c[0] for c in comps])
+        idx = rng.choice(len(comps), size=size, p=weights / weights.sum())
+        means = np.array([c[1] for c in comps])[idx]
+        sds = np.array([c[2] for c in comps])[idx]
+        return rng.normal(means, sds)
 
-    def add_relative(self, observations: Sequence[tuple[Exposure, float, float]]) -> None:
-        """Add one group of (exposure, log|m|, variance) sharing an unknown ideal value."""
-        if len(observations) < 2:
-            return
-        self._stamp()
-        keys = sorted({r for e, _, _ in observations for r in e}, key=to_key)
-        if not keys:
-            return
-        self._ensure(keys)
-        idx = np.array([self._index[r] for r in keys])
-        c = np.array([[float(e.get(r, 0.0)) for r in keys] for e, _, _ in observations])
-        y = np.array([o[1] for o in observations], dtype=float)
-        w = 1.0 / np.array([o[2] for o in observations], dtype=float)
-        wsum = w.sum()
-        cc = c - (w @ c) / wsum
-        t = -(y - (w @ y) / wsum)
-        self._a[np.ix_(idx, idx)] += cc.T @ (w[:, None] * cc)
-        self._b[idx] += cc.T @ (w * t)
-        self._cache = {}
+    def update(self, resource: Resource, estimate: float, variance: float, t: float | None = None) -> None:
+        """Record an external estimate of a resource's damping rate with a fixed variance."""
+        self.record(resource, Observation(self._now(t), float(estimate), "fixed", fixed_variance=float(variance)))
 
-    def add_absolute(self, observations: Sequence[tuple[Exposure, float, float, float]]) -> None:
-        """Add (exposure, log|m|, log|ideal|, variance) return-probe observations with known ideal values."""
-        if not observations:
-            return
-        self._stamp()
-        keys = sorted({r for e, _, _, _ in observations for r in e}, key=to_key)
-        if not keys:
-            return
-        self._ensure(keys)
-        idx = np.array([self._index[r] for r in keys])
-        c = np.array([[float(e.get(r, 0.0)) for r in keys] for e, _, _, _ in observations])
-        t = np.array([o[2] - o[1] for o in observations], dtype=float)
-        w = 1.0 / np.array([o[3] for o in observations], dtype=float)
-        block = c.T @ (w[:, None] * c)
-        rhs = c.T @ (w * t)
-        self._a[np.ix_(idx, idx)] += block
-        self._b[idx] += rhs
-        self._a_probe[np.ix_(idx, idx)] += block
-        self._b_probe[idx] += rhs
-        self._cache = {}
+    def record(self, resource: Resource, observation: Observation) -> None:
+        """Record a calibrated observation of a resource."""
+        ev = self._evidence.setdefault(resource, [])
+        ev.append(observation)
+        ev.sort(key=lambda e: e.t)
 
-    def _posterior(self, source: str = "all") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        if source not in ("all", "probe"):
-            raise ValueError("source must be 'all' or 'probe'")
-        if source not in self._cache:
-            n = len(self._keys)
-            if n == 0:
-                self._cache[source] = (np.zeros(0), np.zeros((0, 0)), np.zeros((0, 0)))
+    def evidence(self, resource: Resource) -> tuple[Observation, ...]:
+        """Recorded observations of a resource, oldest first."""
+        return tuple(self._evidence.get(resource, ()))
+
+    def _filter(
+        self, evidence: list[Observation], mean: float, var: float, now: float
+    ) -> tuple[float, float, float, list[float]]:
+        """Kalman filter under OU drift; returns mean, variance, log marginal likelihood, squared innovations."""
+        half_life = self.config.half_life_s
+        mu, p, t, loglik = mean, var, None, 0.0
+        z2: list[float] = []
+        for obs in evidence:
+            ts, x = obs.t, obs.x
+            if ts > now:
+                break
+            if t is not None and ts > t:
+                rho = 0.5 ** ((ts - t) / half_life)
+                mu = mean + rho * (mu - mean)
+                p = rho * rho * p + (1.0 - rho * rho) * var
+            s = p + obs.variance(max(mu, 0.0))
+            loglik -= 0.5 * (math.log(2.0 * math.pi * s) + (x - mu) ** 2 / s)
+            z2.append((x - mu) ** 2 / s)
+            gain = p / s
+            mu += gain * (x - mu)
+            p *= 1.0 - gain
+            t = ts
+        if t is not None and now > t:
+            rho = 0.5 ** ((now - t) / half_life)
+            mu = mean + rho * (mu - mean)
+            p = rho * rho * p + (1.0 - rho * rho) * var
+        return mu, p, loglik, z2
+
+    def posterior(self, resource: Resource, now: float | None = None) -> list[tuple[float, float, float]]:
+        """Posterior mixture of a damping rate as (weight, mean, variance) components."""
+        now = self._now(now)
+        comps = self.components(kind(resource))
+        ev = self._evidence.get(resource)
+        if not ev:
+            return [(w, m, s * s) for w, m, s in comps]
+        filtered = [(w, *self._filter(ev, m, s * s, now)) for w, m, s in comps]
+        logw = [math.log(w) + ll for w, _, _, ll, _ in filtered]
+        top = max(logw)
+        weights = [math.exp(lw - top) for lw in logw]
+        total = sum(weights)
+        return [(wt / total, mu, p) for wt, (_, mu, p, _, _) in zip(weights, filtered)]
+
+    def estimate(self, resource: Resource, now: float | None = None) -> tuple[float, float]:
+        """Posterior mean and standard deviation of a damping rate at time ``now``."""
+        post = self.posterior(resource, now)
+        mean = sum(w * m for w, m, _ in post)
+        second = sum(w * (p + m * m) for w, m, p in post)
+        return float(mean), float(math.sqrt(max(second - mean * mean, 0.0)))
+
+    def outlier_probability(self, resource: Resource, now: float | None = None) -> float:
+        """Posterior probability that the resource belongs to the wide outlier component."""
+        post = self.posterior(resource, now)
+        return float(post[1][0]) if len(post) > 1 else 0.0
+
+    def estimates(self, now: float | None = None) -> dict[Resource, tuple[float, float]]:
+        """Posterior mean and standard deviation for every resource with evidence."""
+        now = self._now(now)
+        return {r: self.estimate(r, now) for r in self.resources}
+
+    def sample(self, rng: np.random.Generator, now: float | None = None) -> dict[Resource, float]:
+        """Posterior draw for every resource with evidence (resources are independent a posteriori)."""
+        now = self._now(now)
+        out: dict[Resource, float] = {}
+        for r in self.resources:
+            post = self.posterior(r, now)
+            k = int(rng.choice(len(post), p=np.array([c[0] for c in post])))
+            out[r] = float(rng.normal(post[k][1], math.sqrt(max(post[k][2], 0.0))))
+        return out
+
+    def diagnostics(self, now: float | None = None) -> dict[str, tuple[float, int]]:
+        """Mean squared standardised innovation per resource kind (about 1 if the evidence variances are right)."""
+        now = self._now(now)
+        sums: dict[str, list[float]] = {}
+        for r, ev in self._evidence.items():
+            comps = self.components(kind(r))
+            best = max(
+                (self._filter(ev, m, s * s, now) + (math.log(w),) for w, m, s in comps),
+                key=lambda f: f[2] + f[4],
+            )
+            sums.setdefault(kind(r), []).extend(best[3])
+        return {k: (float(np.mean(v)), len(v)) for k, v in sums.items() if v}
+
+    def summary(self, resource: Resource, now: float | None = None) -> tuple[float, float] | None:
+        """Time-discounted inverse-variance mean of a resource's evidence and its variance (data only).
+
+        Variances are evaluated at the configured prior mean of the resource kind, so the weights depend only on the
+        probe design and the age of each observation.
+        """
+        now = self._now(now)
+        half_life = self.config.half_life_s
+        reference = self.configured_prior(kind(resource))[0]
+        num = den = 0.0
+        for obs in self._evidence.get(resource, ()):
+            if obs.t > now:
+                continue
+            w = 0.5 ** ((now - obs.t) / half_life) / obs.variance(reference)
+            num += w * obs.x
+            den += w
+        if den <= 0.0:
+            return None
+        return num / den, 1.0 / den
+
+    def refresh_population(self, now: float | None = None, min_resources: int = 5, pseudo_count: float = 5.0) -> None:
+        """Empirical-Bayes update of the typical component of each resource kind (median and MAD)."""
+        now = self._now(now)
+        for resource_kind in ("pair", "ion"):
+            xs, vs = [], []
+            for r in self._evidence:
+                if kind(r) != resource_kind:
+                    continue
+                s = self.summary(r, now)
+                if s is not None:
+                    xs.append(s[0])
+                    vs.append(s[1])
+            if len(xs) < min_resources:
+                self._population.pop(resource_kind, None)
+                continue
+            x = np.array(xs)
+            centre = float(np.median(x))
+            spread = 1.4826 * float(np.median(np.abs(x - centre)))
+            m0, s0 = self.configured_prior(resource_kind)
+            spread2 = max(spread * spread - float(np.median(vs)), (0.1 * s0) ** 2)
+            n = float(len(xs))
+            mean = (pseudo_count * m0 + n * centre) / (pseudo_count + n)
+            var = (pseudo_count * s0 * s0 + n * spread2) / (pseudo_count + n)
+            self._population[resource_kind] = (mean, math.sqrt(var))
+
+    def prune(self, now: float | None = None) -> None:
+        """Drop evidence older than 20 half-lives (its weight is below 1e-6)."""
+        cutoff = self._now(now) - PRUNE_HALF_LIVES * self.config.half_life_s
+        for r in list(self._evidence):
+            kept = [e for e in self._evidence[r] if e.t >= cutoff]
+            if kept:
+                self._evidence[r] = kept
             else:
-                a, b = (self._a, self._b) if source == "all" else (self._a_probe, self._b_probe)
-                priors = np.array([self.prior(r) for r in self._keys])
-                prec0 = 1.0 / priors[:, 1] ** 2
-                p = a + np.diag(prec0)
-                p = 0.5 * (p + p.T)
-                chol = np.linalg.cholesky(p)
-                inv_chol = np.linalg.inv(chol)
-                cov = inv_chol.T @ inv_chol
-                mean = cov @ (b + prec0 * priors[:, 0])
-                self._cache[source] = (mean, cov, chol)
-        return self._cache[source]
-
-    def estimate(self, resource: Resource) -> tuple[float, float]:
-        """Posterior mean and standard deviation of a damping rate."""
-        i = self._index.get(resource)
-        if i is None:
-            return self.prior(resource)
-        mean, cov, _ = self._posterior()
-        return float(mean[i]), float(math.sqrt(max(cov[i, i], 0.0)))
-
-    def estimates(self) -> dict[Resource, tuple[float, float]]:
-        """Posterior mean and standard deviation for every observed resource."""
-        mean, cov, _ = self._posterior()
-        sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
-        return {r: (float(mean[i]), float(sd[i])) for i, r in enumerate(self._keys)}
-
-    def data_marginal(self, resource: Resource, source: str = "all") -> tuple[float, float]:
-        """Approximate data-only estimate and precision of a damping rate ('all' or 'probe' evidence)."""
-        i = self._index.get(resource)
-        if i is None:
-            return self.prior(resource)[0], 0.0
-        mean, cov, _ = self._posterior(source)
-        mu0, sd0 = self.prior(resource)
-        p_post = 1.0 / max(cov[i, i], 1e-300)
-        p_data = p_post - 1.0 / sd0**2
-        if p_data <= 1e-12:
-            return mu0, 0.0
-        return float((mean[i] * p_post - mu0 / sd0**2) / p_data), float(p_data)
-
-    def probe_information(self, resource: Resource) -> float:
-        """Accumulated (decayed) Fisher information on a resource from return probes alone."""
-        i = self._index.get(resource)
-        return 0.0 if i is None else float(self._a_probe[i, i])
-
-    def sample(self, rng: np.random.Generator) -> dict[Resource, float]:
-        """Joint posterior draw for every observed resource."""
-        mean, _, chol = self._posterior()
-        if mean.size == 0:
-            return {}
-        draw = mean + np.linalg.solve(chol.T, rng.standard_normal(mean.size))
-        return {r: float(draw[i]) for i, r in enumerate(self._keys)}
+                del self._evidence[r]
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serialisable state."""
         return {
-            "keys": [to_key(r) for r in self._keys],
-            "a": self._a.tolist(),
-            "b": self._b.tolist(),
-            "a_probe": self._a_probe.tolist(),
-            "b_probe": self._b_probe.tolist(),
-            "t": self._t,
+            "version": 2,
+            "evidence": {to_key(r): [e.to_dict() for e in ev] for r, ev in self._evidence.items()},
+            "population": {k: list(v) for k, v in self._population.items()},
         }
 
     @classmethod
@@ -203,13 +257,86 @@ class HealthModel:
         clock: Callable[[], float] = time.time,
     ) -> "HealthModel":
         """Restore a model saved with to_dict."""
+        if data.get("version") != 2:
+            raise ValueError(
+                "health state saved before the calibrated-evidence redesign cannot be restored: it pooled algorithm "
+                "contrasts, which are no longer treated as calibrated evidence"
+            )
         model = cls(config, clock)
-        model._keys = [from_key(k) for k in data["keys"]]
-        model._index = {r: i for i, r in enumerate(model._keys)}
-        n = len(model._keys)
-        model._a = np.array(data["a"], dtype=float).reshape(n, n)
-        model._b = np.array(data["b"], dtype=float).reshape(n)
-        model._a_probe = np.array(data.get("a_probe", np.zeros((n, n))), dtype=float).reshape(n, n)
-        model._b_probe = np.array(data.get("b_probe", np.zeros(n)), dtype=float).reshape(n)
-        model._t = data.get("t")
+        for key, ev in data.get("evidence", {}).items():
+            model._evidence[from_key(key)] = sorted((Observation.from_dict(e) for e in ev), key=lambda e: e.t)
+        model._population = {k: (float(v[0]), float(v[1])) for k, v in data.get("population", {}).items()}
+        return model
+
+
+class CoherentModel:
+    """Coherent ZZ over-rotation of each ion pair, delta(theta) = c + k * theta / 0.25 (turns per gate).
+
+    Estimated from phase probes at one or more reference angles by Bayesian linear regression with independent
+    N(0, coherent_prior_sd^2) priors on c and k; evidence is down-weighted by 2^(-age / half_life).
+    """
+
+    def __init__(self, config: CanaryConfig | None = None, clock: Callable[[], float] = time.time) -> None:
+        self.config = config or CanaryConfig()
+        self.clock = clock
+        self._evidence: dict[Resource, list[tuple[float, float, float, float]]] = {}
+
+    @property
+    def resources(self) -> tuple[Resource, ...]:
+        """Pairs with phase-probe evidence."""
+        return tuple(sorted(self._evidence, key=to_key))
+
+    def _now(self, now: float | None) -> float:
+        return float(self.clock()) if now is None else float(now)
+
+    def update(self, resource: Resource, theta: float, delta: float, variance: float, t: float | None = None) -> None:
+        """Record a phase-probe estimate of the over-rotation per ZZ(theta) gate."""
+        if not (math.isfinite(delta) and math.isfinite(variance) and variance > 0.0):
+            raise ValueError("evidence needs a finite estimate and a positive finite variance")
+        self._evidence.setdefault(resource, []).append((self._now(t), float(theta), float(delta), float(variance)))
+
+    def _posterior(self, resource: Resource, now: float) -> tuple[np.ndarray, np.ndarray]:
+        s = self.config.coherent_prior_sd
+        info = np.eye(2) / (s * s)
+        rhs = np.zeros(2)
+        for ts, theta, d, v in self._evidence.get(resource, ()):
+            if ts > now:
+                continue
+            w = 0.5 ** ((now - ts) / self.config.half_life_s) / v
+            h = np.array([1.0, theta / 0.25])
+            info += w * np.outer(h, h)
+            rhs += w * h * d
+        cov = np.linalg.inv(info)
+        return cov @ rhs, cov
+
+    def estimate(self, resource: Resource, theta: float, now: float | None = None) -> tuple[float, float]:
+        """Posterior mean and standard deviation of the over-rotation per ZZ(theta) gate, in turns."""
+        mean, cov = self._posterior(resource, self._now(now))
+        h = np.array([1.0, float(theta) / 0.25])
+        return float(h @ mean), float(math.sqrt(max(h @ cov @ h, 0.0)))
+
+    def correction(self, resource: Resource, theta: float, now: float | None = None) -> float:
+        """Angle correction (turns) to add to ZZ(theta): minus the over-rotation if resolved, else 0."""
+        if resource not in self._evidence:
+            return 0.0
+        mean, sd = self.estimate(resource, theta, now)
+        if abs(mean) < self.config.angle_resolution or abs(mean) < self.config.correction_z * sd:
+            return 0.0
+        return -mean
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-serialisable state."""
+        return {"evidence": {to_key(r): [list(e) for e in ev] for r, ev in self._evidence.items()}}
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: Mapping[str, Any],
+        config: CanaryConfig | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> "CoherentModel":
+        """Restore a model saved with to_dict."""
+        model = cls(config, clock)
+        for key, ev in data.get("evidence", {}).items():
+            model._evidence[from_key(key)] = [tuple(float(v) for v in e) for e in ev]
         return model

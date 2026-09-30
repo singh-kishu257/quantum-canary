@@ -38,7 +38,13 @@ def _ionq_backend(name: str, token: str | None) -> Any:
 
 
 class IonQExecutor(Executor):
-    """IonQ cloud QPU or simulator using the native (GPi, GPi2, ZZ) gateset without debiasing."""
+    """IonQ cloud QPU or simulator using the native (GPi, GPi2, ZZ) gateset without debiasing.
+
+    IonQ runs native-gate circuits exactly as submitted, with its compiler and optimizer turned off and error
+    mitigation off by default, and a test on qpu.forte-1 confirmed that native circuits address the requested ion
+    indices without optimizing the gate sequence. Debiasing is refused because it re-runs circuits under different
+    qubit assignments, which would invalidate per-ion attribution.
+    """
 
     def __init__(
         self,
@@ -67,6 +73,8 @@ class IonQExecutor(Executor):
             from qiskit_ionq import ErrorMitigation
 
             self.run_options.setdefault("error_mitigation", ErrorMitigation.NO_DEBIASING)
+            if self.run_options["error_mitigation"] is not ErrorMitigation.NO_DEBIASING:
+                raise ValueError("Canary requires debiasing to be off: it remaps qubits to other ions")
 
     @classmethod
     def qpu(

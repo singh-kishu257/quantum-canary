@@ -15,12 +15,28 @@ from .resources import Resource, ion, pair
 BASIS: tuple[str, ...] = ("rz", "sx", "x", "rzz")
 _IGNORED = frozenset({"barrier", "id", "delay"})
 EPS = 1e-9
+QUARTER_TURN = 0.25
 
 
 def wrap_angle(theta: float) -> float:
     """Wrap an angle to the interval (-pi, pi]."""
     t = math.remainder(float(theta), 2.0 * math.pi)
     return math.pi if abs(t + math.pi) < EPS else t
+
+
+def physical_turns(phi: float) -> float:
+    """Angle in turns of the positive ZZ gate that realises rzz(phi) after normalisation, in (0, 0.25]."""
+    t = abs(wrap_angle(phi))
+    if t > math.pi / 2:
+        t = math.pi - t
+    return t / (2.0 * math.pi)
+
+
+def angle_weight(phi: float, exponent: float) -> float:
+    """Relative exposure of an rzz(phi) gate, (turns / 0.25) ** exponent; 1 for exponent 0."""
+    if exponent == 0.0:
+        return 1.0
+    return (physical_turns(phi) / QUARTER_TURN) ** exponent
 
 
 @dataclass(frozen=True)
@@ -57,7 +73,7 @@ class LogicalProgram:
         self.measurements = tuple((int(q), int(c)) for q, c in measurements)
         self.name = str(name)
         self._validate()
-        self._lightcones: dict[tuple[int, ...], dict[tuple[int, int], int]] = {}
+        self._lightcones: dict[tuple[tuple[int, ...], float], dict[tuple[int, int], float]] = {}
 
     def _validate(self) -> None:
         if self.num_qubits < 1:
@@ -143,15 +159,25 @@ class LogicalProgram:
                 counts[(min(a, b), max(a, b))] += 1
         return dict(counts)
 
+    def weighted_interactions(self, angle_exponent: float = 0.0) -> dict[tuple[int, int], float]:
+        """Angle-weighted rzz exposure per logical qubit pair (plain counts for exponent 0)."""
+        out: dict[tuple[int, int], float] = {}
+        for g in self.gates:
+            if g.name == "rzz":
+                a, b = g.qubits
+                key = (min(a, b), max(a, b))
+                out[key] = out.get(key, 0.0) + angle_weight(g.params[0], angle_exponent)
+        return out
+
     @property
     def two_qubit_count(self) -> int:
         """Total number of rzz gates."""
         return sum(1 for g in self.gates if g.name == "rzz")
 
-    def weights(self) -> tuple[np.ndarray, np.ndarray]:
+    def weights(self, angle_exponent: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
         """Pair and ion exposure weights used by the assignment solver."""
         wp = np.zeros((self.num_qubits, self.num_qubits))
-        for (a, b), w in self.interaction_weights.items():
+        for (a, b), w in self.weighted_interactions(angle_exponent).items():
             wp[a, b] += w
             wp[b, a] += w
         wi = np.zeros(self.num_qubits)
@@ -159,19 +185,24 @@ class LogicalProgram:
             wi[q] = 1.0
         return wp, wi
 
-    def lightcone(self, qubits: Iterable[int]) -> dict[tuple[int, int], int]:
-        """rzz gate counts per logical pair inside the backward lightcone of the qubits."""
+    def lightcone(self, qubits: Iterable[int], angle_exponent: float = 0.0) -> dict[tuple[int, int], float]:
+        """Angle-weighted rzz exposure per logical pair inside the backward lightcone of the qubits.
+
+        With the default exponent 0 every gate counts as one, so the values are plain gate counts.
+        """
         key = tuple(sorted(set(int(q) for q in qubits)))
-        if key not in self._lightcones:
+        cache_key = (key, float(angle_exponent))
+        if cache_key not in self._lightcones:
             live = set(key)
-            counts: Counter = Counter()
+            counts: dict[tuple[int, int], float] = {}
             for g in reversed(self.gates):
                 if g.name == "rzz" and live.intersection(g.qubits):
                     a, b = g.qubits
-                    counts[(min(a, b), max(a, b))] += 1
+                    k = (min(a, b), max(a, b))
+                    counts[k] = counts.get(k, 0.0) + angle_weight(g.params[0], angle_exponent)
                     live.update(g.qubits)
-            self._lightcones[key] = dict(counts)
-        return self._lightcones[key]
+            self._lightcones[cache_key] = counts
+        return self._lightcones[cache_key]
 
     def observables(self, extra: Iterable[Sequence[int]] = ()) -> tuple[Observable, ...]:
         """Single-qubit Z and interacting-pair ZZ observables, plus optional extras."""
@@ -190,13 +221,29 @@ class LogicalProgram:
             unique.setdefault(o.qubits, o)
         return tuple(unique.values())
 
-    def exposure(self, observable: Observable, assignment: Sequence[int]) -> dict[Resource, float]:
-        """Physical resource exposure of an observable under a logical-to-ion assignment."""
+    def exposure(
+        self, observable: Observable, assignment: Sequence[int], angle_exponent: float = 0.0
+    ) -> dict[Resource, float]:
+        """Upper-bound physical exposure of an observable under an assignment (every lightcone gate counted).
+
+        Used only to predict relative damping for Tier-2 diagnostics; it is not a calibrated sensitivity.
+        """
         out: dict[Resource, float] = {}
-        for (a, b), n in self.lightcone(observable.qubits).items():
+        for (a, b), n in self.lightcone(observable.qubits, angle_exponent).items():
             r = pair(assignment[a], assignment[b])
             out[r] = out.get(r, 0.0) + float(n)
         for q in observable.qubits:
+            r = ion(assignment[q])
+            out[r] = out.get(r, 0.0) + 1.0
+        return out
+
+    def total_exposure(self, assignment: Sequence[int], angle_exponent: float = 0.0) -> dict[Resource, float]:
+        """Exposure of the whole circuit: every rzz gate and every measured ion once."""
+        out: dict[Resource, float] = {}
+        for (a, b), w in self.weighted_interactions(angle_exponent).items():
+            r = pair(assignment[a], assignment[b])
+            out[r] = out.get(r, 0.0) + w
+        for q in self.measured_qubits:
             r = ion(assignment[q])
             out[r] = out.get(r, 0.0) + 1.0
         return out
