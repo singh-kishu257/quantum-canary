@@ -120,7 +120,8 @@ class ScreeningModel:
         used = 0
         for obs in program.observables(extra):
             rows = [
-                (program.exposure(obs, a, gamma), expectation(f, obs.clbits), n) for a, (f, n) in zip(assignments, results)
+                (program.exposure(obs, a, gamma), expectation(f, obs.clbits), n)
+                for a, (f, n) in zip(assignments, results)
             ]
             used += self.add_group(rows, t)
         return used

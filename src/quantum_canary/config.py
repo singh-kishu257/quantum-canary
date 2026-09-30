@@ -18,8 +18,10 @@ class CanaryConfig:
     are paired so that, for an even number of circuits, every clbit is flipped in exactly half of the circuits of an
     assignment. The exploit gets ``exploit_fraction`` of the circuits (rounded to an even number with
     ``measure_twirl``); exploratory assignments share the rest, two circuits each where possible, so some may be
-    dropped (1 / ``assignments_per_batch`` gives the equal split). With ``explore_typical``, Thompson draws for
-    resources without Tier-1 evidence come from the typical population component only, not the outlier mixture.
+    dropped (1 / ``assignments_per_batch`` gives the equal split). ``explore_mode`` 'local' makes each exploratory
+    assignment the exploit with one ion moved or two swapped (at most three used pairs changed, chosen to learn about
+    uncalibrated or suspect pairs); 'thompson' optimises independent posterior draws. With ``explore_typical``, draws
+    for resources without Tier-1 evidence come from the typical population component only, not the outlier mixture.
     A run is trusted if it touches no degraded resource and, with ``trust_requires_vetting``, every pair it uses has
     Tier-1 evidence or a screening suspicion below ``trust_suspicion_z``.
 
@@ -58,6 +60,7 @@ class CanaryConfig:
     assignments_per_batch: int = 4
     twirls_per_assignment: int = 2
     exploit_fraction: float = 0.5
+    explore_mode: str = "local"
     explore_typical: bool = True
     trust_requires_vetting: bool = True
     trust_suspicion_z: float = 2.0
@@ -126,6 +129,8 @@ class CanaryConfig:
             raise ValueError("assignments_per_batch must be >= 1")
         if self.twirls_per_assignment < 1:
             raise ValueError("twirls_per_assignment must be >= 1")
+        if self.explore_mode not in ("local", "thompson"):
+            raise ValueError("explore_mode must be 'local' or 'thompson'")
         if not 0.0 < self.exploit_fraction <= 1.0:
             raise ValueError("exploit_fraction must lie in (0, 1]")
         if not math.isfinite(self.trust_suspicion_z):

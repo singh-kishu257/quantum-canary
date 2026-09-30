@@ -16,14 +16,21 @@ from .resources import Resource, ion, is_pair, pair
 
 
 class BatchDesigner:
-    """One pessimistic (exploit) assignment plus Thompson-sampled (explore) assignments.
+    """One pessimistic (exploit) assignment plus exploratory assignments.
+
+    With ``explore_mode='local'`` each exploratory assignment is the exploit with one ion moved to a free ion or two
+    ions swapped, changing at most three used pairs, so its contrast with the exploit isolates those pairs. Moves are
+    chosen greedily by information: uncalibrated pairs they remove (weighted by 1 + suspicion) or add, each pair
+    counted once per batch, with ties going to the lowest cost under a posterior draw; moves onto degraded pairs or
+    uncalibrated pairs with suspicion of at least ``trust_suspicion_z`` are skipped. With ``'thompson'`` each is the
+    optimum of an independent posterior draw.
 
     Costs are calibrated damping rates: the posterior mean plus ``pessimism`` standard deviations for the exploit
     assignment, and a posterior draw for each exploratory assignment (resources without evidence are drawn from the
     typical population component with ``explore_typical``, else from the population mixture, whose wide outlier
-    component makes exploratory seatings nearly random). Degraded resources carry a large additive penalty. Resources without Tier-1 evidence and a
-    positive screening suspicion z carry ``screen_scale * z`` more in the pessimistic and sampled costs, which only
-    breaks ties among uncalibrated resources.
+    component makes exploratory seatings nearly random). Degraded resources carry a large additive penalty.
+    Resources without Tier-1 evidence and a positive screening suspicion z carry ``screen_scale * z`` more in the
+    pessimistic and sampled costs, which only breaks ties among uncalibrated resources.
     """
 
     def __init__(self, config: CanaryConfig, rng: np.random.Generator) -> None:
@@ -149,8 +156,11 @@ class BatchDesigner:
         iv, pv = self.cost_tables(model, decisions, ions, "pessimistic", now, suspicion)
         base = self.solver.solve(wp, wi, pv, iv)
         add(base)
+        if self.config.explore_mode == "local":
+            for perm in self._local(wp, wi, base, model, decisions, ions, k - 1, now, suspicion):
+                add(perm)
         tries = 0
-        while len(out) < k and tries < 4 * k:
+        while self.config.explore_mode == "thompson" and len(out) < k and tries < 4 * k:
             tries += 1
             iv, pv = self.cost_tables(model, decisions, ions, "sample", now, suspicion)
             add(self.solver.solve(wp, wi, pv, iv))
@@ -159,6 +169,73 @@ class BatchDesigner:
             walk = self._perturb(walk, m)
             add(walk)
         return out
+
+    def _local(
+        self,
+        wp: np.ndarray,
+        wi: np.ndarray,
+        base: np.ndarray,
+        model: HealthModel,
+        decisions: Mapping[Resource, Decision],
+        ions: Sequence[int],
+        count: int,
+        now: float | None,
+        suspicion: Mapping[Resource, float] | None,
+    ) -> list[np.ndarray]:
+        """Up to ``count`` distinct exploit neighbours chosen for information (see the class docstring)."""
+        n, m = base.size, len(ions)
+        suspicion = suspicion or {}
+        vetted = set(model.resources)
+        degraded = {r for r, d in decisions.items() if d.status is Status.DEGRADED}
+        links = [(a, b) for a in range(n) for b in range(a + 1, n) if wp[a, b] > 0]
+
+        def seated(perm: np.ndarray) -> dict[Resource, float]:
+            return {pair(ions[perm[a]], ions[perm[b]]): float(wp[a, b]) for a, b in links}
+
+        old = seated(base)
+        taken = set(base.tolist())
+        neighbours = []
+        for q in range(n):
+            for u in (u for u in range(m) if u not in taken):
+                nb = base.copy()
+                nb[q] = u
+                neighbours.append(nb)
+        for p in range(n):
+            for q in range(p + 1, n):
+                nb = base.copy()
+                nb[p], nb[q] = nb[q], nb[p]
+                neighbours.append(nb)
+        moves = []
+        z_trust = self.config.trust_suspicion_z
+        for nb in neighbours:
+            new = seated(nb)
+            added = {r: w for r, w in new.items() if r not in old}
+            suspect = any(r not in vetted and suspicion.get(r, 0.0) >= z_trust for r in added)
+            if not added or suspect or any(r in degraded for r in added):
+                continue
+            removed = {r: w for r, w in old.items() if r not in new}
+            moves.append((nb, added, removed))
+        if not moves:
+            return []
+        limit = max(3, min(len(a) for _, a, _ in moves))
+        moves = [mv for mv in moves if len(mv[1]) <= limit]
+        covered: set[Resource] = set()
+        chosen: list[np.ndarray] = []
+        while len(chosen) < count and moves:
+            iv, pv = self.cost_tables(model, decisions, ions, "sample", now, suspicion)
+
+            def score(mv: tuple[np.ndarray, dict[Resource, float], dict[Resource, float]]) -> tuple[float, float]:
+                nb, added, removed = mv
+                new = [(r, w) for r, w in removed.items() if r not in vetted and r not in covered]
+                info = sum(w * (1.0 + max(0.0, suspicion.get(r, 0.0))) for r, w in new)
+                info += sum(w for r, w in added.items() if r not in vetted and r not in covered)
+                return info, -AssignmentSolver.cost(wp, wi, pv, iv, nb)
+
+            best = max(moves, key=score)
+            moves = [mv for mv in moves if mv is not best]
+            chosen.append(best[0])
+            covered.update(r for r in list(best[1]) + list(best[2]) if r not in vetted)
+        return chosen
 
     def _perturb(self, perm: np.ndarray, m: int) -> np.ndarray:
         out = perm.copy()
