@@ -366,12 +366,13 @@ class Canary:
         now: float,
         suspicion: dict[Resource, float] | None = None,
     ) -> list[list[tuple[int, int]]]:
-        """Packs of pairs with the largest value of information.
+        """Packs of pairs in priority order: (a) suspects in an exploit seating, (b) other suspects, (c) the rest.
 
-        Every pair among the available ions is a candidate. Its weight is its stake in this batch's designs plus
-        ``coverage_weight * exp(-discounted evidence count)``, so pairs that were never (or not recently) calibrated
-        compete with the pairs the designs use; a pair without Tier-1 evidence and screening suspicion z > 0 has its
-        weight multiplied by 1 + z.
+        A suspect has screening suspicion of at least ``trust_suspicion_z`` and a discounted Tier-1 evidence count
+        below one, so one fresh cycle-benchmarking probe resolves it; suspects are ordered by suspicion. The rest are
+        ordered by value of information: every pair among the available ions is a candidate, with weight equal to its
+        stake in this batch's designs plus ``coverage_weight * exp(-discounted evidence count)`` (times 1 + z for a
+        pair without Tier-1 evidence and suspicion z > 0), so uncalibrated pairs compete with the pairs the designs use.
         """
         cfg = self.config
         budget = int(math.floor(cfg.probe_fraction * n_alg / len(cfg.probe_depths)))
@@ -386,18 +387,24 @@ class Canary:
                 for (u, v), w in weights.items():
                     r = pair(a[u], a[v])
                     stake[r] = stake.get(r, 0.0) + share * w
+        exploit = {pair(d[0][u], d[0][v]) for p, d in zip(programs, designs) if d for u, v in p.interaction_weights}
         scores: dict[Resource, float] = {}
+        tiers: dict[Resource, tuple[int, float]] = {}
         suspicion = suspicion or {}
         ions = self.ions
         for r in (pair(i, j) for a, i in enumerate(ions) for j in ions[a + 1 :]):
             d = self.decisions.get(r)
             if d is not None and d.status is Status.DEGRADED:
                 continue
-            weight = stake.get(r, 0.0) + cfg.coverage_weight * math.exp(-self._evidence_weight(r, now))
-            if weight <= 0.0:
+            evidence = self._evidence_weight(r, now)
+            z = suspicion.get(r, 0.0)
+            suspect = z >= cfg.trust_suspicion_z and evidence < 1.0
+            tiers[r] = ((0 if r in exploit else 1), -z) if suspect else (2, 0.0)
+            weight = stake.get(r, 0.0) + cfg.coverage_weight * math.exp(-evidence)
+            if weight <= 0.0 and not suspect:
                 continue
             if not self.model.evidence(r):
-                weight *= 1.0 + max(0.0, suspicion.get(r, 0.0))
+                weight *= 1.0 + max(0.0, z)
             mean, sd = self.model.estimate(r, now)
             spam = self._spam_factors(r[1], r[2], now)
             noise = cb_variance(max(mean, 0.0), cfg.probe_depths, shots_per, spam, cfg.model_sd)
@@ -405,7 +412,8 @@ class Canary:
             if r[1] in self.flagged_ions or r[2] in self.flagged_ions:
                 gain *= 2.0
             scores[r] = gain
-        return self._pack_ranked(sorted(scores, key=lambda r: (-scores[r], to_key(r))), budget, cost, now)
+        ranked = sorted(scores, key=lambda r: (tiers[r], -scores[r], to_key(r)))
+        return self._pack_ranked(ranked, budget, cost, now)
 
     def _pack_ranked(
         self, ranked: Sequence[Resource], budget: int, cost: float, now: float

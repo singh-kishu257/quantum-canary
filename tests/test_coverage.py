@@ -78,3 +78,19 @@ def test_sweep_probes_every_pair_once(n):
             counts = Counter(p for pack in packs for p in pack)
             assert set(counts) == all_pairs and set(counts.values()) == {1}
         assert all(len(canary.model.evidence(pair(*p))) == call for p in all_pairs)
+
+
+def test_probe_priority_puts_exploit_suspects_first():
+    from quantum_canary import LogicalProgram
+    from quantum_canary.resources import pair_damping
+
+    ex = BackendExecutor(aer.AerSimulator(seed_simulator=1), ions=range(10))
+    canary = Canary(ex, CanaryConfig(seed=1, probe_pack=4), clock=lambda: 0.0)
+    canary.model.update(pair(4, 5), pair_damping(0.004), 1e-6, t=0.0)
+    program = LogicalProgram.from_circuit(_chain())
+    designs = [[(0, 1, 2, 3, 4, 5), (0, 1, 2, 3, 4, 8)]]
+    suspicion = {pair(4, 5): 9.0, pair(2, 3): 3.0, pair(6, 7): 5.0, pair(7, 9): 4.0, pair(0, 1): 1.0}
+    packs = canary._select_probes([program], designs, 8, 200, 0.0, suspicion)
+    assert len(packs) == 1
+    assert packs[0][:2] == [(2, 3), (6, 7)]
+    assert (4, 5) not in packs[0] and (7, 9) not in packs[0]
