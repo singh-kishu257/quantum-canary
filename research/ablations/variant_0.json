@@ -350,6 +350,54 @@
     "degraded": 0,
     "undecided": 0
    }
+  },
+  {
+   "session": 7,
+   "ions": [
+    1,
+    2,
+    4,
+    11,
+    14,
+    15,
+    19,
+    23,
+    24,
+    27,
+    29,
+    31
+   ],
+   "total_shots": 15000,
+   "cal_fraction": 0.3333333333333333,
+   "worst_pair_err": 0.033249656249801,
+   "pairs_over_1pct": 5,
+   "Q_identity": 0.31778534846916123,
+   "Q_random": 0.26088364388408536,
+   "Q_final": 0.3763118785009177,
+   "degraded": [],
+   "F::identity (raw native)": 0.8146863170880511,
+   "R::identity (raw native)": 0.13041239600341253,
+   "F::random map (raw native)": 0.8516150557924328,
+   "R::random map (raw native)": 0.10562226626798095,
+   "F::debias-style avg (25 maps)": 0.8093688363339587,
+   "R::debias-style avg (25 maps)": 0.12982878262350814,
+   "F::hardened only (twirl, identity map)": 0.8176771290142296,
+   "R::hardened only (twirl, identity map)": 0.12771476946293128,
+   "F::Canary delivered (all batches)": 0.793599924580344,
+   "R::Canary delivered (all batches)": 0.14108085079574736,
+   "F::Canary last 2 batches": 0.7660424236086062,
+   "R::Canary last 2 batches": 0.16067288610574615,
+   "F::Canary final map (deployed)": 0.7875369760542302,
+   "R::Canary final map (deployed)": 0.1470468880965468,
+   "cal_fraction_actual": 0.3333333333333333,
+   "shots_spent": 15000,
+   "pairs_measured": 5,
+   "untrusted_batches": 0,
+   "verdicts": {
+    "healthy": 15,
+    "degraded": 0,
+    "undecided": 2
+   }
   }
  ]
 }
