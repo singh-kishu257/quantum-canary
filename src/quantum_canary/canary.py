@@ -106,6 +106,22 @@ def _first_fit(pairs: Iterable[tuple[int, int]], size: int) -> list[list[tuple[i
     return packs
 
 
+def _round_robin(ions: Sequence[int]) -> list[list[tuple[int, int]]]:
+    """Rounds of disjoint pairs that together cover every pair once (circle method, one ion resting if odd)."""
+    players: list[int | None] = [int(i) for i in ions] + ([None] if len(ions) % 2 else [])
+    n = len(players)
+    rounds = []
+    for _ in range(n - 1):
+        pairs = []
+        for k in range(n // 2):
+            a, b = players[k], players[n - 1 - k]
+            if a is not None and b is not None:
+                pairs.append((min(a, b), max(a, b)))
+        rounds.append(pairs)
+        players = [players[0], players[-1]] + players[1:-1]
+    return rounds
+
+
 def _proper_split(clbits: Sequence[int], rng: np.random.Generator) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Complementary flip sets that are both non-empty, so neither circuit is gate-free."""
     order = sorted(int(c) for c in clbits)
@@ -303,6 +319,11 @@ class Canary:
         sb = max(self.model.estimate(ion(b), now)[0], 0.0)
         return math.exp(-sa), math.exp(-sb), math.exp(-sa - sb)
 
+    def _evidence_weight(self, r: Resource, now: float) -> float:
+        """Discounted number of Tier-1 observations of a resource (each weighted 2^(-age / half_life))."""
+        half_life = self.config.half_life_s
+        return sum(0.5 ** ((now - o.t) / half_life) for o in self.model.evidence(r) if o.t <= now)
+
     def _select_probes(
         self,
         programs: Sequence[LogicalProgram],
@@ -311,6 +332,12 @@ class Canary:
         shots_per: int,
         now: float,
     ) -> list[list[tuple[int, int]]]:
+        """Packs of pairs with the largest value of information.
+
+        Every pair among the available ions is a candidate. Its weight is its stake in this batch's designs plus
+        ``coverage_weight * exp(-discounted evidence count)``, so pairs that were never (or not recently) calibrated
+        compete with the pairs the designs use.
+        """
         cfg = self.config
         budget = int(math.floor(cfg.probe_fraction * n_alg / len(cfg.probe_depths)))
         if budget <= 0:
@@ -325,14 +352,18 @@ class Canary:
                     r = pair(a[u], a[v])
                     stake[r] = stake.get(r, 0.0) + share * w
         scores: dict[Resource, float] = {}
-        for r, s in stake.items():
+        ions = self.ions
+        for r in (pair(i, j) for a, i in enumerate(ions) for j in ions[a + 1 :]):
             d = self.decisions.get(r)
             if d is not None and d.status is Status.DEGRADED:
+                continue
+            weight = stake.get(r, 0.0) + cfg.coverage_weight * math.exp(-self._evidence_weight(r, now))
+            if weight <= 0.0:
                 continue
             mean, sd = self.model.estimate(r, now)
             spam = self._spam_factors(r[1], r[2], now)
             noise = cb_variance(max(mean, 0.0), cfg.probe_depths, shots_per, spam, cfg.model_sd)
-            gain = s * sd**4 / (sd**2 + noise)
+            gain = weight * sd**4 / (sd**2 + noise)
             if r[1] in self.flagged_ions or r[2] in self.flagged_ions:
                 gain *= 2.0
             scores[r] = gain
@@ -651,6 +682,19 @@ class Canary:
         if any(i == j or i not in allowed or j not in allowed for i, j in todo):
             raise ValueError("probe pairs must be distinct available ions")
         return self._probe_packs(_first_fit(todo, self.config.probe_pack), int(shots), bases)
+
+    def sweep(self, shots: int, bases: int = 1) -> list[ProbeRun]:
+        """Warm start: cycle-benchmark every pair among the available ions once, in one job.
+
+        The pairs of a round-robin 1-factorization (n - 1 rounds of n / 2 disjoint pairs for n ions, a resting ion
+        per round when n is odd) are packed first fit into circuits of up to ``probe_pack`` disjoint pairs. The job
+        has ``bases * len(probe_depths)`` circuits per pack plus two SPAM circuits (if ``spam_probe``), each with
+        ``shots`` shots, and every ion spends ``(n - 1) * bases * len(probe_depths) * shots`` probe tokens. For 12
+        ions and the defaults there are 17 packs: 36 circuits, 9,000 shots at ``shots=250``. Never called
+        automatically.
+        """
+        pairs = [p for rnd in _round_robin(self.ions) for p in rnd]
+        return self._probe_packs(_first_fit(pairs, self.config.probe_pack), int(shots), bases)
 
     def _probe_packs(self, packs: Sequence[Sequence[tuple[int, int]]], shots: int, bases: int | None) -> list[ProbeRun]:
         todo = [p for pack in packs for p in pack]

@@ -19,7 +19,10 @@ class CanaryConfig:
 
     Calibration (Tier-1): ``probe_fraction`` of the algorithm circuit count is spent on cycle-benchmarking
     probes (one circuit per depth in ``probe_depths``, each holding up to ``probe_pack`` disjoint ion pairs whose
-    CB sequences run side by side; 1 probes one pair per circuit); ``spam_probe`` adds two
+    CB sequences run side by side; 1 probes one pair per circuit). Every pair among the available ions is a
+    probe candidate, scored by its value of information with weight = stake in the batch's designs +
+    ``coverage_weight`` * exp(-discounted number of Tier-1 observations); 0 restricts probes to the pairs the
+    designs use. ``spam_probe`` adds two
     SPAM circuits per batch that cover every available ion; ``phase_probe_fraction`` spends circuits on coherent ZZ
     phase probes (four per pair and angle). Setting ``probe_fraction`` to 0 disables all automatic calibration.
 
@@ -71,6 +74,7 @@ class CanaryConfig:
     probe_fraction: float = 0.25
     probe_bases: int = 3
     probe_pack: int = 4
+    coverage_weight: float = 1.0
     max_probe_shots_per_ion: int = 5000
     spam_probe: bool = True
 
@@ -144,6 +148,8 @@ class CanaryConfig:
             raise ValueError("probe_bases must lie in [1, 9]")
         if self.probe_pack < 1:
             raise ValueError("probe_pack must be >= 1")
+        if not math.isfinite(self.coverage_weight) or self.coverage_weight < 0:
+            raise ValueError("coverage_weight must be a non-negative number")
         if self.max_probe_shots_per_ion < 0:
             raise ValueError("max_probe_shots_per_ion must be non-negative")
         if not 0.0 <= self.phase_probe_fraction <= 1.0:
