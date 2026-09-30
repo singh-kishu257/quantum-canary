@@ -13,9 +13,15 @@ _TWIRL_MODES = ("rc", "commutant", "none")
 class CanaryConfig:
     """Tunable parameters of the Canary control loop.
 
-    Batch design: ``assignments_per_batch`` assignments (one pessimistic exploit, the rest Thompson-sampled),
-    each run as ``twirls_per_assignment`` independently twirled circuits whose measurement twirls are paired
-    so that, for an even number of circuits, every clbit is flipped in exactly half of the circuits of an assignment.
+    Batch design: up to ``assignments_per_batch`` assignments (one pessimistic exploit, the rest Thompson-sampled)
+    share ``assignments_per_batch * twirls_per_assignment`` independently twirled circuits whose measurement twirls
+    are paired so that, for an even number of circuits, every clbit is flipped in exactly half of the circuits of an
+    assignment. The exploit gets ``exploit_fraction`` of the circuits (rounded to an even number with
+    ``measure_twirl``); exploratory assignments share the rest, two circuits each where possible, so some may be
+    dropped (1 / ``assignments_per_batch`` gives the equal split). With ``explore_typical``, Thompson draws for
+    resources without Tier-1 evidence come from the typical population component only, not the outlier mixture.
+    A run is trusted if it touches no degraded resource and, with ``trust_requires_vetting``, every pair it uses has
+    Tier-1 evidence or a screening suspicion below ``trust_suspicion_z``.
 
     Calibration (Tier-1): ``probe_fraction`` of the algorithm circuit count is spent on cycle-benchmarking
     probes (one circuit per depth in ``probe_depths``, each holding up to ``probe_pack`` disjoint ion pairs whose
@@ -51,6 +57,10 @@ class CanaryConfig:
 
     assignments_per_batch: int = 4
     twirls_per_assignment: int = 2
+    exploit_fraction: float = 0.5
+    explore_typical: bool = True
+    trust_requires_vetting: bool = True
+    trust_suspicion_z: float = 2.0
     twirl: str = "rc"
     measure_twirl: bool = True
     optimization_level: int = 1
@@ -116,6 +126,10 @@ class CanaryConfig:
             raise ValueError("assignments_per_batch must be >= 1")
         if self.twirls_per_assignment < 1:
             raise ValueError("twirls_per_assignment must be >= 1")
+        if not 0.0 < self.exploit_fraction <= 1.0:
+            raise ValueError("exploit_fraction must lie in (0, 1]")
+        if not math.isfinite(self.trust_suspicion_z):
+            raise ValueError("trust_suspicion_z must be finite")
         if self.twirl not in _TWIRL_MODES:
             raise ValueError(f"twirl must be one of {_TWIRL_MODES}")
         if self.optimization_level not in (0, 1, 2, 3):

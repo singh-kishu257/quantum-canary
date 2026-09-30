@@ -20,7 +20,8 @@ class BatchDesigner:
 
     Costs are calibrated damping rates: the posterior mean plus ``pessimism`` standard deviations for the exploit
     assignment, and a posterior draw for each exploratory assignment (resources without evidence are drawn from the
-    population mixture). Degraded resources carry a large additive penalty. Resources without Tier-1 evidence and a
+    typical population component with ``explore_typical``, else from the population mixture, whose wide outlier
+    component makes exploratory seatings nearly random). Degraded resources carry a large additive penalty. Resources without Tier-1 evidence and a
     positive screening suspicion z carry ``screen_scale * z`` more in the pessimistic and sampled costs, which only
     breaks ties among uncalibrated resources.
     """
@@ -48,8 +49,12 @@ class BatchDesigner:
         im, isd = model.prior(ion(0))
         pm, psd = model.prior(pair(0, 1))
         if mode == "sample":
-            iv = model.sample_prior("ion", self.rng, m)
-            pv = model.sample_prior("pair", self.rng, (m, m))
+            if self.config.explore_typical:
+                iv = self.rng.normal(*model.typical("ion"), m)
+                pv = self.rng.normal(*model.typical("pair"), (m, m))
+            else:
+                iv = model.sample_prior("ion", self.rng, m)
+                pv = model.sample_prior("pair", self.rng, (m, m))
             pv = np.triu(pv, 1)
             pv = pv + pv.T
             known = model.sample(self.rng, now)

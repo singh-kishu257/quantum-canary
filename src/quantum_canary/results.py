@@ -232,15 +232,17 @@ class BatchResult:
     tier2: dict[tuple[int, ...], Tier2Fit] = field(default_factory=dict)
 
     def _selected(self, trusted_only: bool) -> list[AssignmentRun]:
-        runs = [r for r in self.runs if r.trusted] if trusted_only else list(self.runs)
-        return runs if runs else list(self.runs)
+        if not trusted_only:
+            return list(self.runs)
+        runs = [r for r in self.runs if r.trusted]
+        return runs if runs else self.runs[:1]
 
     def frequencies(self, trusted_only: bool = True) -> dict[str, float]:
-        """Shot-weighted frequencies over trusted runs (all runs if none are trusted)."""
+        """Shot-weighted frequencies over trusted runs (the exploit run if none is trusted), or over all runs."""
         return merge_frequencies([(r.frequencies, r.shots) for r in self._selected(trusted_only)])
 
     def counts(self, trusted_only: bool = True) -> dict[str, float]:
-        """Aggregated counts over trusted runs (all runs if none are trusted)."""
+        """Aggregated counts over trusted runs (the exploit run if none is trusted), or over all runs."""
         total = sum(r.shots for r in self._selected(trusted_only))
         return {k: v * total for k, v in self.frequencies(trusted_only).items()}
 

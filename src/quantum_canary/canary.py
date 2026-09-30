@@ -2,9 +2,9 @@
 
 Every batch is one job containing
 
-* algorithm circuits: the user's circuit under ``assignments_per_batch`` logical-to-ion assignments (one pessimistic
-  exploit choice, the rest Thompson-sampled), each compiled ``twirls_per_assignment`` times with independent
-  randomized-compiling frames and paired complementary measurement twirls; and
+* algorithm circuits: the user's circuit under up to ``assignments_per_batch`` logical-to-ion assignments (one
+  pessimistic exploit choice with ``exploit_fraction`` of the circuits, the rest Thompson-sampled), each circuit
+  compiled with independent randomized-compiling frames and paired complementary measurement twirls; and
 * Tier-1 calibration circuits: cycle-benchmarking probes of the ion pairs whose calibration would most reduce the
   uncertainty of the batch's assignment costs, a SPAM probe of every available ion, and optional ZZ phase probes.
 
@@ -437,6 +437,26 @@ class Canary:
                 break
         return chosen
 
+    def _allocation(self, slots: int, k: int) -> list[int]:
+        """Algorithm circuits per assignment: ``exploit_fraction`` of ``slots`` to the exploit, the rest shared.
+
+        Counts are multiples of two with ``measure_twirl`` where possible, so complementary readout flips stay paired.
+        """
+        unit = 2 if self.config.measure_twirl else 1
+        exploit = min(slots, max(unit, unit * round(self.config.exploit_fraction * slots / unit)))
+        rest = slots - exploit
+        if rest < unit:
+            unit = 1
+        counts = [exploit] + [unit] * min(max(k - 1, 0), rest // unit)
+        rest -= unit * (len(counts) - 1)
+        i = 0
+        while rest >= unit and len(counts) > 1:
+            counts[1 + i % (len(counts) - 1)] += unit
+            rest -= unit
+            i += 1
+        counts[0] += rest
+        return counts
+
     def _build_batch(
         self, programs: Sequence[LogicalProgram], shots: int, now: float
     ) -> tuple[list[list[tuple[int, ...]]], list[_Job], int, list[tuple[int, int]], list[tuple[int, int]]]:
@@ -446,16 +466,14 @@ class Canary:
         if self.executor.max_shots is not None and shots_per > self.executor.max_shots:
             raise ValueError(f"{shots_per} shots per circuit exceeds the backend limit")
         suspicion = self._suspicion(now)
-        designs = [
-            self.designer.design(p, self.model, self.decisions, self.ions, cfg.assignments_per_batch, now, suspicion)
-            for p in programs
-        ]
+        k = len(self._allocation(slots, cfg.assignments_per_batch))
+        designs = [self.designer.design(p, self.model, self.decisions, self.ions, k, now, suspicion) for p in programs]
         offset = self._angle_offset(now)
         jobs: list[_Job] = []
         for pi, (prog, design) in enumerate(zip(programs, designs)):
-            reps = math.ceil(slots / len(design))
+            counts = self._allocation(slots, len(design))
             clbits = [c for _, c in prog.measurements]
-            for ai, assignment in enumerate(design):
+            for ai, (assignment, reps) in enumerate(zip(design, counts)):
                 flip_sets = _flip_sets(clbits, reps, self.rng) if cfg.measure_twirl else [()] * reps
                 for t in range(reps):
                     comp = compile_twirled(
@@ -530,6 +548,15 @@ class Canary:
             self.model.refresh_population(now)
         self.model.prune(now)
         self.decisions = self.tester.decide(self.model, self.family_size, now)
+
+    def _trusted(self, used: set[Resource], degraded: set[Resource], suspicion: dict[Resource, float]) -> bool:
+        """No degraded resource, and (with ``trust_requires_vetting``) every pair vetted or not suspicious."""
+        if used & degraded:
+            return False
+        if not self.config.trust_requires_vetting:
+            return True
+        z = self.config.trust_suspicion_z
+        return all(self.model.evidence(r) or suspicion.get(r, 0.0) < z for r in used if r[0] == "pair")
 
     def _predicted_damping(self, exposure: dict[Resource, float], now: float) -> float:
         return float(sum(w * self.model.estimate(r, now)[0] for r, w in exposure.items()))
@@ -674,7 +701,7 @@ class Canary:
             runs = []
             for ai, assignment in enumerate(design):
                 f, n = merged[(pi, ai)]
-                trusted = not (prog.used_resources(assignment) & degraded)
+                trusted = self._trusted(prog.used_resources(assignment), degraded, suspicion)
                 damping = self._predicted_damping(prog.total_exposure(assignment, gamma), now)
                 runs.append(AssignmentRun(assignment, f, n, trusted, 1.0 - math.exp(-damping)))
             results.append(
