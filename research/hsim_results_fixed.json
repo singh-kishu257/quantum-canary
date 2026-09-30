@@ -1,0 +1,108 @@
+{
+ "args": {
+  "sessions": 20,
+  "ions": 12,
+  "batches": 5,
+  "shots": 2000,
+  "over_sd": 0.002,
+  "circuit": "HSIMN08V01",
+  "out": "research/hsim_results_fixed.json",
+  "forte_dir": "/tmp/forte",
+  "config": "{}",
+  "no_extra": false,
+  "uniform_pair_error": null,
+  "sweep_shots": 250,
+  "maps": 100
+ },
+ "rows": [
+  {
+   "session": 0,
+   "ions": [
+    5,
+    8,
+    9,
+    10,
+    12,
+    13,
+    14,
+    18,
+    20,
+    26,
+    30,
+    31
+   ],
+   "total_shots": 15000,
+   "cal_fraction": 0.3333333333333333,
+   "worst_pair_err": 0.03335952914145272,
+   "pairs_over_1pct": 5,
+   "Q_identity": 0.3379243724006786,
+   "Q_random": 0.454118012386899,
+   "Q_final": 0.2658528674387458,
+   "degraded": [
+    "pair:10:11"
+   ],
+   "F::identity (raw native)": 0.8047161828684695,
+   "R::identity (raw native)": 0.13408985597413206,
+   "F::random map (raw native)": 0.7599575065755695,
+   "R::random map (raw native)": 0.17942342170364783,
+   "F::debias-style avg (25 maps)": 0.8203609068620967,
+   "R::debias-style avg (25 maps)": 0.12779585835414894,
+   "F::hardened only (twirl, identity map)": 0.8103038901915401,
+   "R::hardened only (twirl, identity map)": 0.13136574391646072,
+   "F::Canary delivered (all batches)": 0.8254217847980823,
+   "R::Canary delivered (all batches)": 0.12130401817267786,
+   "F::Canary last 2 batches": 0.8313261732813575,
+   "R::Canary last 2 batches": 0.11996788005614639,
+   "F::Canary final map (deployed)": 0.8399548020414016,
+   "R::Canary final map (deployed)": 0.10857702488481652,
+   "F::Canary + sweep delivered (all batches)": 0.867784291921274,
+   "R::Canary + sweep delivered (all batches)": 0.0953037123503815,
+   "F::Canary + sweep final map (deployed)": 0.8566227755924929,
+   "R::Canary + sweep final map (deployed)": 0.09729693534474779,
+   "F::Canary final map (raw native)": 0.8438856813506072,
+   "R::Canary final map (raw native)": 0.10590446569067277,
+   "F::oracle map": 0.8904468286263689,
+   "R::oracle map": 0.07959794951783272,
+   "F::oracle map (deployed)": 0.8900401010451863,
+   "R::oracle map (deployed)": 0.07970603265487455,
+   "F::random map (mean of 100)": 0.8054580625158523,
+   "R::random map (mean of 100)": 0.13669474399599577,
+   "F::perfect screening >2% (mean of 100)": 0.8273948926784249,
+   "R::perfect screening >2% (mean of 100)": 0.12105639466867972,
+   "F::perfect screening >1% (mean of 100)": 0.8403476702191489,
+   "R::perfect screening >1% (mean of 100)": 0.11262110052388791,
+   "cal_fraction_actual": 0.3333333333333333,
+   "shots_spent": 15000,
+   "pairs_measured": 20,
+   "untrusted_batches": 0,
+   "verdicts": {
+    "healthy": 29,
+    "degraded": 1,
+    "undecided": 2
+   },
+   "sweep_shots": 9000,
+   "total_shots_sweep": 23500,
+   "cal_fraction_sweep": 0.574468085106383,
+   "cal_fraction_sweep_batches": 0.3103448275862069,
+   "pairs_measured_sweep": 66,
+   "Q_final_sweep": 0.22613477833964093,
+   "Q_oracle": 0.16243258498096036,
+   "maps::random map (mean of 100)": [
+    100,
+    100
+   ],
+   "Q::random map (mean of 100)": 0.3414066387101017,
+   "maps::perfect screening >2% (mean of 100)": [
+    100,
+    127
+   ],
+   "Q::perfect screening >2% (mean of 100)": 0.2945229161219378,
+   "maps::perfect screening >1% (mean of 100)": [
+    100,
+    193
+   ],
+   "Q::perfect screening >1% (mean of 100)": 0.26987822647062276,
+   "dilution_factor": 1.0
+  }
+ ]
+}
