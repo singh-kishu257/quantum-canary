@@ -56,8 +56,8 @@ class CanaryConfig:
     1 + z. The default 0.0018 is pair_damping(0.005) / 3, so a 3-sigma suspicion adds about the prior mean damping of
     a pair. With ``screen_calibration`` each program's screening estimates are rescaled by a dilution factor fitted
     to the pairs that also have Tier-1 estimates (at least three); for pairs without Tier-1 evidence the rescaled value
-    is combined with the population mixture as a Gaussian reading and replaces the prior (and the suspicion penalty)
-    in placement costs.
+    is combined with the population mixture as a Gaussian reading and replaces the prior in placement costs (the
+    suspicion penalty still applies).
     """
 
     assignments_per_batch: int = 4

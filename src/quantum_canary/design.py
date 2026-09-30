@@ -31,9 +31,10 @@ class BatchDesigner:
     component makes exploratory seatings nearly random). Degraded resources carry a large additive penalty.
     Resources without Tier-1 evidence and a positive screening suspicion z carry ``screen_scale * z`` more in the
     pessimistic and sampled costs, which only breaks ties among uncalibrated resources. Pairs without Tier-1 evidence
-    that have a dilution-calibrated screening estimate instead use the population mixture updated with that estimate
-    as a Gaussian reading (moment-matched mean plus ``pessimism`` sd; draws come from the more probable component
-    with ``explore_typical``). None of this reaches the health model.
+    that have a dilution-calibrated screening estimate start from the population mixture updated with that estimate
+    as a Gaussian reading instead of the prior (moment-matched mean plus ``pessimism`` sd; draws come from the more
+    probable component with ``explore_typical``); the suspicion penalty still applies, since a poorly determined
+    dilution factor leaves the reading vague. None of this reaches the health model.
     """
 
     def __init__(self, config: CanaryConfig, rng: np.random.Generator) -> None:
@@ -90,7 +91,7 @@ class BatchDesigner:
         if suspicion and mode != "mean":
             scale = self.config.screen_scale
             for r, z in suspicion.items():
-                if z <= 0.0 or r in known or r in screened:
+                if z <= 0.0 or r in known:
                     continue
                 if is_pair(r):
                     a, b = pos.get(r[1]), pos.get(r[2])
