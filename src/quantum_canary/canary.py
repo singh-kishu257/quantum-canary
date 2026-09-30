@@ -35,7 +35,7 @@ from .probes import (
     Observation,
     bonferroni_z,
     cb_estimate,
-    cb_probe_program,
+    cb_packed_program,
     cb_variance,
     phase_estimate,
     phase_probe_program,
@@ -53,6 +53,7 @@ from .results import (
     Tier2Fit,
     chi2_sf,
     expectation,
+    marginal_frequencies,
     merge_frequencies,
     normalize_counts,
 )
@@ -74,6 +75,7 @@ class _Job:
     angle: float = 0.0
     setting: str = ""
     group: int = -1
+    parts: tuple[tuple[tuple[int, int], tuple[int, int]], ...] = ()
 
 
 def _flip_sets(clbits: Sequence[int], count: int, rng: np.random.Generator) -> list[tuple[int, ...]]:
@@ -86,6 +88,22 @@ def _flip_sets(clbits: Sequence[int], count: int, rng: np.random.Generator) -> l
         if len(out) < count:
             out.append(tuple(c for c, b in zip(bits_order, bits) if not b))
     return out
+
+
+def _first_fit(pairs: Iterable[tuple[int, int]], size: int) -> list[list[tuple[int, int]]]:
+    """Pack pairs, in order, into the first pack with room whose ions are disjoint from theirs."""
+    packs: list[list[tuple[int, int]]] = []
+    used: list[set[int]] = []
+    for i, j in pairs:
+        for pack, ions_used in zip(packs, used):
+            if len(pack) < size and i not in ions_used and j not in ions_used:
+                pack.append((i, j))
+                ions_used.update((i, j))
+                break
+        else:
+            packs.append([(i, j)])
+            used.append({i, j})
+    return packs
 
 
 def _proper_split(clbits: Sequence[int], rng: np.random.Generator) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -214,23 +232,38 @@ class Canary:
         picks = self.rng.choice(len(BASIS_PAIRS), size=min(int(k), len(BASIS_PAIRS)), replace=False)
         return [BASIS_PAIRS[int(p)] for p in picks]
 
-    def _cb_jobs(self, ions_ij: tuple[int, int], bases_list: Iterable[tuple[str, str]], offset: AngleOffset | None) -> list[_Job]:
+    def _cb_jobs(
+        self,
+        pack: Sequence[tuple[int, int]],
+        bases_list: Iterable[Sequence[tuple[str, str]]],
+        offset: AngleOffset | None,
+    ) -> list[_Job]:
+        """CB circuits of disjoint pairs packed into one circuit per depth; one group per entry of ``bases_list``."""
+        ions_all = tuple(int(i) for p in pack for i in p)
+        if len(set(ions_all)) != len(ions_all):
+            raise ValueError("packed probe pairs must not share ions")
+        parts = tuple(((int(i), int(j)), (2 * k, 2 * k + 1)) for k, (i, j) in enumerate(pack))
         jobs = []
-        for bases in bases_list:
+        for pair_bases in bases_list:
             group = self._next_group()
-            flips = tuple(c for c in (0, 1) if self.rng.random() < 0.5)
-            frame = (float(self.rng.uniform(0.0, 2.0 * math.pi)), float(self.rng.uniform(0.0, 2.0 * math.pi)))
+            flips: list[int] = []
+            frames = []
+            for k in range(len(pack)):
+                flips += [c for c in (2 * k, 2 * k + 1) if self.rng.random() < 0.5]
+                frames.append((float(self.rng.uniform(0.0, 2.0 * math.pi)), float(self.rng.uniform(0.0, 2.0 * math.pi))))
+            label = "_".join(f"{i}_{j}_{b[0]}{b[1]}" for (i, j), b in zip(pack, pair_bases))
+            bases_all = tuple(x for b in pair_bases for x in b)
             for depth in self.config.probe_depths:
                 comp = compile_twirled(
-                    cb_probe_program(bases, depth, frame),
-                    ions_ij,
+                    cb_packed_program(pair_bases, depth, frames),
+                    ions_all,
                     self.rng,
                     "rc",
-                    flips,
+                    tuple(flips),
                     offset,
-                    f"canary_cb_{ions_ij[0]}_{ions_ij[1]}_{bases[0]}{bases[1]}_{depth}",
+                    f"canary_cb_{label}_{depth}",
                 )
-                jobs.append(_Job("cb", comp, ions=ions_ij, bases=bases, depth=depth, group=group))
+                jobs.append(_Job("cb", comp, ions=ions_all, bases=bases_all, depth=depth, group=group, parts=parts))
         return jobs
 
     def _spam_ions(self, used: Iterable[int]) -> tuple[int, ...]:
@@ -277,7 +310,7 @@ class Canary:
         n_alg: int,
         shots_per: int,
         now: float,
-    ) -> list[tuple[int, int]]:
+    ) -> list[list[tuple[int, int]]]:
         cfg = self.config
         budget = int(math.floor(cfg.probe_fraction * n_alg / len(cfg.probe_depths)))
         if budget <= 0:
@@ -303,15 +336,33 @@ class Canary:
             if r[1] in self.flagged_ions or r[2] in self.flagged_ions:
                 gain *= 2.0
             scores[r] = gain
-        chosen: list[tuple[int, int]] = []
-        for r in sorted(scores, key=lambda r: (-scores[r], to_key(r))):
-            i, j = int(r[1]), int(r[2])
-            if min(self._available(i, now), self._available(j, now)) < cost:
-                continue
-            chosen.append((i, j))
-            if len(chosen) >= budget:
+        return self._pack_ranked(sorted(scores, key=lambda r: (-scores[r], to_key(r))), budget, cost, now)
+
+    def _pack_ranked(self, ranked: Sequence[Resource], budget: int, cost: float, now: float) -> list[list[tuple[int, int]]]:
+        """Fill up to ``budget`` packs of ``probe_pack`` disjoint pairs, best first, within each ion's token budget."""
+        committed: dict[int, float] = {}
+        remaining = list(ranked)
+        packs: list[list[tuple[int, int]]] = []
+        while remaining and len(packs) < budget:
+            pack: list[tuple[int, int]] = []
+            in_pack: set[int] = set()
+            rest = []
+            for r in remaining:
+                i, j = int(r[1]), int(r[2])
+                if len(pack) >= self.config.probe_pack or i in in_pack or j in in_pack:
+                    rest.append(r)
+                    continue
+                if min(self._available(x, now) - committed.get(x, 0.0) for x in (i, j)) < cost:
+                    continue
+                pack.append((i, j))
+                in_pack.update((i, j))
+                committed[i] = committed.get(i, 0.0) + cost
+                committed[j] = committed.get(j, 0.0) + cost
+            if not pack:
                 break
-        return chosen
+            packs.append(pack)
+            remaining = rest
+        return packs
 
     def _select_phase_pairs(
         self, designs: Sequence[Sequence[tuple[int, ...]]], programs: Sequence[LogicalProgram], n_alg: int, shots_per: int, now: float
@@ -366,9 +417,9 @@ class Canary:
         probe_pairs: list[tuple[int, int]] = []
         phase_pairs: list[tuple[int, int]] = []
         if cfg.probe_fraction > 0:
-            probe_pairs = self._select_probes(programs, designs, n_alg, shots_per, now)
-            for ions_ij in probe_pairs:
-                jobs.extend(self._cb_jobs(ions_ij, self._random_bases(1), offset))
+            for pack in self._select_probes(programs, designs, n_alg, shots_per, now):
+                jobs.extend(self._cb_jobs(pack, [[self._random_bases(1)[0] for _ in pack]], offset))
+                probe_pairs.extend(pack)
             if cfg.spam_probe:
                 jobs.extend(self._spam_jobs(self._spam_ions(self.ions)))
             phase_pairs = self._select_phase_pairs(designs, programs, n_alg, shots_per, now)
@@ -381,7 +432,7 @@ class Canary:
     def _learn_calibration(self, jobs: Sequence[_Job], freqs: Sequence[dict[str, float]], shots: int, now: float) -> list[ProbeRun]:
         cfg = self.config
         runs: list[ProbeRun] = []
-        cb: dict[int, tuple[tuple[int, ...], list[tuple[int, dict[str, float], float]]]] = {}
+        cb: dict[tuple[int, tuple[int, int]], list[tuple[int, dict[str, float], float]]] = {}
         spam: dict[int, tuple[tuple[int, ...], list[dict[str, float]]]] = {}
         phase: dict[int, tuple[tuple[int, ...], float, dict[str, list[dict[str, float]]]]] = {}
         for job, f in zip(jobs, freqs):
@@ -389,13 +440,15 @@ class Canary:
                 continue
             runs.append(ProbeRun(job.ions, job.depth, f, shots, job.kind, job.bases, job.setting, job.angle))
             if job.kind == "cb":
-                cb.setdefault(job.group, (job.ions, []))[1].append((job.depth, f, float(shots)))
+                for ions_ij, clbits in job.parts:
+                    marginal = marginal_frequencies(f, clbits)
+                    cb.setdefault((job.group, ions_ij), []).append((job.depth, marginal, float(shots)))
             elif job.kind == "spam":
                 spam.setdefault(job.group, (job.ions, []))[1].append(f)
             elif job.kind == "phase":
                 phase.setdefault(job.group, (job.ions, job.angle, {}))[2].setdefault(job.setting, []).append(f)
         per_pair: dict[Resource, list[float]] = {}
-        for ions_ij, parts in cb.values():
+        for (_, ions_ij), parts in cb.items():
             est = cb_estimate(parts)
             if est is not None:
                 per_pair.setdefault(pair(*ions_ij), []).append(est)
@@ -587,18 +640,26 @@ class Canary:
         return results
 
     def probe(self, pairs: Iterable[tuple[int, int]], shots: int, bases: int | None = None) -> list[ProbeRun]:
-        """Cycle-benchmark explicit ion pairs (``bases`` random basis pairs each, shots per circuit)."""
+        """Cycle-benchmark explicit ion pairs (``bases`` random basis pairs each, shots per circuit).
+
+        Pairs are packed in the given order, first fit, into circuits of up to ``probe_pack`` disjoint pairs.
+        """
         allowed = set(self.ions)
         todo = [(min(i, j), max(i, j)) for i, j in pairs]
         if not todo:
             return []
         if any(i == j or i not in allowed or j not in allowed for i, j in todo):
             raise ValueError("probe pairs must be distinct available ions")
+        return self._probe_packs(_first_fit(todo, self.config.probe_pack), int(shots), bases)
+
+    def _probe_packs(self, packs: Sequence[Sequence[tuple[int, int]]], shots: int, bases: int | None) -> list[ProbeRun]:
+        todo = [p for pack in packs for p in pack]
         k = self.config.probe_bases if bases is None else int(bases)
         offset = self._angle_offset(self.clock())
         jobs: list[_Job] = []
-        for p in todo:
-            jobs.extend(self._cb_jobs(p, self._random_bases(k), offset))
+        for pack in packs:
+            per_pair = [self._random_bases(k) for _ in pack]
+            jobs.extend(self._cb_jobs(pack, [list(b) for b in zip(*per_pair)], offset))
         if self.config.spam_probe:
             jobs.extend(self._spam_jobs(self._spam_ions(i for p in todo for i in p)))
         raw = self.executor.run([j.compiled.circuit for j in jobs], int(shots))

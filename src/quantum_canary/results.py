@@ -52,6 +52,16 @@ def unflip_frequencies(freqs: Mapping[str, float], flips: Iterable[int], num_clb
     return out
 
 
+def marginal_frequencies(freqs: Mapping[str, float], clbits: Sequence[int]) -> dict[str, float]:
+    """Marginal distribution of the given clbits, relabelled so that new clbit j is old clbit ``clbits[j]``."""
+    out: dict[str, float] = {}
+    for key, p in freqs.items():
+        width = len(key)
+        k = "".join(key[width - 1 - c] if c < width else "0" for c in reversed(clbits))
+        out[k] = out.get(k, 0.0) + p
+    return out
+
+
 def expectation(freqs: Mapping[str, float], clbits: Sequence[int]) -> float:
     """Expectation of the Z-string on the given clbits (Qiskit little-endian keys)."""
     value = 0.0

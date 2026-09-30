@@ -5,7 +5,8 @@
   Each circuit yields three Pauli expectations (P_a, P_b and P_a P_b, ideal +1). The per-gate decay is taken from
   the ratio of two depths, which cancels state preparation and measurement (cycle benchmarking, Erhard et al.,
   arXiv:1902.08543), and the three decays are weighted 1/5, 1/5, 3/5 so that, with bases drawn uniformly, the estimate is
-  unbiased for the decay averaged over all 15 non-identity Paulis of the dressed cycle.
+  unbiased for the decay averaged over all 15 non-identity Paulis of the dressed cycle. Packed probes run the CB
+  sequences of several disjoint pairs in one circuit; each pair is estimated from the marginal of its own clbits.
 * SPAM probes: prepare |0> on a set of ions and measure under complementary measurement twirls.
 * Phase probes: prepare |++>, apply n ZZ(theta) gates with n * theta = 1/4 (mod 1) and measure <X_a> and
   <Y_a Z_b>; their angle gives the accumulated ZZ phase, and hence the coherent over-rotation per gate, with sign.
@@ -89,6 +90,40 @@ def cb_probe_program(
     gates += [Gate("rzz", (0, 1), (math.pi / 2,)) for _ in range(depth)]
     gates += _rotate_to_z(bases[0], 0) + _rotate_to_z(bases[1], 1)
     return LogicalProgram(2, 2, gates, [(0, 0), (1, 1)], name=f"canary_cb_{bases[0]}{bases[1]}_{depth}")
+
+
+def cb_packed_program(
+    pair_bases: Sequence[tuple[str, str]], depth: int, frames: Sequence[tuple[float, float]] | None = None
+) -> LogicalProgram:
+    """Cycle-benchmarking probes of k disjoint pairs in one circuit; pair i uses qubits and clbits 2i and 2i + 1.
+
+    Each pair gets exactly the gates of ``cb_probe_program(pair_bases[i], depth, frames[i])``, with the ZZ gates
+    interleaved into ``depth`` cycles of one ZZ per pair, so the marginal of pair i's two clbits is an ordinary
+    single-pair CB record. The circuit benchmarks one cycle in the sense of Erhard et al. (arXiv:1902.08543), "a set
+    of operations that act on an entire quantum register within a set period of time": each pair is measured in the
+    context of the others. On hardware the pairs of a packed circuit idle while the other pairs are gated, so packing
+    trades coverage for possible idle and crosstalk error. That must be checked on hardware, for example by comparing
+    packed and single-pair estimates of a few pairs; the emulator has no idle or crosstalk error.
+    """
+    k = len(pair_bases)
+    if k < 1:
+        raise ValueError("a packed probe needs at least one pair")
+    frames = [(0.0, 0.0)] * k if frames is None else list(frames)
+    if len(frames) != k:
+        raise ValueError("need one frame per pair")
+    pre: list[Gate] = []
+    post: list[Gate] = []
+    names = []
+    for i, (bases, frame) in enumerate(zip(pair_bases, frames)):
+        single = cb_probe_program(tuple(bases), depth, tuple(frame))
+        gates = [Gate(g.name, tuple(2 * i + q for q in g.qubits), g.params) for g in single.gates]
+        first = next(n for n, g in enumerate(gates) if g.name == "rzz")
+        pre += gates[:first]
+        post += gates[first + depth :]
+        names.append(f"{bases[0]}{bases[1]}")
+    cycles = [Gate("rzz", (2 * i, 2 * i + 1), (math.pi / 2,)) for _ in range(depth) for i in range(k)]
+    measurements = [(q, q) for q in range(2 * k)]
+    return LogicalProgram(2 * k, 2 * k, pre + cycles + post, measurements, name=f"canary_cb_{'_'.join(names)}_{depth}")
 
 
 def _log_estimate(freqs: Mapping[str, float], shots: float) -> float:
