@@ -165,6 +165,7 @@ def run_session(s, args, hist, circ, program, ideal):
 
 
 def main():
+    global FORTE
     ap = argparse.ArgumentParser()
     ap.add_argument("--sessions", type=int, default=10)
     ap.add_argument("--ions", type=int, default=12)
@@ -173,7 +174,9 @@ def main():
     ap.add_argument("--over-sd", type=float, default=0.002)
     ap.add_argument("--circuit", default="HSIMN08V01")
     ap.add_argument("--out", default=str(ROOT / "research" / "hsim_results.json"))
+    ap.add_argument("--forte-dir", default=str(FORTE))
     args = ap.parse_args()
+    FORTE = Path(args.forte_dir)
     hist = load_pair_history()
     circ = QuantumCircuit.from_qasm_file(str(FORTE / "circuits" / "input" / f"{args.circuit}.qasm"))
     program = LogicalProgram.from_circuit(circ, name=args.circuit)
