@@ -39,6 +39,14 @@ class CanaryConfig:
 
     Verdicts: ``alpha`` and ``beta`` are the false-discovery-rate levels of the e-BH procedures that declare
     resources degraded and healthy.
+
+    Screening (guidance only, never verdicts): with ``screening`` the algorithm results of each batch update a
+    relative, effective damping estimate per resource (see ``screening.py``); an observation's log-variance is
+    (1 - m^2) / (n m^2) + ``screen_model_sd``^2, and a group is used only if every |m| exceeds
+    max(0.05, ``screen_min_signal_z`` standard errors). For resources without Tier-1 evidence, a positive suspicion z
+    adds ``screen_scale`` * z to the pessimistic and sampled placement costs and multiplies the probe weight by
+    1 + z. The default 0.0018 is pair_damping(0.005) / 3, so a 3-sigma suspicion adds about the prior mean damping of
+    a pair.
     """
 
     assignments_per_batch: int = 4
@@ -87,6 +95,11 @@ class CanaryConfig:
     correction_z: float = 3.0
 
     symmetry_alpha: float = 0.01
+
+    screening: bool = True
+    screen_model_sd: float = 0.05
+    screen_min_signal_z: float = 4.0
+    screen_scale: float = 0.0018
 
     def __post_init__(self) -> None:
         if self.twirl is True:
@@ -166,6 +179,9 @@ class CanaryConfig:
             raise ValueError("angle_resolution and correction_z must be non-negative")
         if not 0.0 < self.symmetry_alpha < 1.0:
             raise ValueError("symmetry_alpha must lie in (0, 1)")
+        for name in ("screen_model_sd", "screen_min_signal_z", "screen_scale"):
+            if not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
+                raise ValueError(f"{name} must be a non-negative number")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable dictionary."""

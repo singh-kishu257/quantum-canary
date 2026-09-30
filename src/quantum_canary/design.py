@@ -20,7 +20,9 @@ class BatchDesigner:
 
     Costs are calibrated damping rates: the posterior mean plus ``pessimism`` standard deviations for the exploit
     assignment, and a posterior draw for each exploratory assignment (resources without evidence are drawn from the
-    population mixture). Degraded resources carry a large additive penalty.
+    population mixture). Degraded resources carry a large additive penalty. Resources without Tier-1 evidence and a
+    positive screening suspicion z carry ``screen_scale * z`` more in the pessimistic and sampled costs, which only
+    breaks ties among uncalibrated resources.
     """
 
     def __init__(self, config: CanaryConfig, rng: np.random.Generator) -> None:
@@ -35,6 +37,7 @@ class BatchDesigner:
         ions: Sequence[int],
         mode: str,
         now: float | None = None,
+        suspicion: Mapping[Resource, float] | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Per-ion and per-pair damping scores ('pessimistic', 'mean' or 'sample')."""
         if mode not in ("pessimistic", "mean", "sample"):
@@ -63,6 +66,20 @@ class BatchDesigner:
                 a = pos.get(r[1])
                 if a is not None:
                     iv[a] = value
+        if suspicion and mode != "mean":
+            scale = self.config.screen_scale
+            for r, z in suspicion.items():
+                if z <= 0.0 or r in known:
+                    continue
+                if is_pair(r):
+                    a, b = pos.get(r[1]), pos.get(r[2])
+                    if a is not None and b is not None:
+                        pv[a, b] += scale * z
+                        pv[b, a] += scale * z
+                else:
+                    a = pos.get(r[1])
+                    if a is not None:
+                        iv[a] += scale * z
         iv = np.clip(iv, 0.0, None)
         pv = np.clip(pv, 0.0, None)
         penalty = self.config.degraded_penalty
@@ -89,10 +106,11 @@ class BatchDesigner:
         ions: Sequence[int],
         mode: str = "pessimistic",
         now: float | None = None,
+        suspicion: Mapping[Resource, float] | None = None,
     ) -> tuple[int, ...]:
         """Single best assignment under the chosen scoring mode."""
         wp, wi = program.weights(self.config.angle_exponent)
-        iv, pv = self.cost_tables(model, decisions, ions, mode, now)
+        iv, pv = self.cost_tables(model, decisions, ions, mode, now, suspicion)
         perm = self.solver.solve(wp, wi, pv, iv)
         return tuple(int(ions[k]) for k in perm)
 
@@ -104,6 +122,7 @@ class BatchDesigner:
         ions: Sequence[int],
         k: int,
         now: float | None = None,
+        suspicion: Mapping[Resource, float] | None = None,
     ) -> list[tuple[int, ...]]:
         """Return up to k distinct assignments; the first is the exploit choice."""
         n, m = program.num_qubits, len(ions)
@@ -122,13 +141,13 @@ class BatchDesigner:
             out.append(a)
             return True
 
-        iv, pv = self.cost_tables(model, decisions, ions, "pessimistic", now)
+        iv, pv = self.cost_tables(model, decisions, ions, "pessimistic", now, suspicion)
         base = self.solver.solve(wp, wi, pv, iv)
         add(base)
         tries = 0
         while len(out) < k and tries < 4 * k:
             tries += 1
-            iv, pv = self.cost_tables(model, decisions, ions, "sample", now)
+            iv, pv = self.cost_tables(model, decisions, ions, "sample", now, suspicion)
             add(self.solver.solve(wp, wi, pv, iv))
         walk = base
         while len(out) < k:

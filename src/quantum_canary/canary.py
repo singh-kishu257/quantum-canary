@@ -9,7 +9,9 @@ Every batch is one job containing
   uncertainty of the batch's assignment costs, a SPAM probe of every available ion, and optional ZZ phase probes.
 
 Only Tier-1 circuits update the health model and the verdicts. Algorithm results (Tier-2) are returned to the user,
-checked for consistency against the calibrated rates, and used for a layout-diversity extrapolation.
+checked for consistency against the calibrated rates, used for a layout-diversity extrapolation, and (with
+``screening``) update a separate screening model that only guides placement among uncalibrated resources and probe
+targeting.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ from .results import (
     merge_frequencies,
     normalize_counts,
 )
+from .screening import ScreeningModel
 
 CircuitLike = Union[QuantumCircuit, LogicalProgram]
 
@@ -170,6 +173,7 @@ class Canary:
         model: HealthModel | None = None,
         clock: Callable[[], float] = time.time,
         coherent: CoherentModel | None = None,
+        screening: ScreeningModel | None = None,
     ) -> None:
         self.executor = executor
         self.config = config or CanaryConfig()
@@ -180,6 +184,8 @@ class Canary:
         self.model.config = self.config
         self.coherent = coherent if coherent is not None else CoherentModel(self.config, clock)
         self.coherent.config = self.config
+        self.screening = screening if screening is not None else ScreeningModel(self.config, clock)
+        self.screening.config = self.config
         self.tester = HealthTest(self.config)
         self.designer = BatchDesigner(self.config, self.rng)
         self.flagged_ions: set[int] = set()
@@ -209,7 +215,9 @@ class Canary:
 
     def recommend(self, circuit: CircuitLike) -> tuple[int, ...]:
         """Best current logical-to-ion assignment under pessimistic calibrated costs."""
-        return self.designer.best(self.prepare(circuit), self.model, self.decisions, self.ions, now=self.clock())
+        now = float(self.clock())
+        prog = self.prepare(circuit)
+        return self.designer.best(prog, self.model, self.decisions, self.ions, now=now, suspicion=self._suspicion(now))
 
     def compile(self, circuit: CircuitLike, assignment: Sequence[int], twirl: str | bool = False) -> QuantumCircuit:
         """Compile a circuit onto the given ions in IonQ native gates (angle corrections applied if enabled)."""
@@ -229,6 +237,10 @@ class Canary:
             return coherent.correction(pair(a, b), theta, now)
 
         return offset
+
+    def _suspicion(self, now: float) -> dict[Resource, float]:
+        """Screening suspicion per resource (empty when screening is off); guidance only."""
+        return self.screening.suspicion(now) if self.config.screening else {}
 
     def _available(self, i: int, now: float) -> float:
         cap = float(self.config.max_probe_shots_per_ion)
@@ -331,12 +343,14 @@ class Canary:
         n_alg: int,
         shots_per: int,
         now: float,
+        suspicion: dict[Resource, float] | None = None,
     ) -> list[list[tuple[int, int]]]:
         """Packs of pairs with the largest value of information.
 
         Every pair among the available ions is a candidate. Its weight is its stake in this batch's designs plus
         ``coverage_weight * exp(-discounted evidence count)``, so pairs that were never (or not recently) calibrated
-        compete with the pairs the designs use.
+        compete with the pairs the designs use; a pair without Tier-1 evidence and screening suspicion z > 0 has its
+        weight multiplied by 1 + z.
         """
         cfg = self.config
         budget = int(math.floor(cfg.probe_fraction * n_alg / len(cfg.probe_depths)))
@@ -352,6 +366,7 @@ class Canary:
                     r = pair(a[u], a[v])
                     stake[r] = stake.get(r, 0.0) + share * w
         scores: dict[Resource, float] = {}
+        suspicion = suspicion or {}
         ions = self.ions
         for r in (pair(i, j) for a, i in enumerate(ions) for j in ions[a + 1 :]):
             d = self.decisions.get(r)
@@ -360,6 +375,8 @@ class Canary:
             weight = stake.get(r, 0.0) + cfg.coverage_weight * math.exp(-self._evidence_weight(r, now))
             if weight <= 0.0:
                 continue
+            if not self.model.evidence(r):
+                weight *= 1.0 + max(0.0, suspicion.get(r, 0.0))
             mean, sd = self.model.estimate(r, now)
             spam = self._spam_factors(r[1], r[2], now)
             noise = cb_variance(max(mean, 0.0), cfg.probe_depths, shots_per, spam, cfg.model_sd)
@@ -428,8 +445,9 @@ class Canary:
         shots_per = max(1, math.ceil(shots / slots))
         if self.executor.max_shots is not None and shots_per > self.executor.max_shots:
             raise ValueError(f"{shots_per} shots per circuit exceeds the backend limit")
+        suspicion = self._suspicion(now)
         designs = [
-            self.designer.design(p, self.model, self.decisions, self.ions, cfg.assignments_per_batch, now)
+            self.designer.design(p, self.model, self.decisions, self.ions, cfg.assignments_per_batch, now, suspicion)
             for p in programs
         ]
         offset = self._angle_offset(now)
@@ -448,7 +466,7 @@ class Canary:
         probe_pairs: list[tuple[int, int]] = []
         phase_pairs: list[tuple[int, int]] = []
         if cfg.probe_fraction > 0:
-            for pack in self._select_probes(programs, designs, n_alg, shots_per, now):
+            for pack in self._select_probes(programs, designs, n_alg, shots_per, now, suspicion):
                 jobs.extend(self._cb_jobs(pack, [[self._random_bases(1)[0] for _ in pack]], offset))
                 probe_pairs.extend(pack)
             if cfg.spam_probe:
@@ -634,6 +652,10 @@ class Canary:
             if job.kind == "alg":
                 parts.setdefault((job.program, job.assignment), []).append(f)
         merged = {k: (merge_frequencies([(p, shots_per) for p in v]), shots_per * len(v)) for k, v in parts.items()}
+        if cfg.screening:
+            for pi, (prog, design) in enumerate(zip(programs, designs)):
+                self.screening.update(prog, design, [merged[(pi, ai)] for ai in range(len(design))], extra[pi], now)
+        suspicion = self._suspicion(now)
         tests = sum(len(p.measurements) * len(d) for p, d, s in zip(programs, designs, syms) if s == "z2")
         flagged: set[int] = set()
         if tests:
@@ -659,7 +681,9 @@ class Canary:
                 BatchResult(
                     name=prog.name,
                     runs=runs,
-                    recommended=self.designer.best(prog, self.model, self.decisions, self.ions, now=now),
+                    recommended=self.designer.best(
+                        prog, self.model, self.decisions, self.ions, now=now, suspicion=suspicion
+                    ),
                     probes=probe_runs,
                     flagged_ions=tuple(sorted(flagged)),
                     degraded=tuple(sorted(degraded, key=to_key)),
@@ -845,10 +869,11 @@ class Canary:
     def save(self, path: str | Path) -> None:
         """Persist configuration and learned state to JSON."""
         data = {
-            "version": 2,
+            "version": 3,
             "config": self.config.to_dict(),
             "model": self.model.to_dict(),
             "coherent": self.coherent.to_dict(),
+            "screening": self.screening.to_dict(),
             "tokens": {str(k): list(v) for k, v in self._tokens.items()},
             "phase_last": {to_key(r): t for r, t in self._phase_last.items()},
             "flagged_ions": sorted(self.flagged_ions),
@@ -857,14 +882,15 @@ class Canary:
 
     @classmethod
     def load(cls, path: str | Path, executor: Executor, clock: Callable[[], float] = time.time) -> "Canary":
-        """Restore a Canary saved with save()."""
+        """Restore a Canary saved with save(); version-2 files load with an empty screening model."""
         data = json.loads(Path(path).read_text())
-        if data.get("version") != 2:
+        if data.get("version") not in (2, 3):
             raise ValueError("state files saved before the calibrated-evidence redesign cannot be restored")
         config = CanaryConfig.from_dict(data["config"])
         model = HealthModel.from_dict(data["model"], config, clock)
         coherent = CoherentModel.from_dict(data.get("coherent", {}), config, clock)
-        canary = cls(executor, config, model, clock, coherent)
+        screening = ScreeningModel.from_dict(data.get("screening", {}), config, clock)
+        canary = cls(executor, config, model, clock, coherent, screening)
         canary._tokens = {int(k): (float(v[0]), float(v[1])) for k, v in data.get("tokens", {}).items()}
         canary._phase_last = {from_key(k): float(t) for k, t in data.get("phase_last", {}).items()}
         canary.flagged_ions = set(int(i) for i in data.get("flagged_ions", []))
