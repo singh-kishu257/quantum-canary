@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ionpack"
+version = "0.1.0"
+description = "Sequential packing of small independent circuits onto disjoint ion blocks of one IonQ circuit."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Kanishka Singh", email = "kanishka.singh.ums@gmail.com" }]
+keywords = ["quantum computing", "trapped ions", "IonQ", "qiskit", "multi-programming"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = ["numpy>=1.24", "scipy>=1.11", "qiskit>=2.0"]
+
+[project.optional-dependencies]
+ionq = ["qiskit-ionq>=1.1"]
+test = ["pytest>=7"]
+
+[project.urls]
+Repository = "https://github.com/singh-kishu257/ionpack"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ionpack"]
