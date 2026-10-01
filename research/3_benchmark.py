@@ -150,6 +150,7 @@ CSV_COLUMNS = [
     "spam_p0_given_1_true", "spam_p1_given_0_true",
     "spam_p0_given_1_used", "spam_p1_given_0_used",
     "signed_error", "z_score", "probe_blocks",
+    "quasi_static_scale", "detuning_drift_scale", "t1_drift_scale",
 ]
 NAN = float("nan")
 
@@ -177,6 +178,9 @@ DEFAULT_CFG: Dict[str, Any] = {
     "spam_perturbation_frac": None,     # None -> the resolved perturbation_frac
     "dw_halfwidth_hz": None,            # None -> 1c registry; "literature" population only
     "probe_blocks": 10,                 # inv.interleave_probe_blocks(n_blocks=...); 1 = circuit-major
+    "quasi_static_scale": 1.0,          # x quasi-static detuning std (SC); _apply_mechanism_scales
+    "detuning_drift_scale": 1.0,        # x detuning drift stationary amplitude
+    "t1_drift_scale": 1.0,              # x log-T1 drift stationary std (SC)
 }
 # Probe family (circuit-name prefixes) whose chunks define each parameter's
 # comparison truth in a time-resolved run.
@@ -278,7 +282,10 @@ def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
             "detuning_1_over_f": bool(c["detuning_1_over_f"]), "alpha": float(alpha),
             "time_resolved": bool(c["time_resolved"]),
             "t1_telegraph": bool(c["t1_telegraph"]),
-            "probe_blocks": int(c["probe_blocks"])}
+            "probe_blocks": int(c["probe_blocks"]),
+            "quasi_static_scale": float(c["quasi_static_scale"]),
+            "detuning_drift_scale": float(c["detuning_drift_scale"]),
+            "t1_drift_scale": float(c["t1_drift_scale"])}
 
 
 def _inversion_spam(prior: Any, c: Dict[str, Any]):
@@ -291,6 +298,32 @@ def _inversion_spam(prior: Any, c: Dict[str, Any]):
         p01, p10 = p10, p01
     return (float(np.clip(p01, 0.0, SPAM_CLIP_MAX)),
             float(np.clip(p10, 0.0, SPAM_CLIP_MAX)))
+
+
+def _apply_mechanism_scales(truth: Any, architecture: str, c: Dict[str, Any]) -> None:
+    """Scale the strength of three mismatch mechanisms of a generated truth
+    (all 1.0 by default, which leaves the literature values untouched; used by
+    3b_robustness_envelope.py): quasi_static_scale multiplies each qubit's
+    quasi-static detuning std (superconducting only), detuning_drift_scale
+    the stationary amplitude of the detuning drift process, t1_drift_scale
+    the stationary std of the log-T1 OU drift (superconducting only)."""
+    qs, dd, td = (float(c["quasi_static_scale"]), float(c["detuning_drift_scale"]),
+                  float(c["t1_drift_scale"]))
+    if min(qs, dd, td) < 0.0:
+        raise ValueError("mechanism scales must be non-negative")
+    if architecture != "superconducting" and (qs != 1.0 or td != 1.0):
+        raise ValueError("quasi_static_scale and t1_drift_scale are superconducting-only")
+    spec = truth.architecture_specific
+    if qs != 1.0 and "quasi_static_dw_std_rad_s" in spec:
+        spec["quasi_static_dw_std_rad_s"] = qs * np.asarray(spec["quasi_static_dw_std_rad_s"],
+                                                            dtype=float)
+    if dd != 1.0 and "detuning" in truth.drift_processes:
+        params = truth.drift_processes["detuning"].params
+        key = "sigma" if truth.drift_processes["detuning"].process_type == "ou" else "amplitude"
+        params[key] = dd * float(params[key])
+    if td != 1.0 and "T1" in truth.drift_processes:
+        params = truth.drift_processes["T1"].params
+        params["sigma"] = td * float(params["sigma"])
 
 
 def _time_resolved_truth(truth: Any, sim_result: Any):
@@ -353,6 +386,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                                     detuning_during_gates=c["gate_detuning"])
         if c["coherent_fraction"] is not None:
             truth.architecture_specific["coherent_fraction"] = float(c["coherent_fraction"])
+        _apply_mechanism_scales(truth, architecture, c)
         if c["alpha"] is not None:
             truth.drift_processes["detuning"].params["alpha"] = float(c["alpha"])
         prior = sim.generate_calibration_prior(
@@ -636,6 +670,7 @@ def _read_csv(path: pathlib.Path) -> List[Dict[str, Any]]:
                         "prior_value", "prior_absolute_error", "prior_relative_error",
                         "perturbation_frac", "spam_scale", "spam_spread", "t_measure_s",
                         "coherent_fraction", "crosstalk_scale", "alpha",
+                        "quasi_static_scale", "detuning_drift_scale", "t1_drift_scale",
                         "run_duration_s", "truth_rel_spread",
                         "spam_perturbation_frac", "dw_halfwidth_hz", "t2_ramsey_over_echo",
                         "dw_true_rad_s", "spam_p0_given_1_true", "spam_p1_given_0_true",

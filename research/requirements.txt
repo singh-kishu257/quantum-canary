@@ -1,0 +1,15 @@
+# Quantum Canary research pipeline (research/*.py and the CI workflows).
+# Qiskit packages are pinned to the versions the 1c self-test and the
+# benchmarks were last run with; qiskit-ionq is required by the 1c
+# self-test (trapped-ion GPI2 native pair, test F).
+numpy>=1.26
+scipy>=1.11
+qiskit==2.4.2
+qiskit-aer==0.17.2
+qiskit-ionq==1.1.1
+requests>=2.31
+
+# Hardware scripts (5_ibm_hardware.py) and figures (fig_generation/).
+qiskit-ibm-runtime>=0.20
+pandas>=2.0
+matplotlib>=3.7

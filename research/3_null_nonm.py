@@ -75,7 +75,9 @@ CHI2_FIELD = {
 }
 
 
-DOF = {"t1": 2, "ramsey": 5, "gate": 2, "echo": 2}
+# Must equal the divisor lindblad_inversion uses for each reported chi2/dof
+# (n_points - n_params): Ramsey is 4 delays x (X, Y) = 8 points, 2 params.
+DOF = {"t1": 2, "ramsey": 6, "gate": 2, "echo": 2}
 
 
 TRUE_PARAM_RANGES = {

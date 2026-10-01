@@ -55,6 +55,8 @@ sim = bm.sim
 PARAMETERS = bm.PARAMETERS
 ARCHITECTURES = bm.ARCHITECTURES
 N_BOOTSTRAP = 1000
+DEFAULT_OUT = SCRIPT_DIR / "data" / "robustness_envelope.csv"
+DEFAULT_MAX_WORKERS = 4
 
 # Mechanism -> (3_benchmark cfg key, architectures it acts on, multipliers of
 # the literature value). Multiplier 1.0 is the literature operating point;
@@ -245,19 +247,24 @@ def print_envelope(records: List[Dict[str, Any]], threshold: float) -> None:
 
 
 def main() -> None:
+    # Every option has a default: `python 3b_robustness_envelope.py` runs the
+    # full sweep (all architectures and mechanisms) into DEFAULT_OUT.
     ap = argparse.ArgumentParser(description="One-at-a-time robustness envelope.")
     ap.add_argument("--architecture", choices=list(ARCHITECTURES) + ["all"], default="all")
     ap.add_argument("--mechanisms", nargs="+", choices=sorted(MECHANISMS),
                     default=sorted(MECHANISMS))
     ap.add_argument("--n-instances", type=int, default=60)
-    ap.add_argument("--workers", type=int, default=None)
+    ap.add_argument("--workers", type=int, default=None,
+                    help=f"default min({DEFAULT_MAX_WORKERS}, cpu_count - 1): each worker "
+                         "holds an Aer simulator, so more workers can exhaust memory")
     ap.add_argument("--threshold", type=float, default=0.95)
-    ap.add_argument("--out", required=True, type=pathlib.Path)
+    ap.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
     args = ap.parse_args()
     if args.n_instances < 3:
         sys.exit("--n-instances must be >= 3")
     archs = list(ARCHITECTURES) if args.architecture == "all" else [args.architecture]
-    n_workers = args.workers if args.workers is not None else max(1, mp.cpu_count() - 1)
+    n_workers = (args.workers if args.workers is not None
+                 else max(1, min(DEFAULT_MAX_WORKERS, mp.cpu_count() - 1)))
     run(archs, args.mechanisms, args.n_instances, n_workers, args.threshold, args.out)
 
 

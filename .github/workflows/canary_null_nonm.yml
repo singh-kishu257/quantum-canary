@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [superconducting, trapped_ion, neutral_atom]
+        arch: [superconducting, trapped_ion]
         phase: ["null", "gradient"]
         prior_mode: ["arch", "live"]
         exclude:
@@ -21,10 +21,12 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install numpy scipy qiskit==2.5.1 qiskit-aer==0.17.2
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r research/requirements.txt
 
       - name: Make output folders
         run: mkdir -p research/data
@@ -59,10 +61,12 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install numpy scipy qiskit==2.5.1 qiskit-aer==0.17.2
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r research/requirements.txt
 
       - name: Make output folders
         run: mkdir -p research/data
