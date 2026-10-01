@@ -18,6 +18,7 @@ __all__ = [
     "NATIVE_INVERSE_PAIRS", "register_native_pair",
     "_sqrtx_native_inverse_pair", "_build_gate_rep_circuit",
     "split_qubits_for_op_limit",
+    "interleave_probe_blocks", "merge_block_counts",
 ]
 
 # Fallback priors when live provider calibration is unavailable.
@@ -85,6 +86,18 @@ ARCH_DEFAULTS["unknown"] = dict(ARCH_DEFAULTS["superconducting"])
 # not change the probe design; 1e-6 is below both ARCH_DEFAULTS eps_typical
 # values (1.3e-4, 3e-4). It also becomes the gate fit's fallback seed.
 _EPS_LIVE_FLOOR = 1e-6
+
+# Shortest Ramsey delay as a fraction of the first T2-scale delay
+# (BackendProfile.ramsey_delays_s). For a prior-informed grid it is 0.1*T2,
+# so the unambiguous detuning range |dw| < pi/t_short is 1/(0.2*T2_prior) Hz:
+# 71 kHz at T2_prior = 70 us, against measured residual detunings of up to
+# ~14 kHz on ibm_fez (research/data/hardware run_A/run_B, qubits 2 and 15)
+# that sat at the edge of the previous 0.5*T2 window.
+_RAMSEY_SHORT_DELAY_FRAC = 0.2
+
+# Seed of the virtual-Z frame twirl in _build_gate_rep_circuit (per N, so a
+# probe's circuits are reproducible).
+_GATE_TWIRL_SEED = 20_261_001
 
 
 def _require_pos_finite(name, v) -> float:
@@ -264,26 +277,33 @@ class BackendProfile:
             delays = self._log_spaced(arch["T1_min_s"], arch["T1_max_s"])
         return self._snap_all(delays)
 
+    def _standard_t2_delays(self) -> list[float]:
+        """The three T2-scale delays shared by the Ramsey and echo probes."""
+        if self.prior_confidence in ("live", "prior_informed"):
+            T2 = self.T2_prior_s
+            return [0.5*T2, 1.0*T2, 1.5*T2]
+        arch = self.constants
+        T2c  = arch["T2_s"]
+        # Ceiling is the architecture-typical 2*T1 (the physical T2 bound).
+        # It must not be derived from t1_delays_s: those are log-spaced
+        # probe times, not a T1 estimate, and their median can fall far
+        # below T1 — collapsing two of the three delays onto the ceiling.
+        lo, hi = arch["T2_min_s"], 2.0 * arch["T1_s"]
+        return [float(np.clip(d, lo, hi)) for d in (T2c / 5.0, T2c, T2c * 5.0)]
+
     @property
     def ramsey_delays_s(self) -> list[float]:
-        if self.prior_confidence in ("live", "prior_informed"):
-            T2     = self.T2_prior_s
-            delays = [0.5*T2, 1.0*T2, 1.5*T2]
-        else:
-            arch        = self.constants
-            T2c         = arch["T2_s"]
-            # Ceiling is the architecture-typical 2*T1 (the physical T2 bound).
-            # It must not be derived from t1_delays_s: those are log-spaced
-            # probe times, not a T1 estimate, and their median can fall far
-            # below T1 — collapsing two of the three delays onto the ceiling.
-            lo, hi      = arch["T2_min_s"], 2.0 * arch["T1_s"]
-            delays      = [float(np.clip(d, lo, hi))
-                           for d in (T2c / 5.0, T2c, T2c * 5.0)]
-        return self._snap_all(delays)
+        # A short delay (0.2x the first T2-scale delay, i.e. 0.1*T2 for a
+        # prior-informed grid) leads the list: it sets the unambiguous
+        # detuning range pi/t_short, five times wider than the first
+        # T2-scale delay alone, and seeds the phase unwrapping across the
+        # longer delays in _invert_ramsey (which set the precision).
+        std = self._standard_t2_delays()
+        return self._snap_all([_RAMSEY_SHORT_DELAY_FRAC * std[0]] + std)
 
     @property
     def echo_delays_s(self) -> list[float]:
-        return self.ramsey_delays_s
+        return self._snap_all(self._standard_t2_delays())
 
     @property
     def dw_max_rad_s(self) -> float:
@@ -722,21 +742,26 @@ def _default_superconducting_pair(qc, q):
     qc.sxdg(q)
 
 
-def _default_trapped_ion_pair(qc, q):
+def _default_trapped_ion_pair(qc, q, phase_turns: float = 0.0):
     """GPI2(0), GPI2(0.5) — native IonQ pulses; GPI2(0.5) is verified
     equal to GPI2(0)^dagger, so the pair nets to identity exactly as
     sx/sxdg does. Falls back to an equivalent R-gate decomposition if
     qiskit_ionq is not installed. A barrier separates the two gates in
-    both branches so the transpiler cannot cancel the pair."""
+    both branches so the transpiler cannot cancel the pair.
+
+    phase_turns shifts both pulse phases (GPI2(p), GPI2(p + 0.5)): the
+    native, exactly equivalent form of conjugating the pair by a virtual
+    Z frame rotation of 2*pi*p, used by the gate-repetition frame twirl."""
     try:
         from qiskit_ionq.ionq_gates import GPI2Gate
-        qc.append(GPI2Gate(0.0), [q])
+        qc.append(GPI2Gate(phase_turns), [q])
         qc.barrier(q)
-        qc.append(GPI2Gate(0.5), [q])
+        qc.append(GPI2Gate(phase_turns + 0.5), [q])
     except ImportError:
-        qc.r(np.pi / 2, 0.0, q)
+        phi = 2.0 * np.pi * phase_turns
+        qc.r(np.pi / 2, phi, q)
         qc.barrier(q)
-        qc.r(np.pi / 2, np.pi, q)
+        qc.r(np.pi / 2, phi + np.pi, q)
 
 
 # Registry mapping architecture name -> callable(qc, q) -> None, applying
@@ -785,7 +810,7 @@ def register_native_pair(architecture: str, pair_fn) -> None:
     NATIVE_INVERSE_PAIRS[architecture] = pair_fn
 
 
-def _sqrtx_native_inverse_pair(qc, q, architecture: str):
+def _sqrtx_native_inverse_pair(qc, q, architecture: str, frame_rad: float = 0.0):
     """
     Applies one native (G, G^-1) pair on qubit q for the given
     architecture, looked up from NATIVE_INVERSE_PAIRS. Unregistered
@@ -793,16 +818,46 @@ def _sqrtx_native_inverse_pair(qc, q, architecture: str):
     self-inverse pair yet) fall back to the superconducting sx/sxdg
     default, preserving prior behaviour exactly — register_native_pair()
     is the supported way to override this for a specific backend.
+
+    frame_rad != 0 conjugates the pair by a virtual Z rotation of that
+    angle: the built-in trapped-ion pair shifts its GPI2 phases (native);
+    every other pair is wrapped as rz(frame), pair, rz(-frame). Ideally the
+    pair is still the identity, and Z conjugation leaves its Z-survival
+    (the R_zz the gate model fits) unchanged.
     """
     pair_fn = NATIVE_INVERSE_PAIRS.get(architecture, _default_superconducting_pair)
-    pair_fn(qc, q)
+    if frame_rad == 0.0:
+        pair_fn(qc, q)
+    elif pair_fn is _default_trapped_ion_pair:
+        pair_fn(qc, q, phase_turns=frame_rad / (2.0 * np.pi))
+    else:
+        qc.rz(frame_rad, q)
+        pair_fn(qc, q)
+        qc.rz(-frame_rad, q)
 
 
-def _build_gate_rep_circuit(N: int, architecture: str = "superconducting"):
+def _build_gate_rep_circuit(N: int, architecture: str = "superconducting",
+                            twirl: bool = True):
+    """N native (G, G^-1) pairs, then a Z measurement.
+
+    twirl=True (default) conjugates each pair by its own random virtual Z
+    frame (uniform in [0, 2*pi), seeded per N by _GATE_TWIRL_SEED so the
+    circuit is reproducible). A residual coherent rotation that survives
+    the pair -- e.g. the qubit detuning acting during the pulses, which
+    does not cancel in G*G^-1 -- then points along a different equatorial
+    axis in every pair and adds up as a random walk (angle ~ sqrt(N)*theta)
+    instead of coherently (N*theta), so its contribution to the decay
+    becomes second order and the depolarizing model stays valid (frame
+    randomization in the sense of randomized compiling, Wallman & Emerson,
+    PRA 94, 052325 (2016)). Virtual Z is free on IBM (rz) and IonQ (GPI2
+    phase). twirl=False builds the original untwirled train.
+    """
     from qiskit import QuantumCircuit
     qc = QuantumCircuit(1, 1, name=f"gate_rep_N{N}")
-    for _ in range(N):
-        _sqrtx_native_inverse_pair(qc, 0, architecture)
+    frames = (np.random.default_rng([_GATE_TWIRL_SEED, int(N)]).uniform(0.0, 2.0 * np.pi, int(N))
+              if twirl else np.zeros(int(N)))
+    for k in range(N):
+        _sqrtx_native_inverse_pair(qc, 0, architecture, frame_rad=float(frames[k]))
         qc.barrier(0)
     qc.measure(0, 0)
     return qc
@@ -890,6 +945,54 @@ def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
         "dt_ns":          profile.dt_ns,
     }
     return circuits, metadata
+
+
+def interleave_probe_blocks(circuits: list, shots_list: list,
+                            n_blocks: int) -> tuple[list, list, list]:
+    """Block-interleaved execution plan for a probe.
+
+    Each circuit's shots are split into n_blocks near-equal parts and the
+    probe list is repeated n_blocks times (block-major: block b runs every
+    circuit once with its b-th share). Submitted in this order, every probe
+    family samples the same wall-clock window, so a parameter drifting
+    during the run is averaged identically by all of them -- in particular
+    the Ramsey X and Y quadratures of one delay are measured together
+    rather than one full circuit apart. Entries with zero shots (a circuit
+    with fewer shots than blocks) are omitted.
+
+    Returns (block_circuits, block_shots, block_index) where block_index[j]
+    is the position in `circuits` of block entry j; merge_block_counts()
+    turns the block results back into the counts_list lindblad_inversion()
+    expects. n_blocks = 1 returns the original plan unchanged.
+    """
+    if (isinstance(n_blocks, bool) or not isinstance(n_blocks, (int, np.integer))
+            or n_blocks < 1):
+        raise ValueError(f"n_blocks must be an int >= 1, got {n_blocks!r}")
+    if len(shots_list) != len(circuits):
+        raise ValueError(f"{len(shots_list)} shot entries != {len(circuits)} circuits")
+    block_circuits, block_shots, block_index = [], [], []
+    for b in range(int(n_blocks)):
+        for i, (qc, sh) in enumerate(zip(circuits, shots_list)):
+            base, rem = divmod(int(sh), int(n_blocks))
+            n_b = base + (1 if b < rem else 0)
+            if n_b > 0:
+                block_circuits.append(qc)
+                block_shots.append(n_b)
+                block_index.append(i)
+    return block_circuits, block_shots, block_index
+
+
+def merge_block_counts(block_counts: list, block_index: list,
+                       n_circuits: int) -> list[dict]:
+    """Sum the per-block counts of interleave_probe_blocks() back into one
+    counts dict per original circuit, in the original order."""
+    if len(block_counts) != len(block_index):
+        raise ValueError(f"{len(block_counts)} block results != {len(block_index)} block entries")
+    merged: list[dict] = [{} for _ in range(int(n_circuits))]
+    for counts, i in zip(block_counts, block_index):
+        for key, v in counts.items():
+            merged[i][str(key)] = merged[i].get(str(key), 0) + int(v)
+    return merged
 
 
 def forward_t1(tau_s, T1_s: float, p0_given_1: float = 0.0, p1_given_0: float = 0.0):
@@ -1003,11 +1106,57 @@ def _invert_t1(p1_measured: np.ndarray, tau_s: np.ndarray,
     return T1, sigma, resid
 
 
-def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
-                       ramsey_delays: np.ndarray,
-                       T2_prior_s: float, arch: dict,
-                       T1_estimate_s: float, shots_ramsey: int
-                       ) -> tuple[float, float, float, float, float]:
+def _unwrapped_detuning(x_means: np.ndarray, y_means: np.ndarray, amps: np.ndarray,
+                        delays: np.ndarray, shots: int) -> tuple[float, float]:
+    """Detuning from the Ramsey phases at every delay, unwrapped in order.
+
+    The phase at delay t is dw*t (mod 2*pi), with standard deviation
+    1/(amp*sqrt(shots)). Starting from the shortest delay (which fixes dw
+    unambiguously for |dw| < pi/t_short), each longer delay's phase is
+    unwrapped to the 2*pi branch nearest the current prediction dw*t and
+    added to a weighted least-squares fit of phase = dw*t through the origin
+    (weights amp^2*shots), so the long delays set the precision. A delay is
+    used only if its amplitude passes the Cramér-Rao gate amp >= 3/sqrt(shots)
+    (below it the phase carries no reliable information) and if the
+    prediction is sharp enough to pick its branch (sigma_dw*t < pi/3);
+    unwrapping stops at the first delay that fails the second test.
+    Returns (dw, sigma_dw); (nan, inf) if the shortest delay is unusable.
+    """
+    n = max(int(shots), 1)
+    gate = 3.0 / np.sqrt(n)
+    if amps[0] < gate:
+        return float("nan"), float("inf")
+    phases = np.arctan2(y_means, x_means)
+    w = amps**2 * n
+    sum_wtp = w[0] * delays[0] * phases[0]
+    sum_wtt = w[0] * delays[0]**2
+    dw, sdw = sum_wtp / sum_wtt, 1.0 / np.sqrt(sum_wtt)
+    for k in range(1, len(delays)):
+        if amps[k] < gate:
+            continue
+        if sdw * delays[k] >= np.pi / 3.0:
+            break
+        pred = dw * delays[k]
+        phase_k = phases[k] + 2.0 * np.pi * np.round((pred - phases[k]) / (2.0 * np.pi))
+        sum_wtp += w[k] * delays[k] * phase_k
+        sum_wtt += w[k] * delays[k]**2
+        dw, sdw = sum_wtp / sum_wtt, 1.0 / np.sqrt(sum_wtt)
+    return float(dw), float(sdw)
+
+
+def _invert_ramsey(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
+                   ramsey_delays: np.ndarray,
+                   T2_prior_s: float, arch: dict,
+                   T1_estimate_s: float, shots_ramsey: int
+                   ) -> tuple[float, float, float, float, float]:
+    """Returns (T2_ramsey, sigma, delta_omega, sigma_dw, residual).
+
+    delta_omega comes from the phases at all delays (_unwrapped_detuning);
+    T2_ramsey is then a one-parameter exponential fit of all X/Y points with
+    delta_omega held fixed. Under low-frequency (quasi-static) noise the
+    Ramsey envelope is not exponential and this T2_ramsey is T2* < T2, which
+    is why lindblad_inversion reports the echo T2 as T2_s, not this value.
+    """
     p0_given_1 = arch.get("p0_given_1", 0.0)
     p1_given_0 = arch.get("p1_given_0", 0.0)
     # Asymmetric readout error shifts both Bloch components by an additive
@@ -1022,34 +1171,31 @@ def _invert_ramsey_3t(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
     T2_min = arch["T2_min_s"]
     T2_max = min(T2_prior_s * 20, 2.0 * T1_estimate_s)
 
-    T2_guess = T2_prior_s
-    denom    = float(amps[0]) - float(amps[1])
-    if abs(denom) > 1e-6:
-        x = (float(amps[1]) - float(amps[2])) / denom
-        if 0 < x < 1:
-            T2_guess = float(np.clip(-ramsey_delays[0]/np.log(x),
-                                     T2_min, T2_max))
+    # Seed: weighted log-linear fit ln(amp) = c - t/T2 over the delays whose
+    # amplitude passes the Cramér-Rao gate (weights amp, since
+    # sigma(ln amp) ~ 1/(amp*sqrt(shots))); the prior if that is not possible.
+    T2_guess = float(np.clip(T2_prior_s, T2_min, T2_max))
+    usable = amps >= 3.0 / np.sqrt(max(shots_ramsey, 1))
+    if usable.sum() >= 2:
+        slope = np.polyfit(ramsey_delays[usable], np.log(amps[usable]), 1,
+                           w=amps[usable])[0]
+        if slope < 0:
+            T2_guess = float(np.clip(-1.0 / slope, T2_min, T2_max))
 
-    t1     = float(ramsey_delays[0])
-    # Declared Nyquist-style detuning constraint (same 0.90*pi/t1 bound as
-    # BackendProfile.dw_max_rad_s, evaluated on the shortest Ramsey delay):
-    # the estimator must never report |delta_omega| beyond this interval.
-    dw_max = 0.90 * np.pi / t1
-    angle  = float(np.arctan2(y_means[0], x_means[0]))
-    dw     = float(np.clip(angle / t1, -dw_max, dw_max))
-    amp_t1 = float(amps[0])
-    # Cramér-Rao lower bound check: below this amplitude the angle estimate
-    # carries no reliable information at this shot count, so mark it
-    # infinite rather than papering over it with an arbitrary amplitude
-    # floor — downstream chi2-weighted combination then discounts it
-    # naturally instead of silently trusting a noisy angle.
-    if amp_t1 < 3.0 / np.sqrt(max(shots_ramsey, 1)):
-        sigma_angle = np.inf
-    else:
-        sigma_angle = 1.0 / (amp_t1 * np.sqrt(max(shots_ramsey, 1)))
+    t_short = float(ramsey_delays[0])
+    # Declared Nyquist-style detuning constraint (same 0.90*pi/t_short bound
+    # as BackendProfile.dw_max_rad_s, on the shortest Ramsey delay): the
+    # estimator must never report |delta_omega| beyond this interval.
+    dw_max = 0.90 * np.pi / t_short
+    dw, sdw = _unwrapped_detuning(x_means, y_means, amps, ramsey_delays, shots_ramsey)
+    if not np.isfinite(dw):
+        # Shortest delay below the Cramér-Rao gate: keep its (unreliable)
+        # angle as the frozen detuning of the T2 fit, reported with sigma inf.
+        dw = float(np.arctan2(y_means[0], x_means[0]) / t_short)
+    dw = float(np.clip(dw, -dw_max, dw_max))
     # Capped at dw_max: a 1-sigma uncertainty wider than the enforced bound
     # itself would misrepresent this as an unconstrained ML estimate.
-    sdw    = float(np.clip(sigma_angle / t1, 0, dw_max))
+    sdw = float(np.clip(sdw, 0, dw_max))
 
     xy_meas = np.concatenate([p1_x_arr, p1_y_arr])
     def xy_model(_, T2_s):
@@ -1323,7 +1469,7 @@ def lindblad_inversion(counts_list: list[dict],
     ramsey_delays = np.array(metadata["ramsey_delays_s"])
     p1_x_arr = np.array([ramsey_counts[2*i].get("1",0)/shots_ramsey   for i in range(n_times)])
     p1_y_arr = np.array([ramsey_counts[2*i+1].get("1",0)/shots_ramsey for i in range(n_times)])
-    T2, sT2, dw, sdw, r_ram = _invert_ramsey_3t(
+    T2, sT2, dw, sdw, r_ram = _invert_ramsey(
         p1_x_arr, p1_y_arr, ramsey_delays, profile.T2_prior_s, arch,
         T1_estimate_s=T1, shots_ramsey=shots_ramsey)
     ramsey_failed = _fit_failed(sT2)
@@ -1333,8 +1479,8 @@ def lindblad_inversion(counts_list: list[dict],
         arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0))
     ramsey_meas = np.concatenate([p1_x_arr, p1_y_arr])
     ramsey_pred = np.concatenate([px_pred, py_pred])
-    # n_params=2: _invert_ramsey_3t determines both T2 (curve_fit) and
-    # delta_omega (arctan2 on the first delay) from these same points.
+    # n_params=2: _invert_ramsey determines both T2 (curve_fit) and
+    # delta_omega (unwrapped phases at all delays) from these same points.
     ramsey_chi2 = _chi2_per_dof(ramsey_meas, ramsey_pred, shots_ramsey, n_params=2)
 
     p1_echo   = np.array([c.get("1",0)/shots_echo for c in echo_counts])
@@ -1347,30 +1493,28 @@ def lindblad_inversion(counts_list: list[dict],
         forward_echo(echo_delays, T2_echo, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
         shots_echo, n_params=1)
 
-    ramsey_chi2_factor = max(ramsey_chi2, 1.0) if np.isfinite(ramsey_chi2) else 1.0
-    echo_chi2_factor   = max(echo_chi2, 1.0) if np.isfinite(echo_chi2) else 1.0
-    w_ramsey = 1.0/(sT2**2 * ramsey_chi2_factor) if np.isfinite(sT2) and sT2 > 0 else 0.0
-    w_echo   = 1.0/(sT2_echo**2 * echo_chi2_factor) if np.isfinite(sT2_echo) and sT2_echo > 0 else 0.0
-    if w_ramsey == 0.0 and w_echo == 0.0:
-        T2_combined, sT2_combined = T2, sT2
-    elif w_ramsey == 0.0:
-        T2_combined, sT2_combined = T2_echo, sT2_echo
-    elif w_echo == 0.0:
-        T2_combined, sT2_combined = T2, sT2
+    # Reported T2 is the Hahn-echo T2 (the quantity IBM reports as T2). It is
+    # not averaged with the Ramsey T2: under low-frequency noise Ramsey
+    # measures T2* < T2 while the echo refocuses that noise, so the two are
+    # different physical quantities and their fusion is biased low. T2* is
+    # reported separately (T2_ramsey_s), and T2_ramsey_s/T2_echo_s is a
+    # low-frequency-noise indicator (1b_online health check). The sigma is
+    # inflated by sqrt(max(chi2/dof, 1)) of the echo fit. A failed echo fit
+    # reports NaN +/- inf: the Ramsey value is not substituted for it.
+    if echo_failed:
+        T2_rep, sT2_rep = float("nan"), float("inf")
     else:
-        T2_combined = (w_ramsey*T2 + w_echo*T2_echo) / (w_ramsey + w_echo)
-        sT2_combined = float(np.sqrt(1.0/(w_ramsey + w_echo)))
-    if ramsey_failed and echo_failed:
-        T2_combined, sT2_combined = float("nan"), float("inf")
+        echo_chi2_factor = max(echo_chi2, 1.0) if np.isfinite(echo_chi2) else 1.0
+        T2_rep, sT2_rep = T2_echo, float(sT2_echo * np.sqrt(echo_chi2_factor))
 
     p0_gate = np.array([c.get("0",0)/shots_gate for c in gate_counts])
     N_vals  = np.array(metadata["gate_rep_N"], dtype=float)
-    # Placed after the T2 fusion: z* is computed from this run's T1, combined
-    # T2 and the gate time; eps is the only fitted parameter (n_params=1).
-    # Reported T1/T2 are passed: NaN after a failed fit gives z* = 0 (unital).
+    # z* is computed from this run's T1, echo T2 and the gate time; eps is
+    # the only fitted parameter (n_params=1). Reported T1/T2 are passed:
+    # NaN after a failed fit gives z* = 0 (unital).
     gate_time_ns = arch.get("gate_time_ns")
     eps, seps, r_gate, z_star = _invert_gate(
-        p0_gate, N_vals, arch, shots_gate, T1_est_s=T1_rep, T2_est_s=T2_combined,
+        p0_gate, N_vals, arch, shots_gate, T1_est_s=T1_rep, T2_est_s=T2_rep,
         gate_time_s=gate_time_ns * 1e-9 if gate_time_ns is not None else None)
     gate_chi2 = _chi2_per_dof(p0_gate,
         forward_gate_affine(N_vals, eps, z_star, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
@@ -1408,7 +1552,7 @@ def lindblad_inversion(counts_list: list[dict],
         backend_name=metadata.get("backend_name", profile.backend_name),
         qubit_id=qubit_id, timestamp=timestamp, architecture=profile.architecture,
         T1_s=T1_rep, T1_sigma_s=sT1_rep,
-        T2_s=T2_combined, T2_sigma_s=sT2_combined,
+        T2_s=T2_rep, T2_sigma_s=sT2_rep,
         delta_omega=dw, delta_omega_sigma=sdw,
         epsilon_sx=float("nan") if gate_failed else eps,
         epsilon_sx_sigma=float("inf") if gate_failed else seps,

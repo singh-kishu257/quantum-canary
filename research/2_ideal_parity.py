@@ -241,10 +241,10 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                   "delta_omega": float(result.delta_omega_sigma),
                   "epsilon_sx": float(result.epsilon_sx_sigma)}
         chi2 = {"T1_s": float(result.t1_chi2_dof),
-                "T2_s": float(result.ramsey_chi2_dof),
+                "T2_s": float(result.echo_chi2_dof),  # T2_s is the echo T2
                 "delta_omega": float(result.ramsey_chi2_dof),
                 "epsilon_sx": float(result.gate_chi2_dof)}
-        chi2_secondary = {"T2_s": float(result.echo_chi2_dof)}
+        chi2_secondary = {"T2_s": float(result.ramsey_chi2_dof)}
         priors = {"T1_s": float(prior.T1_prior_s),
                   "T2_s": float(prior.T2_prior_s),
                   "delta_omega": NAN,

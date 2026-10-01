@@ -149,7 +149,7 @@ CSV_COLUMNS = [
     "t2_ramsey_over_echo", "dw_true_rad_s",
     "spam_p0_given_1_true", "spam_p1_given_0_true",
     "spam_p0_given_1_used", "spam_p1_given_0_used",
-    "signed_error", "z_score",
+    "signed_error", "z_score", "probe_blocks",
 ]
 NAN = float("nan")
 
@@ -176,6 +176,7 @@ DEFAULT_CFG: Dict[str, Any] = {
     "quasi_static": True,               # 1c generate_device(quasi_static_dephasing=...); SC only
     "spam_perturbation_frac": None,     # None -> the resolved perturbation_frac
     "dw_halfwidth_hz": None,            # None -> 1c registry; "literature" population only
+    "probe_blocks": 10,                 # inv.interleave_probe_blocks(n_blocks=...); 1 = circuit-major
 }
 # Probe family (circuit-name prefixes) whose chunks define each parameter's
 # comparison truth in a time-resolved run.
@@ -276,7 +277,8 @@ def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
             "crosstalk_scale": float(c["crosstalk_scale"]),
             "detuning_1_over_f": bool(c["detuning_1_over_f"]), "alpha": float(alpha),
             "time_resolved": bool(c["time_resolved"]),
-            "t1_telegraph": bool(c["t1_telegraph"])}
+            "t1_telegraph": bool(c["t1_telegraph"]),
+            "probe_blocks": int(c["probe_blocks"])}
 
 
 def _inversion_spam(prior: Any, c: Dict[str, Any]):
@@ -389,14 +391,23 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
         if len(shots_list) != len(circuits):
             raise RuntimeError(f"{len(shots_list)} shot entries != {len(circuits)} circuits")
 
-        # Independent shot noise per circuit: circuit i uses Aer seed seed*1000 + i
-        # (a probe has far fewer than 1000 circuits, so seeds never collide across instances).
-        sim_result = sim.simulate_probe(circuits, truth, shots=shots_list,
+        # Block-interleaved execution (inv.interleave_probe_blocks): the probe
+        # list runs probe_blocks times, each with its share of every circuit's
+        # shots, and the block counts are merged per circuit before inversion.
+        block_circuits, block_shots, block_index = inv.interleave_probe_blocks(
+            circuits, shots_list, int(c["probe_blocks"]))
+        # Independent shot noise per block entry: entry i uses Aer seed seed*1000 + i
+        # (at most 1000 entries, so seeds never collide across instances).
+        if len(block_circuits) > 1000:
+            raise RuntimeError(f"{len(block_circuits)} block entries would reuse Aer seeds")
+        sim_result = sim.simulate_probe(block_circuits, truth, shots=block_shots,
                                         t_s=t_measure_s, dt_ns=profile.dt_ns,
                                         seed=int(seed) * 1000,
                                         time_resolved=c["time_resolved"])
+        counts_list = inv.merge_block_counts(sim_result.counts_list, block_index,
+                                             len(circuits))
         result = inv.lindblad_inversion(
-            sim_result.counts_list, meta, profile,
+            counts_list, meta, profile,
             shots_t1=SHOTS_T1, shots_ramsey=SHOTS_RAMSEY, shots_gate=SHOTS_GATE,
             shots_echo=SHOTS_ECHO, qubit_id=0, timestamp=timestamp)
 
@@ -412,7 +423,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
             # Frozen run: no within-run variation; the wall-clock length the
             # probe would take is still reported (same lower-bound accounting).
             truth_spread = dict.fromkeys(PARAMETERS, 0.0)
-            run_duration_s = sim.probe_run_duration_s(circuits, truth, shots_list,
+            run_duration_s = sim.probe_run_duration_s(block_circuits, truth, block_shots,
                                                       t_s=t_measure_s, dt_ns=profile.dt_ns)
         # delta_omega is compared SIGNED: a wrong-sign estimate is an error.
         canary = {"T1_s": float(result.T1_s),
@@ -424,10 +435,10 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                   "delta_omega": float(result.delta_omega_sigma),
                   "epsilon_sx": float(result.epsilon_sx_sigma)}
         chi2 = {"T1_s": float(result.t1_chi2_dof),
-                "T2_s": float(result.ramsey_chi2_dof),
+                "T2_s": float(result.echo_chi2_dof),  # T2_s is the echo T2
                 "delta_omega": float(result.ramsey_chi2_dof),
                 "epsilon_sx": float(result.gate_chi2_dof)}
-        chi2_secondary = {"T2_s": float(result.echo_chi2_dof)}
+        chi2_secondary = {"T2_s": float(result.ramsey_chi2_dof)}
         priors = {"T1_s": float(prior.T1_prior_s),
                   "T2_s": float(prior.T2_prior_s),
                   "delta_omega": NAN,
@@ -529,7 +540,7 @@ def validate_rows(rows: List[Dict[str, Any]], n_instances: int,
         if any(not str(r["fit_status"]).strip() for r in arch_rows):
             problems.append(f"{architecture}: a row has a blank fit_status")
         for flag in ("time_resolved", "t1_telegraph", "gate_detuning", "quasi_static",
-                     "dw_population"):
+                     "dw_population", "probe_blocks"):
             if len({r[flag] for r in arch_rows}) > 1:
                 problems.append(f"{architecture}: mixed {flag} values across rows")
 
@@ -617,7 +628,7 @@ def _read_csv(path: pathlib.Path) -> List[Dict[str, Any]]:
         rows = []
         for raw in reader:
             row = dict(raw)
-            for key in ("instance_id", "seed", "shots_total"):
+            for key in ("instance_id", "seed", "shots_total", "probe_blocks"):
                 row[key] = int(row[key])
             row["success"] = str(row["success"]).strip().lower() == "true"
             for key in ("true_value", "canary_value", "absolute_error", "relative_error",
@@ -726,10 +737,16 @@ def main() -> None:
     ap.add_argument("--t1-telegraph", action="store_true",
                     help="superconducting only: opt-in two-state T1 switching "
                          "(Class C switching amplitude; off by default)")
+    ap.add_argument("--probe-blocks", type=int, default=DEFAULT_CFG["probe_blocks"],
+                    help="block-interleaved execution: run the probe list this many "
+                         "times with a share of each circuit's shots "
+                         "(1_inversion.interleave_probe_blocks; 1 = circuit-major)")
     args = ap.parse_args()
 
     if args.n_instances <= 0:
         sys.exit("--n-instances must be positive")
+    if args.probe_blocks < 1:
+        sys.exit("--probe-blocks must be >= 1")
     if args.perturbation_frac is not None and not 0.0 <= args.perturbation_frac < 1.0:
         sys.exit("--perturbation-frac must be in [0, 1)")
     if args.spam_scale < 0.0:
@@ -769,7 +786,8 @@ def main() -> None:
            "time_resolved": args.time_resolved, "t1_telegraph": args.t1_telegraph,
            "gate_detuning": args.gate_detuning, "quasi_static": args.quasi_static,
            "spam_perturbation_frac": args.spam_perturbation_frac,
-           "dw_halfwidth_hz": args.dw_halfwidth_hz}
+           "dw_halfwidth_hz": args.dw_halfwidth_hz,
+           "probe_blocks": args.probe_blocks}
     if args.combine:
         combine(args.input, args.out, args.n_instances)
         return

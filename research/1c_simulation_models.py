@@ -8,12 +8,12 @@ under two regimes:
     ideal / model_consistent  -- correctly specified, stationary Markovian
                                  noise (the null baseline for the T1, gate
                                  and echo chi2/dof, which follow chi2(2)).
-                                 The Ramsey chi2/dof is inflated by
-                                 construction: delta_omega is fixed by
-                                 arctan2 at the shortest delay yet counted
-                                 as a fitted parameter, so its dof = 4 is
-                                 nominal (measured median 1.21 SC / 1.09 TI
-                                 vs 0.84 for chi2(4)/4; KS p ~ 1e-9).
+                                 With the earlier single-delay arctan2
+                                 Ramsey estimator its chi2/dof was inflated
+                                 (measured median 1.21 SC / 1.09 TI vs 0.84
+                                 for chi2(4)/4; KS p ~ 1e-9); not yet
+                                 re-measured for the unwrapped multi-delay
+                                 estimator (8 points, dof 6).
     nisq  / model_mismatched  -- adds the mechanisms listed below.
 
 NISQ MECHANISMS. [ON] = active in the single-qubit 3_benchmark.py by
@@ -4003,7 +4003,7 @@ def _run_validation_tests() -> None:
         _sys3.modules["inversion_u"] = _inv3
         _spec3.loader.exec_module(_inv3)
         from qiskit.quantum_info import Operator as _Op
-        u_ok, u_detail = True, []
+        u_ok, tw_ok, u_detail = True, True, []
         for arch_k, dw_k in (("superconducting", 2 * np.pi * 5e3), ("trapped_ion", 2 * np.pi * 0.5)):
             t_u = generate_device(arch_k, 1, seed=4, regime="nisq", detuning_during_gates=True,
                                   overrides={"T1_range_s": (1e3, 1e3), "T_phi_range_s": (1e3, 1e3),
@@ -4019,14 +4019,25 @@ def _run_validation_tests() -> None:
             u_pair = rz_k @ _Op(gi_k).data @ rz_k @ rz_k @ _Op(g_k).data @ rz_k
             n_u = 400
             psi = np.linalg.matrix_power(u_pair, n_u) @ np.array([1.0, 0.0])
-            qc_u = _inv3._build_gate_rep_circuit(n_u, arch_k)
+            # Untwirled train: this test checks the simulator's pulse physics
+            # against the exact product of identical pairs.
+            qc_u = _inv3._build_gate_rep_circuit(n_u, arch_k, twirl=False)
+            qc_tw = _inv3._build_gate_rep_circuit(n_u, arch_k, twirl=True)
             p_on = simulate_circuit(qc_u, t_u, shots=20_000, seed=5).get("0", 0) / 20_000
+            p_tw = simulate_circuit(qc_tw, t_u, shots=20_000, seed=5).get("0", 0) / 20_000
             t_u.architecture_specific["detuning_during_gates"] = False
             p_off = simulate_circuit(qc_u, t_u, shots=20_000, seed=5).get("0", 0) / 20_000
             u_ok &= abs(p_on - abs(psi[0]) ** 2) < 0.012 and p_off > 0.99
-            u_detail.append(f"{arch_k[:2]}: P0 on={p_on:.4f} exact={abs(psi[0]) ** 2:.4f} off={p_off:.4f}")
+            # U2: the virtual-Z frame twirl of 1_inversion's gate probe turns
+            # the coherent detuning build-up into a random walk, so the
+            # twirled train stays within shot noise of the detuning-free one.
+            tw_ok &= abs(p_tw - p_off) < 0.01
+            u_detail.append(f"{arch_k[:2]}: P0 on={p_on:.4f} exact={abs(psi[0]) ** 2:.4f} "
+                            f"off={p_off:.4f} twirled_on={p_tw:.4f}")
         check("U. detuning during pulses matches the exact pair unitary; off changes nothing",
               u_ok, "  ".join(u_detail))
+        check("U2. frame-twirled gate train is insensitive to detuning during pulses",
+              tw_ok, "  ".join(u_detail))
     except ImportError:
         print("[SKIP] T/U quasi-static and gate-detuning physics (qiskit-aer not installed)")
 

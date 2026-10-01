@@ -74,18 +74,20 @@ def chi2_scaled_z(delta: float, sigma_cur: float, sigma_base: float,
 # n_params as in 1_inversion.py's _chi2_per_dof / lindblad_inversion.
 _PROBE_DOF = {
     "t1":     2,  # 3 delays, 1 param (T1)
-    # Ramsey dof is nominal: delta_omega is fixed by arctan2 at the shortest
-    # delay, not fitted, so its chi2/dof does not follow chi2(4)/4 on ideal data.
-    "ramsey": 4,  # 3 delays x (X, Y) = 6 points, 2 params (T2, delta_omega)
+    # Ramsey: delta_omega is a weighted least-squares fit of the unwrapped
+    # phases and T2 a fit with delta_omega held fixed, both on these points.
+    "ramsey": 6,  # 4 delays (short + 3 T2-scale) x (X, Y) = 8 points, 2 params (T2, delta_omega)
     # 3 repetition counts, 1 param (epsilon_sx); the asymptote z* is
     # computed from T1, T2 and the gate time, not fitted.
     "gate":   2,
     "echo":   2,  # 3 delays, 1 param (T2_echo)
 }
 # Nominal family-wise false-YELLOW rate for one qubit-round, Bonferroni-split
-# over the len(_PROBE_DOF) probes. Calibrated for t1/gate/echo; the Ramsey
-# test is not (measured on correctly specified ideal data: Ramsey alone
-# 11.3% SC / 8.0% TI vs 1.25% nominal; family-wise 15.3% SC / 9.3% TI).
+# over the len(_PROBE_DOF) probes. Calibrated for t1/gate/echo. With the
+# earlier single-delay arctan2 Ramsey estimator the Ramsey test was not
+# (measured on correctly specified ideal data: Ramsey alone 11.3% SC / 8.0%
+# TI vs 1.25% nominal; family-wise 15.3% SC / 9.3% TI); those rates predate
+# the unwrapped multi-delay estimator and must be re-measured.
 _HEALTH_FAMILY_ALPHA = 0.05
 
 
@@ -146,10 +148,11 @@ class OnlineInversionResult:
         chi2.ppf(1 - 0.05/4, dof)/dof with dof from _PROBE_DOF, i.e.
         nominal chi2 quantiles for a 5% family-wise false-YELLOW rate
         (Bonferroni over the 4 probes) per qubit-round. The t1/gate/echo
-        tests are calibrated; the Ramsey test is not (its dof counts the
-        arctan2-fixed delta_omega as fitted; measured Ramsey false-YELLOW
-        11.3% SC / 8.0% TI vs 1.25% nominal), so the family-wise rate on
-        correctly specified data is ~9-15% (measured 15.3% SC / 9.3% TI).
+        tests are calibrated; the Ramsey rate measured with the earlier
+        single-delay estimator (false-YELLOW 11.3% SC / 8.0% TI vs 1.25%
+        nominal; family-wise 15.3% SC / 9.3% TI) predates the unwrapped
+        multi-delay estimator and must be re-measured (see
+        _HEALTH_FAMILY_ALPHA).
 
         GREEN:  all probe chi2_dof <= threshold AND all sigmas finite
         YELLOW: any probe chi2_dof > threshold, OR T2_ramsey and T2_echo
@@ -542,9 +545,9 @@ class CanaryInterleaver:
         T1, delta_omega, and epsilon_sx sigmas are chi2-scaled before
         differencing (see chi2_scaled_z) so a round contaminated by
         non-Markovian noise or coherent gate error doesn't masquerade as
-        drift. T2's combined sigma already carries an equivalent chi2
-        inflation from lindblad_inversion's Ramsey/echo fusion (Eq. 12)
-        and is used as reported.
+        drift. T2 (the echo T2) already carries an equivalent chi2
+        inflation of its sigma from lindblad_inversion and is used as
+        reported.
 
         Raises ValueError if qubit_id has no baseline yet (call
         process() at least once, or set_baseline() explicitly).
