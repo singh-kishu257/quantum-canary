@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantum-canary"
+dynamic = ["version"]
+description = "Low-shot recovery of T1, T2, T2*, qubit detuning and single-qubit gate error from a fixed set of probe circuits, on IBM hardware or in simulation."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Kanishka Singh" }]
+requires-python = ">=3.10"
+keywords = ["quantum computing", "qubit characterization", "T1", "T2", "Ramsey",
+            "randomized compiling", "Qiskit", "NISQ"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "qiskit>=2.0",
+    "qiskit-aer>=0.17",
+    "qiskit-ionq>=1.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+ibm = ["qiskit-ibm-runtime>=0.40"]
+test = ["pytest>=8"]
+
+[project.scripts]
+quantum-canary = "quantum_canary.cli:main"
+
+[project.urls]
+Repository = "https://github.com/singh-kishu257/quantum-canary"
+
+[tool.setuptools.dynamic]
+version = { attr = "quantum_canary.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+quantum_canary = ["py.typed"]

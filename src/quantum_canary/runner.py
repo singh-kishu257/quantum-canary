@@ -1,0 +1,429 @@
+"""High-level runners: run the Canary probe on IBM hardware, or in silico.
+
+Nothing in this module changes the Canary method. It only orchestrates the
+engine (quantum_canary.inversion, the packaged copy of research/1_inversion.py):
+
+  run_ibm()        live priors from the backend (BackendProfile.from_ibm_backend),
+                   the engine's probe circuits (inversion.build_probe_circuits),
+                   block-interleaved execution (inversion.interleave_probe_blocks),
+                   one SamplerV2 job, and the engine's inversion
+                   (inversion.lindblad_inversion) per qubit.
+  run_simulation() the per-qubit flow of research/2_ideal_parity.py
+                   (regime="ideal") or of research/3_benchmark.py with its
+                   default settings (regime="nisq"), on the simulator in
+                   quantum_canary.simulation (the packaged 1c_simulation_models.py),
+                   with the true parameters kept for comparison.
+
+Hardware support is superconducting (IBM, Qiskit Runtime). Trapped-ion
+qubits are supported in simulation only.
+"""
+from __future__ import annotations
+
+import contextlib
+import dataclasses
+import io
+import warnings
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence
+
+import numpy as np
+
+from . import inversion as inv
+from . import simulation as sim
+from .online import OnlineInversionResult
+
+__all__ = [
+    "DEFAULT_SHOTS", "DEFAULT_PROBE_BLOCKS", "QubitReport", "CanaryReport",
+    "run_ibm", "run_simulation",
+]
+
+# Shots per circuit of each probe family: the values every research benchmark
+# (2_ideal_parity.py, 3_benchmark.py) and the IBM hardware runs used.
+DEFAULT_SHOTS: Dict[str, int] = {"t1": 300, "ramsey": 1000, "gate": 500, "echo": 500}
+# Block-interleaved execution: 3_benchmark.py's default (probe_blocks = 10).
+DEFAULT_PROBE_BLOCKS = 10
+
+# research/3_benchmark.py constants and default configuration (regime="nisq").
+_NISQ_T_CALIB_S = 0.0
+_NISQ_T_MEASURE_S = 3600.0
+_SPAM_CLIP_MAX = 0.499
+# Probe family whose shot chunks define each parameter's comparison truth in
+# a time-resolved run (3_benchmark.TRUTH_FAMILIES).
+_TRUTH_FAMILIES = {"T1_s": ("t1_",), "T2_s": ("ramsey_X_", "ramsey_Y_", "echo_"),
+                   "delta_omega": ("ramsey_X_", "ramsey_Y_"),
+                   "epsilon_sx": ("gate_rep_N",)}
+# research/2_ideal_parity.py and 3_benchmark.py seed offsets per architecture.
+_ARCH_SEED_OFFSET = {"superconducting": 0, "trapped_ion": 100_000}
+
+
+@dataclass
+class QubitReport:
+    """One qubit's Canary result.
+
+    result:       the engine's InversionResult (T1, T2 (echo), T2* (Ramsey),
+                  delta_omega, epsilon_sx, their sigmas and chi2/dof).
+    profile:      the BackendProfile the probe was built from (priors,
+                  prior_confidence, calibration_source).
+    health:       "GREEN" | "YELLOW" | "RED" from
+                  online.OnlineInversionResult.health_summary().
+    truth:        simulation only: the true parameters the result is compared
+                  with (same definitions as the research benchmarks).
+    engine_log:   lines the engine printed while building the profile and
+                  inverting (live-prior summary, chi2 warnings).
+    """
+    qubit: int
+    result: inv.InversionResult
+    profile: inv.BackendProfile
+    health: str
+    truth: Optional[Dict[str, float]] = None
+    engine_log: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        r = dataclasses.asdict(self.result)
+        const = self.profile.constants
+        return {"qubit": self.qubit, "health": self.health, "truth": self.truth,
+                "prior_confidence": self.profile.prior_confidence,
+                "T1_prior_s": self.profile.T1_prior_s,
+                "T2_prior_s": self.profile.T2_prior_s,
+                "eps_prior": const.get("eps_typical"),
+                "p0_given_1": const.get("p0_given_1"),
+                "p1_given_0": const.get("p1_given_0"),
+                "gate_time_ns": const.get("gate_time_ns"),
+                "dt_ns": self.profile.dt_ns,
+                "result": r, "engine_log": list(self.engine_log)}
+
+
+@dataclass
+class CanaryReport:
+    """Result of one Canary run over one or more qubits."""
+    mode: str                     # "hardware" | "simulation"
+    backend: str
+    architecture: str
+    shots: Dict[str, int]
+    probe_blocks: int
+    circuits_per_qubit: int
+    qubits: List[QubitReport]
+    timestamp: str
+    regime: Optional[str] = None  # simulation only: "ideal" | "nisq"
+    job_id: Optional[str] = None  # hardware only
+
+    @property
+    def shots_per_qubit(self) -> int:
+        if not self.qubits:
+            return 0
+        meta_counts = _probe_counts(self.qubits[0].profile)
+        return sum(meta_counts[k] * self.shots[k] for k in meta_counts)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"mode": self.mode, "backend": self.backend,
+                "architecture": self.architecture, "regime": self.regime,
+                "job_id": self.job_id, "shots": dict(self.shots),
+                "probe_blocks": self.probe_blocks,
+                "circuits_per_qubit": self.circuits_per_qubit,
+                "timestamp": self.timestamp,
+                "qubits": [q.to_dict() for q in self.qubits]}
+
+    def render(self, color: Optional[bool] = None) -> str:
+        from .display import render_report
+        return render_report(self, color=color)
+
+    def print(self, color: Optional[bool] = None, file=None) -> None:
+        """Print render() to `file` (default sys.stdout). Characters the
+        stream's encoding cannot represent (e.g. on a legacy Windows code
+        page) are replaced instead of raising UnicodeEncodeError."""
+        import sys
+        stream = sys.stdout if file is None else file
+        text = self.render(color=color) + "\n"
+        try:
+            stream.write(text)
+        except UnicodeEncodeError:
+            enc = getattr(stream, "encoding", None) or "ascii"
+            stream.write(text.encode(enc, errors="replace").decode(enc))
+        stream.flush()
+
+
+def _probe_counts(profile: inv.BackendProfile) -> Dict[str, int]:
+    _, meta = inv.build_probe_circuits(profile)
+    return {"t1": meta["n_t1"], "ramsey": meta["n_ramsey"],
+            "gate": meta["n_gate"], "echo": meta["n_echo"]}
+
+
+def _shots_list(meta: Dict[str, Any], shots: Dict[str, int]) -> List[int]:
+    return ([shots["t1"]] * meta["n_t1"] + [shots["ramsey"]] * meta["n_ramsey"]
+            + [shots["gate"]] * meta["n_gate"] + [shots["echo"]] * meta["n_echo"])
+
+
+def _check_shots(shots: Optional[Dict[str, int]]) -> Dict[str, int]:
+    out = dict(DEFAULT_SHOTS)
+    if shots:
+        unknown = set(shots) - set(DEFAULT_SHOTS)
+        if unknown:
+            raise ValueError(f"unknown shot keys {sorted(unknown)}; expected {sorted(DEFAULT_SHOTS)}")
+        out.update({k: int(v) for k, v in shots.items()})
+    if any(v < 1 for v in out.values()):
+        raise ValueError(f"every shot count must be >= 1, got {out}")
+    return out
+
+
+def _health(qubit: int, result: inv.InversionResult) -> str:
+    snapshot = OnlineInversionResult(
+        round_index=0, timestamp=result.timestamp, qubit_results={qubit: result},
+        algo_indices=[], canary_indices=[])
+    return snapshot.health_summary()[qubit]
+
+
+def _captured(fn, *args, **kwargs):
+    """Call fn, returning (value, printed lines): the engine reports live
+    priors and chi2 warnings with print(); the runner shows them in its
+    report instead of interleaving them with its own output."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        value = fn(*args, **kwargs)
+    return value, [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+
+
+# --------------------------------------------------------------------------
+# Hardware (IBM, superconducting)
+# --------------------------------------------------------------------------
+
+def _counts_from_pub(pub_result, circuit, shots: int) -> Dict[str, int]:
+    """Counts of a one-clbit probe circuit from a SamplerV2 PUB result. Raises
+    if the register is missing or the counts do not add up to the shots
+    requested: the inversion must never see fabricated counts."""
+    creg = circuit.cregs[0].name
+    data = getattr(pub_result.data, creg, None)
+    if data is None:
+        raise RuntimeError(f"classical register {creg!r} missing from the sampler result")
+    raw = data.get_counts()
+    counts = {str(k): int(v) for k, v in raw.items()}
+    if not set(counts) <= {"0", "1"} or sum(counts.values()) != shots:
+        raise RuntimeError(f"unexpected counts {raw!r} for {shots} shots")
+    return counts
+
+
+def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = None,
+            probe_blocks: int = DEFAULT_PROBE_BLOCKS, sampler=None) -> CanaryReport:
+    """Run the Canary probe on physical `qubits` of an IBM (superconducting)
+    backend and invert each qubit.
+
+    backend:      a Qiskit backend, e.g. QiskitRuntimeService().backend("ibm_fez")
+                  (or a qiskit_ibm_runtime fake backend for a local dry run).
+    qubits:       physical qubit indices.
+    shots:        per-circuit shots per probe family (default DEFAULT_SHOTS).
+    probe_blocks: block-interleaved execution (default 10, as in the
+                  benchmarks); 1 runs each circuit's shots consecutively.
+    sampler:      optional SamplerV2-compatible sampler; default
+                  qiskit_ibm_runtime.SamplerV2(mode=backend).
+
+    Priors come from the backend's own calibration
+    (BackendProfile.from_ibm_backend, the profile get_live_profile builds for
+    an IBM backend): prior_confidence is "live" when both T1 and T2 were read
+    from it, otherwise "arch_default". All circuits are submitted as one job.
+    """
+    from qiskit import transpile
+
+    qubits = [int(q) for q in qubits]
+    if not qubits:
+        raise ValueError("qubits must not be empty")
+    if len(set(qubits)) != len(qubits):
+        raise ValueError(f"duplicate qubits in {qubits}")
+    n_backend = getattr(backend, "num_qubits", None)
+    if n_backend is not None and any(not 0 <= q < n_backend for q in qubits):
+        raise ValueError(f"qubits {qubits} outside 0..{n_backend - 1} of {backend.name}")
+    shots = _check_shots(shots)
+
+    profiles, logs, metas, circuits, owners = {}, {}, {}, [], []
+    for q in qubits:
+        # The call get_live_profile() makes for an IBM backend. Calling it
+        # directly also accepts any Qiskit BackendV2 with properties() (e.g.
+        # qiskit_ibm_runtime fake backends): get_live_profile's generic check
+        # imports qiskit.providers.BackendV1, which Qiskit 2.x removed, so it
+        # recognises only qiskit_ibm_runtime.IBMBackend there.
+        profile, log = _captured(inv.BackendProfile.from_ibm_backend, backend, qubit=q)
+        if profile.architecture != "superconducting":
+            raise ValueError("run_ibm supports superconducting backends only "
+                             f"(got architecture {profile.architecture!r})")
+        qcs, meta = inv.build_probe_circuits(profile)
+        profiles[q], logs[q], metas[q] = profile, log, meta
+        circuits.extend(qcs)
+        owners.extend([q] * len(qcs))
+
+    shots_list = [s for q in qubits for s in _shots_list(metas[q], shots)]
+    transpiled = [transpile(qc, backend=backend, initial_layout=[q], optimization_level=0)
+                  for qc, q in zip(circuits, owners)]
+    block_circuits, block_shots, block_index = inv.interleave_probe_blocks(
+        transpiled, shots_list, int(probe_blocks))
+
+    if sampler is None:
+        from qiskit_ibm_runtime import SamplerV2
+        sampler = SamplerV2(mode=backend)
+    job = sampler.run([(qc, None, sh) for qc, sh in zip(block_circuits, block_shots)])
+    job_id = job.job_id() if hasattr(job, "job_id") else None
+    pub_results = job.result()
+
+    block_counts = [_counts_from_pub(pub_results[i], block_circuits[i], block_shots[i])
+                    for i in range(len(block_circuits))]
+    counts_all = inv.merge_block_counts(block_counts, block_index, len(circuits))
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    reports, start = [], 0
+    for q in qubits:
+        n = len(_shots_list(metas[q], shots))
+        result, log = _captured(
+            inv.lindblad_inversion, counts_all[start:start + n], metas[q], profiles[q],
+            shots_t1=shots["t1"], shots_ramsey=shots["ramsey"],
+            shots_gate=shots["gate"], shots_echo=shots["echo"],
+            qubit_id=q, timestamp=timestamp)
+        start += n
+        reports.append(QubitReport(qubit=q, result=result, profile=profiles[q],
+                                   health=_health(q, result), engine_log=logs[q] + log))
+
+    return CanaryReport(mode="hardware", backend=str(getattr(backend, "name", backend)),
+                        architecture="superconducting", shots=shots,
+                        probe_blocks=int(probe_blocks),
+                        circuits_per_qubit=len(circuits) // len(qubits),
+                        qubits=reports, timestamp=timestamp, job_id=job_id)
+
+
+# --------------------------------------------------------------------------
+# Simulation (superconducting and trapped ion)
+# --------------------------------------------------------------------------
+
+def _time_resolved_truth(truth, sim_result) -> Dict[str, float]:
+    """research/3_benchmark._time_resolved_truth: per parameter, the
+    shot-weighted mean over the chunks of the probe family that measures it."""
+    out: Dict[str, float] = {}
+    for param, prefixes in _TRUTH_FAMILIES.items():
+        vals, weights = [], []
+        for name, recs in zip(sim_result.circuit_names, sim_result.chunk_records):
+            if not name.startswith(prefixes):
+                continue
+            for rec in recs:
+                if param == "epsilon_sx":
+                    vals.append(sim.effective_gate_epsilon(truth, 0, rec["t_mid_s"]))
+                else:
+                    key = {"T1_s": "T1_s", "T2_s": "T2_s",
+                           "delta_omega": "delta_omega_rad_s"}[param]
+                    vals.append(float(rec["truth"][0][key]))
+                weights.append(float(rec["shots"]))
+        v, w = np.array(vals, dtype=float), np.array(weights, dtype=float)
+        out[param] = float(v[0] + np.sum(w * (v - v[0])) / np.sum(w))
+    return out
+
+
+def _simulate_one(architecture: str, regime: str, seed: int, qubit: int,
+                  shots: Dict[str, int], probe_blocks: int):
+    """One simulated qubit, exactly as one instance of research/2_ideal_parity.py
+    (regime="ideal") or research/3_benchmark.py with default settings
+    (regime="nisq"). Returns (InversionResult, profile, truth dict, engine log)."""
+    if regime == "ideal":
+        truth = sim.generate_device(architecture, n_qubits=1, seed=seed, regime="ideal",
+                                    spam_spread_frac=0.0, perturbation_frac=None,
+                                    dw_population="estimator_window")
+        prior = sim.generate_calibration_prior(truth, qubit=0, t0_s=0.0,
+                                               perturbation_frac=None)
+        t_s = 0.0
+    else:
+        truth = sim.generate_device(architecture, n_qubits=1, seed=seed, regime="nisq",
+                                    overrides=None, crosstalk_scale=1.0,
+                                    detuning_1_over_f=False, spam_spread_frac=0.0,
+                                    perturbation_frac=None, dw_population="literature",
+                                    t1_telegraph=False, quasi_static_dephasing=True,
+                                    detuning_during_gates=True)
+        prior = sim.generate_calibration_prior(
+            truth, qubit=0, t0_s=_NISQ_T_CALIB_S, perturbation_frac=None,
+            spam_perturbation_frac=sim.resolve_calibration_perturbation(architecture, "nisq"))
+        t_s = _NISQ_T_MEASURE_S
+
+    p0_given_1 = float(np.clip(prior.spam_p0_given_1_prior, 0.0, _SPAM_CLIP_MAX))
+    p1_given_0 = float(np.clip(prior.spam_p1_given_0_prior, 0.0, _SPAM_CLIP_MAX))
+    constants = dict(inv.ARCH_DEFAULTS[architecture])
+    constants.update(T1_s=prior.T1_prior_s, T2_s=prior.T2_prior_s,
+                     eps_typical=prior.epsilon_prior,
+                     p0_given_1=p0_given_1, p1_given_0=p1_given_0)
+    profile = inv.BackendProfile(
+        architecture=architecture, T1_prior_s=prior.T1_prior_s,
+        T2_prior_s=prior.T2_prior_s, dt_ns=inv.ARCH_DEFAULTS[architecture]["dt_ns"],
+        backend_name=f"simulated::{architecture}::{regime}", custom_arch=constants,
+        prior_confidence="prior_informed")
+
+    circuits, meta = inv.build_probe_circuits(profile)
+    shots_list = _shots_list(meta, shots)
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    if regime == "ideal":
+        sim_result = sim.simulate_probe(circuits, truth, shots=shots_list, t_s=0.0,
+                                        dt_ns=profile.dt_ns, seed=int(seed) * 1000)
+        counts_list = sim_result.counts_list
+        tv = sim.evaluate_truth_at(truth, 0, 0.0)
+        true_values = {"T1_s": float(tv["T1_s"]), "T2_s": float(tv["T2_s"]),
+                       "delta_omega": float(tv["delta_omega_rad_s"]),
+                       "epsilon_sx": sim.effective_gate_epsilon(truth, 0, 0.0)}
+    else:
+        block_circuits, block_shots, block_index = inv.interleave_probe_blocks(
+            circuits, shots_list, int(probe_blocks))
+        if len(block_circuits) > 1000:
+            raise RuntimeError(f"{len(block_circuits)} block entries would reuse Aer seeds")
+        sim_result = sim.simulate_probe(block_circuits, truth, shots=block_shots,
+                                        t_s=t_s, dt_ns=profile.dt_ns,
+                                        seed=int(seed) * 1000, time_resolved=True)
+        counts_list = inv.merge_block_counts(sim_result.counts_list, block_index,
+                                             len(circuits))
+        true_values = _time_resolved_truth(truth, sim_result)
+
+    result, log = _captured(
+        inv.lindblad_inversion, counts_list, meta, profile,
+        shots_t1=shots["t1"], shots_ramsey=shots["ramsey"],
+        shots_gate=shots["gate"], shots_echo=shots["echo"],
+        qubit_id=qubit, timestamp=timestamp)
+    true_values.update(T1_prior_s=float(prior.T1_prior_s), T2_prior_s=float(prior.T2_prior_s),
+                       epsilon_prior=float(prior.epsilon_prior), seed=int(seed))
+    return result, profile, true_values, log
+
+
+def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
+                   regime: str = "nisq", seed: Optional[int] = None,
+                   shots: Optional[Dict[str, int]] = None,
+                   probe_blocks: int = DEFAULT_PROBE_BLOCKS) -> CanaryReport:
+    """Run Canary on simulated qubits and keep the true parameters.
+
+    Each qubit is an independent simulated device, generated and probed
+    exactly as one instance of the research benchmarks:
+      regime="nisq"  (default) research/3_benchmark.py with its default
+                     settings: drift, quasi-static dephasing (superconducting),
+                     literature detuning population, detuning during gates,
+                     coherent gate error, stale calibration and SPAM priors
+                     (1 h old), time-resolved block-interleaved execution.
+      regime="ideal" research/2_ideal_parity.py: correctly specified,
+                     stationary Markovian noise.
+    Qubit i uses seed (seed + i); seed defaults to the benchmarks' offset for
+    the architecture (0 superconducting, 100000 trapped ion), so with default
+    settings qubit i reproduces benchmark instance i.
+    probe_blocks applies to regime="nisq" only (the ideal benchmark runs each
+    circuit's shots consecutively).
+    """
+    if architecture not in ("superconducting", "trapped_ion"):
+        raise ValueError(f"architecture must be 'superconducting' or 'trapped_ion', "
+                         f"got {architecture!r}")
+    if regime not in ("ideal", "nisq"):
+        raise ValueError(f"regime must be 'ideal' or 'nisq', got {regime!r}")
+    if n_qubits < 1:
+        raise ValueError(f"n_qubits must be >= 1, got {n_qubits}")
+    shots = _check_shots(shots)
+    base = _ARCH_SEED_OFFSET[architecture] if seed is None else int(seed)
+
+    reports = []
+    for i in range(int(n_qubits)):
+        result, profile, truth, log = _simulate_one(architecture, regime, base + i, i,
+                                                    shots, probe_blocks)
+        reports.append(QubitReport(qubit=i, result=result, profile=profile,
+                                   health=_health(i, result), truth=truth,
+                                   engine_log=log))
+    circuits_per_qubit = len(inv.build_probe_circuits(reports[0].profile)[0])
+    return CanaryReport(mode="simulation", backend="simulator",
+                        architecture=architecture, shots=shots,
+                        probe_blocks=int(probe_blocks) if regime == "nisq" else 1,
+                        circuits_per_qubit=circuits_per_qubit, qubits=reports,
+                        timestamp=datetime.now(timezone.utc).isoformat(), regime=regime)
