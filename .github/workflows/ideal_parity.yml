@@ -17,6 +17,7 @@ concurrency:
 
 env:
   N_INSTANCES: ${{ github.event.inputs.n_instances || '300' }}
+  PYTHONPATH: src
 
 jobs:
   benchmark:
@@ -52,10 +53,10 @@ jobs:
             print('scipy', scipy.__version__)"
 
       - name: Verify frozen modules are unmodified
-        run: git diff --exit-code -- research/1_inversion.py research/1c_simulation_models.py
+        run: git diff --exit-code -- src/quantum_canary/inversion.py src/quantum_canary/simulation.py
 
       - name: Self-test the simulation layer
-        run: python research/1c_simulation_models.py
+        run: python -m quantum_canary selftest
 
       - name: Run benchmark
         run: |

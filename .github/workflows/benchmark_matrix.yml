@@ -26,6 +26,7 @@ env:
   SHARDS: "10"
   OPENBLAS_NUM_THREADS: "1"
   OMP_NUM_THREADS: "1"
+  PYTHONPATH: src
 
 jobs:
   selftest:
@@ -47,7 +48,7 @@ jobs:
           pip install -r research/requirements.txt
 
       - name: Self-test the simulation layer
-        run: python research/1c_simulation_models.py
+        run: python -m quantum_canary selftest
 
   run:
     name: ${{ matrix.architecture }} shard ${{ matrix.shard }}
