@@ -46,7 +46,7 @@ def _backend(args):
     try:
         import qiskit_ibm_runtime  # noqa: F401
     except ImportError:
-        _status("qiskit-ibm-runtime is required: pip install \"quantum-canary[ibm]\"")
+        _status("qiskit-ibm-runtime is missing: pip install --upgrade quantum-canary")
         return None
     if args.fake:
         from qiskit_ibm_runtime.fake_provider import FakeProviderForBackendV2

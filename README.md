@@ -18,10 +18,10 @@ single-qubit gate error.
 ## Install
 
 ```bash
-pip install "quantum-canary[ibm]"
+pip install quantum-canary
 ```
 
-Python 3.10 or newer. From a clone of this repository: `pip install -e ".[ibm]"`.
+Python 3.10 or newer. From a clone of this repository: `pip install -e .`.
 
 ## Use
 

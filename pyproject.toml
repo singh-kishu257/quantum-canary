@@ -28,10 +28,10 @@ dependencies = [
     "qiskit-aer>=0.17",
     "qiskit-ionq>=1.0",
     "requests>=2.31",
+    "qiskit-ibm-runtime>=0.40",
 ]
 
 [project.optional-dependencies]
-ibm = ["qiskit-ibm-runtime>=0.40"]
 test = ["pytest>=8"]
 
 [project.scripts]
