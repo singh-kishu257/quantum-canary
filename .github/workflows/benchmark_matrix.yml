@@ -1,6 +1,6 @@
 name: NISQ Benchmark - Canary vs qiskit-experiments (Parallel Matrix)
 
-# 3_benchmark.py on the NISQ simulator with every 1c noise mechanism on, and
+# benchmark.py on the NISQ simulator with every 1c noise mechanism on, and
 # qiskit-experiments (T1, T2Hahn, T2Ramsey, StandardRB) run on the same
 # simulated qubits. Each architecture is split into SHARDS parallel jobs
 # (disjoint instance ranges, instance i always uses seed offset + i), then
@@ -87,7 +87,7 @@ jobs:
       - name: Run benchmark shard
         if: steps.range.outputs.count != '0'
         run: |
-          python research/3_benchmark.py \
+          python research/benchmark.py \
             --architecture "${{ matrix.architecture }}" \
             --n-instances "${{ steps.range.outputs.count }}" \
             --instance-start "${{ steps.range.outputs.start }}" \
@@ -133,7 +133,7 @@ jobs:
         run: |
           ARGS=()
           for f in benchmark_inputs/*.csv; do ARGS+=(--input "$f"); done
-          python research/3_benchmark.py --combine \
+          python research/benchmark.py --combine \
             --n-instances "${N_INSTANCES}" "${ARGS[@]}" \
             --out nisq_benchmark.csv
 

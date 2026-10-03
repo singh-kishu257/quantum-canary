@@ -60,7 +60,7 @@ jobs:
 
       - name: Run benchmark
         run: |
-          python research/2_ideal_parity.py \
+          python research/ideal_parity.py \
             --architecture "${{ matrix.architecture }}" \
             --n-instances "${N_INSTANCES}" \
             --seed-offset "${{ matrix.seed_offset }}" \
@@ -100,7 +100,7 @@ jobs:
 
       - name: Combine into ideal_parity.csv
         run: |
-          python research/2_ideal_parity.py \
+          python research/ideal_parity.py \
             --combine \
             --n-instances "${N_INSTANCES}" \
             --input parity_inputs/ideal_parity_superconducting.csv \
