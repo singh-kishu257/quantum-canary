@@ -16,8 +16,8 @@ quantum_canary.runner      run_ibm() and run_simulation(): one call from
 
 Quick start
 -----------
->>> import quantum_canary as qc
->>> report = qc.run_simulation("superconducting", n_qubits=2)
+>>> import quantum_canary as canary  
+>>> report = canary.run_simulation("superconducting", n_qubits=2)
 >>> report.print()
 
 Hardware: superconducting (IBM, Qiskit Runtime). Trapped-ion qubits are

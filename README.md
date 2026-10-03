@@ -55,17 +55,24 @@ QiskitRuntimeService.save_account(channel="ibm_quantum_platform", token="<your t
 
 ## Quick start (Python)
 
+Import the package as `canary`. Avoid `qc`, which Qiskit code conventionally
+uses for a `QuantumCircuit`. `canary` does not clash with the usual names in
+Qiskit, qiskit-ionq, Cirq (`cirq`), QuTiP (`qt`) or PennyLane (`qml`). Avoid
+`from quantum_canary import *`, which would bring the generic module names
+`simulation`, `online` and `inversion` into your namespace; import the names
+you need instead (`from quantum_canary import run_ibm, run_simulation`).
+
 ```python
-import quantum_canary as qc
+import quantum_canary as canary
 
 # Simulation: true values are kept for comparison.
-report = qc.run_simulation("superconducting", n_qubits=2, regime="nisq")
+report = canary.run_simulation("superconducting", n_qubits=2, regime="nisq")
 report.print()                        # or: text = report.render()
 
 # IBM hardware.
 from qiskit_ibm_runtime import QiskitRuntimeService
 backend = QiskitRuntimeService().backend("ibm_fez")
-report = qc.run_ibm(backend, qubits=[13, 14, 2])
+report = canary.run_ibm(backend, qubits=[13, 14, 2])
 report.print()                        # or: text = report.render()
 
 for q in report.qubits:
@@ -98,11 +105,11 @@ calibration value came from.
 ### Lower-level API
 
 ```python
-profile = qc.BackendProfile.from_ibm_backend(backend, qubit=13)   # or qc.BackendProfile.from_architecture("superconducting")
-circuits, meta = qc.build_probe_circuits(profile)           # 17 one-qubit circuits
+profile = canary.BackendProfile.from_ibm_backend(backend, qubit=13)   # or canary.BackendProfile.from_architecture("superconducting")
+circuits, meta = canary.build_probe_circuits(profile)           # 17 one-qubit circuits
 # ... run them, collect counts (list of {"0": n0, "1": n1}) ...
-result = qc.lindblad_inversion(counts, meta, profile,
-                               shots_t1=300, shots_ramsey=1000, shots_gate=500, shots_echo=500)
+result = canary.lindblad_inversion(counts, meta, profile,
+                                   shots_t1=300, shots_ramsey=1000, shots_gate=500, shots_echo=500)
 ```
 
 ### Online monitoring inside a running workflow
@@ -111,11 +118,11 @@ result = qc.lindblad_inversion(counts, meta, profile,
 (VQE, QAOA, ...), then reports per-round health and drift against a baseline:
 
 ```python
-canary = qc.CanaryInterleaver(qubit_ids=[0, 1], profiles={0: p0, 1: p1}, interval_n=10)
-circuits, round_map = canary.prepare(algo_circuits)
+monitor = canary.CanaryInterleaver(qubit_ids=[0, 1], profiles={0: p0, 1: p1}, interval_n=10)
+circuits, round_map = monitor.prepare(algo_circuits)
 # ... run `circuits`, collect counts in order ...
-algo_results, rounds = canary.process(all_counts, round_map)
-canary.drift_report(0)
+algo_results, rounds = monitor.process(all_counts, round_map)
+monitor.drift_report(0)
 ```
 
 ### Simulator
