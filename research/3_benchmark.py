@@ -1,142 +1,30 @@
-"""3_benchmark.py -- parameter-recovery accuracy on NISQ simulated hardware.
+"""NISQ benchmark: Canary vs qiskit-experiments on the same simulated qubits.
 
-Per instance: 1c.generate_device(regime="nisq") -> hidden DeviceTruth with
-drift and coherent error mechanisms; 1c.generate_calibration_prior() -> what
-Canary may know; 1_inversion builds its own probe circuits from the prior;
-1c.simulate_probe() executes them on Aer in a run starting at T_MEASURE_S;
-1_inversion.lindblad_inversion() recovers T1, T2, delta_omega, epsilon_sx.
+Each instance is one simulated qubit with every noise mechanism the simulator
+has switched on (crosstalk excepted, since there is only one qubit): T1 drift
+and telegraph switching, 1/f and OU frequency drift, quasi-static dephasing,
+a residual detuning that also acts during pulses, coherent over-rotation,
+readout error that varies between qubits, and motional heating for ions.
+The calibration prior is taken an hour before the run and is +/-25% (SC) or
++/-15% (ions) off, readout errors included. Circuits run in simulated real
+time, so the qubit keeps drifting while they execute.
 
-WHAT CANARY IS GIVEN. Only the counts, the probe metadata and a profile built
-from the calibration prior: T1, T2 and epsilon priors drawn as truth x
-U(1-f, 1+f) at T_CALIB_S = 0 (f = 0.25 superconducting, 0.15 trapped ion; 1c
-_CALIB_PERTURBATION), while the truth keeps drifting until T_MEASURE_S
-(default 3600 s, --t-measure); and the prior's readout errors, which by
-default are ALSO stale, truth x U(1-f_spam, 1+f_spam) with f_spam = f (1c
-calib.spam_perturbation, Class C; --spam-perturbation-frac 0 restores the
-oracle SPAM of earlier versions, --spam-scale/--spam-swap add deterministic
-misspecification). No truth value enters the inversion. The gate duration and
-dt the engine uses equal the simulator's: those are control settings a
-provider reports exactly, not calibrated noise parameters.
+Canary gets the counts and the prior. qiskit-experiments (T1, T2Hahn,
+T2Ramsey, StandardRB) runs on the same qubit from the same start time, with
+its settings picked from the same prior. Each tool is scored against the
+truth averaged over its own run.
 
-MODEL MISMATCH, ON BY DEFAULT (each has an ablation flag; the forward models
-of 1_inversion.py represent none of them):
-  --gate-detuning: the detuning keeps acting while pulses are played
-      (Rz(dw*t_g/2) G Rz(dw*t_g/2)). It does not cancel in the G*G^-1 pair
-      of the gate-repetition probe, so it tests that probe's claim to isolate
-      incoherent error. No new parameter.
-  --quasi-static (superconducting): every shot sees its own static detuning
-      offset, sized per qubit from measured Ramsey/echo ratios T2R/T2E
-      (Place et al., 1c sc.quasi_static.t2_ramsey_over_echo, Class B), so the
-      Ramsey decay is Gaussian-exponential with T2* < T2 while the echo is
-      refocused. Ignored for trapped ions (no source found).
-  --dw-population literature: dw ~ U(-W, W) with W from measured frequency
-      excursions (15 kHz, Dhieb et al.; 0.5 Hz, Proctor et al.; Class C
-      supports; --dw-halfwidth-hz to sweep), independent of the qubit's truth
-      and of the estimator's window, so it contains near-zero and aliasing
-      detunings. The earlier default "estimator_window" drew dw inside the
-      window the estimator resolves, conditioned on each qubit's true T2.
-  --time-resolved: the probe runs circuit after circuit from T_MEASURE_S and
-      each shot chunk sees the truth at its own time (details below).
-  Also on (unchanged): log-T1 OU drift (superconducting), OU detuning drift
-  (trapped ion), sign-following drive-amplitude error (coherent_fraction
-  0.10, --coherent-fraction).
-  Every other noise mechanism 1c implements is also ON by default, each
-  where 1c implements it (the effective value is recorded per row):
-  --detuning-1-over-f (superconducting): the detuning drift is 1/f^alpha
-      noise (alpha from 1c sc.detuning_1_over_f.alpha) instead of the
-      single-pole low-pass process.
-  --t1-telegraph (superconducting): two-state T1 switching on top of the OU
-      log-T1 drift (rate Class A, amplitude Class C).
-  --heating-gate-error (trapped ion): the motional-heating contribution to
-      the gate error (1c ti.heating_to_gate_error.mapping_coefficient, Class
-      C; 1c labels this mapping "not a validated physical prediction").
-  --spam-spread (default 0.5): per-instance readout-error heterogeneity, each
-      instance's true p0|1 and p1|0 drawn log-uniform in [(1-f), (1+f)] x the
-      architecture base value (1c spam.per_qubit_spread_frac, Class C; no
-      literature value, f = 0.5 is this benchmark's choice).
-  Crosstalk is not used: it needs two qubits in one circuit layer and every
-  benchmark device has one qubit, so --crosstalk-scale has no effect here.
-
-QISKIT EXPERIMENTS HEAD-TO-HEAD (on by default, --no-qiskit-experiments to
-skip). On the SAME DeviceTruth instance, with the SAME calibration prior
-used only to choose its settings, and starting at the same T_MEASURE_S as
-an independent run (as if it were run instead of Canary), qiskit-experiments
-measures the four parameters with its standard experiments: T1 (T1), T2
-(T2Hahn, one echo), delta_omega (T2Ramsey: 2*pi*(Frequency - osc_freq)) and
-epsilon (StandardRB EPG_sx). Its circuits are transpiled by
-qiskit-experiments itself to the IBM basis (rz, sx, x) and executed by the
-same 1c simulator (same noise, drift and time-resolved execution, run
-circuit after circuit as a provider does); its own analyses produce the
-estimates. Settings (fixed here, see QE_* constants): T1 delays 20 points
-over (0, 3*T1_prior]; T2Ramsey 40 delays over (0, 2*T2_prior] with
-osc_freq = 4/T2_prior; T2Hahn 20 delays over (0, 3*T2_prior]; RB 10 lengths
-log-spaced up to clip(1/(2*eps_prior), 50, 2000) Cliffords x 10 samples.
-Each qiskit-experiments estimate is scored against the truth averaged over
-ITS OWN execution window (qe_true_value), exactly as Canary's is over its
-own. Note on epsilon: RB's EPG is an average gate infidelity, which also
-counts transverse (x, y) decay during the gate, while true_value (1c
-effective_gate_epsilon) counts the Z-survival only; part of a qiskit-
-experiments epsilon error is therefore this definitional difference.
-
-TRUTH DEFINITIONS (true_value is always built from the exact parameters the
-simulator used): T1 as sampled and drifted. T2 is the Markovian T2, i.e. the
-Hahn-echo T2 (what IBM reports as T2), NOT the Ramsey T2*; with the
-quasi-static option on, T2* = r*T2 and a Ramsey-based estimate is biased low
-against this truth. epsilon is 1c.effective_gate_epsilon(): the incoherent
-per-gate error of the simulated channel, including gate-time decoherence and
-any amplitude-error residual surviving G*G^-1, and EXCLUDING detuning, so a
-detuning-induced epsilon bias is scored as error. delta_omega is SIGNED (an
-estimate with the wrong sign is an error; |dw| was compared before).
-
-Time-resolved probe run (1c.simulate_probe(time_resolved=True)): circuits
-execute one after another in probe order (circuit-major: all shots of a
-circuit before the next; an assumption, a provider may interleave). One shot
-lasts its delays plus its noisy native gates times the gate duration plus a
-repetition overhead t_rep = 0 s. t_rep = 0 is a lower bound: IBM's Qiskit
-Runtime documentation gives the default rep_delay only as backend-specific
-(backend.default_rep_delay), no IonQ value was verified, and readout time is
-not counted. Each circuit's shots are simulated in chunks at the truth of the
-chunk mid-time; a chunk spans at most 1/10 of the shortest drift correlation
-time, with at most 100 chunks per circuit (a runtime cap). What varies during
-a run is what the drift processes attached by 1c vary: superconducting log-T1
-(OU, 1800 s) and detuning (low-pass, correlation time 1800 s/(2*pi)), and
-trapped-ion detuning (OU, 637 s, from the drift band Proctor et al. detected);
-epsilon follows T1/T2 through gate-time decoherence. A superconducting run
-lasts about 1 s, so its truth does not change within the run. A trapped-ion
-run lasts hours (the T1 probe alone has delays of tens to hundreds of
-seconds), so the detuning varies within and between Ramsey circuits. The
-comparison truth per parameter is then the shot-weighted time average over
-the chunks of the probe family that measures it (TRUTH_FAMILIES): T1 <- t1
-circuits; T2 <- Ramsey + echo; delta_omega <- Ramsey X/Y (signed mean);
-epsilon <- gate-repetition circuits (effective_gate_epsilon at the chunk
-times). truth_rel_spread is (max - min)/|mean| of the parameter over those
-chunks. With --no-time-resolved every circuit and shot uses the truth at
-T_MEASURE_S and truth_rel_spread = 0. run_duration_s (the probe's wall-clock
-length, a lower bound) is reported in both modes.
-
-REPORTING. Besides the per-row errors, the CSV carries signed_error, z_score
-= (canary - truth)/sigma_canary, the prior-only baseline (prior_value,
-prior_relative_error) and the SPAM actually handed to the inversion. The
-printed summary gives, per parameter, R2 of Canary NEXT TO R2 of the prior
-alone: the truth populations are log-uniform over wide ranges, so R2 is high
-even for a guess that measures nothing (roughly 0.9-0.998 for the prior
-here), and it must not be read alone. The paired error against the prior,
-the coverage of |z| <= 1 and <= 2 (nominal 68.3% / 95.4%) and the failure
-count carry the evidence.
-
-SPAM is not benchmarked: the inversion consumes it as a known constant and
-never estimates it. delta_omega has no prior: CalibrationPrior deliberately
-omits it, so prior_value is NaN for that parameter.
-
-Output: one CSV (one row per instance and parameter, Canary and
-qiskit-experiments columns side by side), no figures.
+Truth definitions: T2 is the echo T2, delta_omega is signed, and epsilon is
+the Z-survival per gate pair with detuning left out. RB measures average gate
+infidelity instead, so part of qiskit-experiments' epsilon error is a
+difference in definition. Read R2 next to R2_prior, beats_prior and the |z|
+coverage. Output is one CSV with both tools side by side.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import importlib.util
 import logging
 import multiprocessing as mp
 import pathlib
@@ -148,18 +36,12 @@ from typing import Any, Dict, List
 import numpy as np
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+REPO_SRC = SCRIPT_DIR.parent / "src"
+if REPO_SRC.is_dir():
+    sys.path.insert(0, str(REPO_SRC))
 
-
-def _load(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(name, SCRIPT_DIR / filename)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-inv = _load("inversion", "1_inversion.py")
-sim = _load("sim1c", "1c_simulation_models.py")
+from quantum_canary import inversion as inv
+from quantum_canary import simulation as sim
 
 REGIME = "nisq"
 T_CALIB_S = 0.0
@@ -187,24 +69,19 @@ CSV_COLUMNS = [
     "signed_error", "z_score", "probe_blocks",
     "quasi_static_scale", "detuning_drift_scale", "t1_drift_scale",
     "heating_gate_error",
-    # qiskit-experiments on the same instance (see the module docstring)
     "qe_value", "qe_sigma", "qe_true_value", "qe_absolute_error",
     "qe_relative_error", "qe_signed_error", "qe_z_score", "qe_quality",
     "qe_fit_status", "qe_quantity", "qe_shots_total", "qe_run_duration_s",
 ]
 NAN = float("nan")
 
-# qiskit-experiments settings (module docstring). Delays and RB lengths are
-# chosen from the same calibration prior Canary receives.
 QE_BASIS = ["rz", "sx", "x"]
 QE_SHOTS = {"t1": 500, "ramsey": 500, "hahn": 500, "rb": 200}
 QE_N_DELAYS = {"t1": 20, "ramsey": 40, "hahn": 20}
-QE_T1_SPAN, QE_RAMSEY_SPAN, QE_HAHN_SPAN = 3.0, 2.0, 3.0   # x the T1 / T2 prior
-QE_RAMSEY_OSC = 4.0                                        # osc_freq = QE_RAMSEY_OSC / T2_prior
+QE_T1_SPAN, QE_RAMSEY_SPAN, QE_HAHN_SPAN = 3.0, 2.0, 3.0
+QE_RAMSEY_OSC = 4.0
 QE_RB_N_LENGTHS, QE_RB_SAMPLES = 10, 10
 QE_RB_LMIN, QE_RB_LMAX = 50, 2000
-# Aer seed base of the qiskit-experiments circuits: entry i of instance s uses
-# s*1000 + QE_SEED_BASE + i, disjoint from Canary's s*1000 + i (i < 1000).
 QE_SEED_BASE = 1_000_000_000
 QE_FAMILY_OF = {"T1_s": "t1", "T2_s": "hahn", "delta_omega": "ramsey", "epsilon_sx": "rb"}
 QE_QUANTITY = {"T1_s": "T1 (qiskit_experiments T1)",
@@ -212,44 +89,34 @@ QE_QUANTITY = {"T1_s": "T1 (qiskit_experiments T1)",
                "delta_omega": "2*pi*(Frequency - osc_freq) (qiskit_experiments T2Ramsey)",
                "epsilon_sx": "EPG_sx (qiskit_experiments StandardRB)"}
 
-# Benchmark-design configuration (CLI flags); each value is recorded
-# (resolved) in the CSV. The defaults are the model-mismatched benchmark
-# described in the module docstring. The earlier, model-consistent defaults
-# are: dw_population="estimator_window", time_resolved=False,
-# gate_detuning=False, quasi_static=False, spam_perturbation_frac=0.0.
 DEFAULT_CFG: Dict[str, Any] = {
-    "perturbation_frac": None,          # None -> 1c _CALIB_PERTURBATION table
-    "spam_scale": 1.0,                  # multiplies the SPAM handed to the inversion
-    "spam_swap": False,                 # swap p0|1 <-> p1|0 handed to the inversion
-    "spam_spread": 0.5,                 # 1c generate_device(spam_spread_frac=...); readout heterogeneity
-    "cold_start": False,                # arch_default profile instead of the prior
-    "dw_population": "literature",      # 1c generate_device(dw_population=...)
-    "t_measure_s": T_MEASURE_S,         # simulation / truth-evaluation time
-    "coherent_fraction": None,          # None -> 1c registry value
-    "crosstalk_scale": 1.0,             # no effect: probes are single-qubit
-    "detuning_1_over_f": True,          # applied to superconducting (1c implements it there only)
-    "alpha": None,                      # 1/f alpha override; needs detuning_1_over_f
-    "time_resolved": True,              # 1c simulate_probe(time_resolved=...)
-    "t1_telegraph": True,               # applied to superconducting only; Class C amplitude
-    "heating_gate_error": True,         # applied to trapped ion only (1c enable_heating_gate_error)
-    "qiskit_experiments": True,         # run the qiskit-experiments head-to-head
-    "gate_detuning": True,              # 1c generate_device(detuning_during_gates=...)
-    "quasi_static": True,               # 1c generate_device(quasi_static_dephasing=...); SC only
-    "spam_perturbation_frac": None,     # None -> the resolved perturbation_frac
-    "dw_halfwidth_hz": None,            # None -> 1c registry; "literature" population only
-    "probe_blocks": 10,                 # inv.interleave_probe_blocks(n_blocks=...); 1 = circuit-major
-    "quasi_static_scale": 1.0,          # x quasi-static detuning std (SC); _apply_mechanism_scales
-    "detuning_drift_scale": 1.0,        # x detuning drift stationary amplitude
-    "t1_drift_scale": 1.0,              # x log-T1 drift stationary std (SC)
+    "perturbation_frac": None,
+    "spam_scale": 1.0,
+    "spam_swap": False,
+    "spam_spread": 0.5,
+    "cold_start": False,
+    "dw_population": "literature",
+    "t_measure_s": T_MEASURE_S,
+    "coherent_fraction": None,
+    "crosstalk_scale": 1.0,
+    "detuning_1_over_f": True,
+    "alpha": None,
+    "time_resolved": True,
+    "t1_telegraph": True,
+    "heating_gate_error": True,
+    "qiskit_experiments": True,
+    "gate_detuning": True,
+    "quasi_static": True,
+    "spam_perturbation_frac": None,
+    "dw_halfwidth_hz": None,
+    "probe_blocks": 10,
+    "quasi_static_scale": 1.0,
+    "detuning_drift_scale": 1.0,
+    "t1_drift_scale": 1.0,
 }
-# Probe family (circuit-name prefixes) whose chunks define each parameter's
-# comparison truth in a time-resolved run.
 TRUTH_FAMILIES = {"T1_s": ("t1_",), "T2_s": ("ramsey_X_", "ramsey_Y_", "echo_"),
                   "delta_omega": ("ramsey_X_", "ramsey_Y_"),
                   "epsilon_sx": ("gate_rep_N",)}
-# Upper clip for the SPAM handed to the inversion: keeps each readout error
-# below 0.5 and 1 - p0|1 - p1|0 >= 0.002 > 0, so the readout contrast used by
-# the forward models never vanishes or inverts.
 SPAM_CLIP_MAX = 0.499
 
 
@@ -272,9 +139,7 @@ def _signed_error(value: float, truth_value: float) -> float:
 
 
 def _z_score(value: float, truth_value: float, sigma: float) -> float:
-    """(estimate - truth) / reported sigma; NaN when either is non-finite or
-    sigma is not positive. Calibrated uncertainties give |z| <= 1 (<= 2) in
-    ~68.3% (~95.4%) of instances."""
+    """(estimate - truth) / sigma, or NaN if that can't be computed."""
     if not (np.isfinite(value) and np.isfinite(truth_value)
             and np.isfinite(sigma) and sigma > 0):
         return NAN
@@ -282,7 +147,7 @@ def _z_score(value: float, truth_value: float, sigma: float) -> float:
 
 
 def _r2(truth: np.ndarray, estimate: np.ndarray) -> float:
-    """1 - SS_res/SS_tot of estimate against truth (NaN if SS_tot = 0)."""
+    """Coefficient of determination of estimate against truth."""
     ss_tot = float(np.sum((truth - truth.mean()) ** 2))
     if ss_tot <= 0.0:
         return NAN
@@ -310,9 +175,7 @@ def _resolve_cfg(cfg: Any = None) -> Dict[str, Any]:
 
 
 def _effective_mechanisms(architecture: str, c: Dict[str, Any]) -> Dict[str, bool]:
-    """Architecture-specific mechanisms as they actually act: 1c implements
-    1/f detuning and T1 telegraph for superconducting qubits only, and the
-    motional-heating gate error for trapped ions only."""
+    """Which architecture-specific mechanisms actually apply to this qubit."""
     sc = architecture == "superconducting"
     return {"detuning_1_over_f": bool(c["detuning_1_over_f"]) and sc,
             "t1_telegraph": bool(c["t1_telegraph"]) and sc,
@@ -320,7 +183,7 @@ def _effective_mechanisms(architecture: str, c: Dict[str, Any]) -> Dict[str, boo
 
 
 def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolved config values recorded in every row of the instance."""
+    """Config values written to every row."""
     extra = sim.get_architecture_profile(architecture).extra
     eff = _effective_mechanisms(architecture, c)
     pf = c["perturbation_frac"]
@@ -332,7 +195,7 @@ def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
     alpha = NAN
     if eff["detuning_1_over_f"]:
         alpha = (c["alpha"] if c["alpha"] is not None
-                 else extra.get("detuning_1_over_f_alpha", NAN))  # SC-only key
+                 else extra.get("detuning_1_over_f_alpha", NAN))
     spf = c["spam_perturbation_frac"]
     if spf is None:
         spf = pf
@@ -342,7 +205,6 @@ def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
         w_hz = (c["dw_halfwidth_hz"] if c["dw_halfwidth_hz"] is not None
                 else sim.MODEL_PROVENANCE[f"{key}.dw_population.literature_halfwidth_hz"]["value"])
     return {"gate_detuning": bool(c["gate_detuning"]),
-            # 1c applies quasi-static dephasing to superconducting qubits only.
             "quasi_static": bool(c["quasi_static"]) and architecture == "superconducting",
             "spam_perturbation_frac": float(spf), "dw_halfwidth_hz": float(w_hz),
             "perturbation_frac": float(pf), "spam_scale": float(c["spam_scale"]),
@@ -361,9 +223,7 @@ def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _inversion_spam(prior: Any, c: Dict[str, Any]):
-    """SPAM handed to the inversion: the prior's (oracle) SPAM scaled by
-    spam_scale, then swapped if spam_swap, then clipped to [0, SPAM_CLIP_MAX].
-    Truth and the prior_value columns are untouched."""
+    """Readout errors given to Canary: the prior's, scaled, optionally swapped, clipped."""
     p01 = prior.spam_p0_given_1_prior * c["spam_scale"]
     p10 = prior.spam_p1_given_0_prior * c["spam_scale"]
     if c["spam_swap"]:
@@ -373,12 +233,7 @@ def _inversion_spam(prior: Any, c: Dict[str, Any]):
 
 
 def _apply_mechanism_scales(truth: Any, architecture: str, c: Dict[str, Any]) -> None:
-    """Scale the strength of three mismatch mechanisms of a generated truth
-    (all 1.0 by default, which leaves the literature values untouched; used by
-    3b_robustness_envelope.py): quasi_static_scale multiplies each qubit's
-    quasi-static detuning std (superconducting only), detuning_drift_scale
-    the stationary amplitude of the detuning drift process, t1_drift_scale
-    the stationary std of the log-T1 OU drift (superconducting only)."""
+    """Scale quasi-static dephasing, frequency drift and T1 drift (all 1.0 by default)."""
     qs, dd, td = (float(c["quasi_static_scale"]), float(c["detuning_drift_scale"]),
                   float(c["t1_drift_scale"]))
     if min(qs, dd, td) < 0.0:
@@ -399,12 +254,7 @@ def _apply_mechanism_scales(truth: Any, architecture: str, c: Dict[str, Any]) ->
 
 
 def _time_resolved_truth(truth: Any, sim_result: Any):
-    """Comparison truth of a time-resolved run: per parameter, the
-    shot-weighted time average over the chunks of the probe family that
-    measures it (TRUTH_FAMILIES), using the exact per-chunk truth the
-    simulator used; epsilon is 1c.effective_gate_epsilon() at the chunk
-    mid-times; delta_omega is the shot-weighted mean of the signed detuning.
-    Also returns (max - min)/|mean| over those chunks."""
+    """Truth for each parameter, averaged over the shots of the circuits that measure it."""
     true_values: Dict[str, float] = {}
     spread: Dict[str, float] = {}
     for param, prefixes in TRUTH_FAMILIES.items():
@@ -421,23 +271,17 @@ def _time_resolved_truth(truth: Any, sim_result: Any):
                     vals.append(float(rec["truth"][0][key]))
                 weights.append(float(rec["shots"]))
         v, w = np.array(vals, dtype=float), np.array(weights, dtype=float)
-        # Offset by v[0] so a parameter constant over the chunks averages to
-        # exactly that value (no floating-point rounding of sum(w*v)/sum(w)).
         mean = float(v[0] + np.sum(w * (v - v[0])) / np.sum(w))
         spread[param] = float((v.max() - v.min()) / abs(mean)) if mean != 0 else NAN
-        true_values[param] = mean  # delta_omega stays signed
+        true_values[param] = mean
     return true_values, spread
 
 
 def _qe_experiments(prior: Any, seed: int):
-    """The four qiskit-experiments experiments, with settings chosen from the
-    calibration prior (QE_* constants). Returns ({family: experiment}, osc_freq)."""
+    """Build the four qiskit-experiments experiments from the prior."""
     from qiskit_experiments.library import T1, T2Ramsey, T2Hahn, StandardRB
     t1p, t2p, epsp = float(prior.T1_prior_s), float(prior.T2_prior_s), float(prior.epsilon_prior)
     osc = QE_RAMSEY_OSC / t2p
-    # Longest sequence ~ 1/(2*eps_prior) Cliffords: the RB survival decays to
-    # about 1/e there (p = 1 - 2*EPC, EPC ~ eps per Clifford), so the decay
-    # fit is constrained (standard practice), capped at QE_RB_LMAX.
     lmax = max(QE_RB_LMIN, min(QE_RB_LMAX, int(1.0 / (2.0 * epsp))))
     lengths = sorted({int(round(x)) for x in np.geomspace(1, lmax, QE_RB_N_LENGTHS)})
     grid = lambda span, n: [float(x) for x in np.linspace(0.0, span, n + 1)[1:]]
@@ -456,7 +300,7 @@ def _qe_experiments(prior: Any, seed: int):
 
 
 def _ufloat_parts(value: Any):
-    """(nominal, std) of a qiskit-experiments result value (ufloat or float)."""
+    """Value and error of a qiskit-experiments result."""
     if hasattr(value, "nominal_value"):
         return float(value.nominal_value), float(value.std_dev)
     try:
@@ -467,16 +311,11 @@ def _ufloat_parts(value: Any):
 
 def _run_qiskit_experiments(truth: Any, prior: Any, seed: int, t_measure_s: float,
                             time_resolved: bool) -> Dict[str, Any]:
-    """Run the four qiskit-experiments experiments on `truth` with the 1c
-    simulator (same execution model as Canary's probe: time-resolved from
-    t_measure_s, circuit after circuit), analyse them with qiskit-experiments'
-    own analyses, and return per parameter the estimate, its sigma, the
-    analysis quality and the truth over that experiment's execution window."""
+    """Run qiskit-experiments on the same simulated qubit and score it against its own window."""
     from qiskit_experiments.framework import ExperimentData
     exps, osc = _qe_experiments(prior, seed)
     circuits, shots, family = [], [], []
     for fam, exp in exps.items():
-        # qiskit-experiments' own transpilation (adds the RB count_ops metadata).
         tc = exp._transpiled_circuits()
         circuits.extend(tc)
         shots.extend([QE_SHOTS[fam]] * len(tc))
@@ -533,7 +372,7 @@ def _run_qiskit_experiments(truth: Any, prior: Any, seed: int, t_measure_s: floa
         else:
             value, sigma = _ufloat_parts(entry[0])
             quality = str(entry[1])
-            if param == "delta_omega":   # verified sign: dw/2pi = Frequency - osc_freq
+            if param == "delta_omega":
                 value, sigma = 2.0 * np.pi * (value - osc), 2.0 * np.pi * sigma
             status = "ok" if np.isfinite(value) and np.isfinite(sigma) else "qe_non_finite"
         out[param] = {"value": value, "sigma": sigma, "quality": quality,
@@ -577,8 +416,6 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
         p0_given_1, p1_given_0 = _inversion_spam(prior, c)
 
         if c["cold_start"]:
-            # Architecture-default grid and eps_typical; the prior is still
-            # generated above and recorded in the prior_* columns.
             profile = inv.BackendProfile.from_architecture(
                 architecture, backend_name=f"nisq_benchmark_sim::{architecture}",
                 p0_given_1=p0_given_1, p1_given_0=p1_given_0)
@@ -607,13 +444,8 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
         if len(shots_list) != len(circuits):
             raise RuntimeError(f"{len(shots_list)} shot entries != {len(circuits)} circuits")
 
-        # Block-interleaved execution (inv.interleave_probe_blocks): the probe
-        # list runs probe_blocks times, each with its share of every circuit's
-        # shots, and the block counts are merged per circuit before inversion.
         block_circuits, block_shots, block_index = inv.interleave_probe_blocks(
             circuits, shots_list, int(c["probe_blocks"]))
-        # Independent shot noise per block entry: entry i uses Aer seed seed*1000 + i
-        # (at most 1000 entries, so seeds never collide across instances).
         if len(block_circuits) > 1000:
             raise RuntimeError(f"{len(block_circuits)} block entries would reuse Aer seeds")
         sim_result = sim.simulate_probe(block_circuits, truth, shots=block_shots,
@@ -636,12 +468,9 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                            "T2_s": float(tv_now["T2_s"]),
                            "delta_omega": float(tv_now["delta_omega_rad_s"]),
                            "epsilon_sx": sim.effective_gate_epsilon(truth, 0, t_measure_s)}
-            # Frozen run: no within-run variation; the wall-clock length the
-            # probe would take is still reported (same lower-bound accounting).
             truth_spread = dict.fromkeys(PARAMETERS, 0.0)
             run_duration_s = sim.probe_run_duration_s(block_circuits, truth, block_shots,
                                                       t_s=t_measure_s, dt_ns=profile.dt_ns)
-        # delta_omega is compared SIGNED: a wrong-sign estimate is an error.
         canary = {"T1_s": float(result.T1_s),
                   "T2_s": float(result.T2_s),
                   "delta_omega": float(result.delta_omega),
@@ -651,7 +480,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                   "delta_omega": float(result.delta_omega_sigma),
                   "epsilon_sx": float(result.epsilon_sx_sigma)}
         chi2 = {"T1_s": float(result.t1_chi2_dof),
-                "T2_s": float(result.echo_chi2_dof),  # T2_s is the echo T2
+                "T2_s": float(result.echo_chi2_dof),
                 "delta_omega": float(result.ramsey_chi2_dof),
                 "epsilon_sx": float(result.gate_chi2_dof)}
         chi2_secondary = {"T2_s": float(result.ramsey_chi2_dof)}
@@ -659,8 +488,6 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                   "T2_s": float(prior.T2_prior_s),
                   "delta_omega": NAN,
                   "epsilon_sx": float(prior.epsilon_prior)}
-        # Post-inversion comparison only: would the true |delta_omega| alias
-        # (accumulate > pi) at the shortest Ramsey delay actually probed?
         dw_aliased = {"delta_omega": bool(abs(true_values["delta_omega"])
                                           * meta["ramsey_delays_s"][0] > np.pi)}
         instance_cols = {
@@ -673,8 +500,6 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
             "spam_p1_given_0_used": float(p1_given_0),
         }
 
-        # qiskit-experiments on the same truth, prior and start time. A failure
-        # here is recorded in qe_fit_status and never drops Canary's rows.
         qe_cols: Dict[str, Dict[str, Any]] = {p: {} for p in PARAMETERS}
         if c["qiskit_experiments"]:
             try:
@@ -738,9 +563,7 @@ def _worker(job) -> List[Dict[str, Any]]:
 def run_architecture(architecture: str, n_instances: int, seed_offset: int,
                      n_workers: int, cfg: Any = None,
                      instance_start: int = 0) -> List[Dict[str, Any]]:
-    """Instances instance_start .. instance_start + n_instances - 1, instance
-    i with seed seed_offset + i (shards of one benchmark use disjoint ranges
-    and combine into one contiguous 0..N-1 set)."""
+    """Run instances instance_start to instance_start + n_instances - 1."""
     ids = range(instance_start, instance_start + n_instances)
     jobs = [(architecture, i, seed_offset + i, cfg) for i in ids]
     print(f"[nisq_benchmark] {architecture}: instances {ids.start}..{ids.stop - 1}, seeds "
@@ -819,11 +642,7 @@ def write_csv(rows: List[Dict[str, Any]], path: pathlib.Path) -> None:
 
 
 def summarize(rows: List[Dict[str, Any]]) -> None:
-    """Per architecture and parameter: failures (never dropped silently),
-    median relative error of Canary and of the calibration prior alone, the
-    fraction of instances where Canary beats the prior, R2 of each (the
-    prior's R2 shows how much of R2 needs no measurement at all), and the
-    coverage of |z| <= 1 / <= 2 (nominal 68.3% / 95.4%)."""
+    """Print errors, R2 against the prior-only R2, |z| coverage, and the qiskit-experiments comparison."""
     print("\n[nisq_benchmark] summary, all instances, nothing removed "
           "(R2 and errors over converged instances; failures counted)")
     print("  R2(prior) is the score of the calibration prior with NO measurement: "
@@ -873,8 +692,6 @@ def summarize(rows: List[Dict[str, Any]]) -> None:
               f"(lower bound) median {_fmt(float(np.median(durations)) if len(durations) else NAN)} s, "
               f"max {_fmt(float(np.max(durations)) if len(durations) else NAN)} s")
 
-        # qiskit-experiments on the same instances, each scored against the
-        # truth over its own execution window (qe_true_value).
         qe_rows = [r for r in arch_rows if r["parameter"] == "T1_s"]
         if not any(str(r.get("qe_fit_status", "")) not in ("", "not_run") for r in qe_rows):
             continue
@@ -1049,7 +866,7 @@ def main() -> None:
     ap.add_argument("--probe-blocks", type=int, default=DEFAULT_CFG["probe_blocks"],
                     help="block-interleaved execution: run the probe list this many "
                          "times with a share of each circuit's shots "
-                         "(1_inversion.interleave_probe_blocks; 1 = circuit-major)")
+                         "(quantum_canary.interleave_probe_blocks; 1 = circuit-major)")
     args = ap.parse_args()
 
     if args.n_instances <= 0:

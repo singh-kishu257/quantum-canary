@@ -1,40 +1,19 @@
-"""2_ideal_parity.py -- parameter-recovery accuracy on ideal simulated hardware.
+"""Ideal-regime benchmark.
 
-Per instance: 1c.generate_device(regime="ideal") -> hidden DeviceTruth;
-1c.generate_calibration_prior() -> what Canary may know; 1_inversion builds its
-own probe circuits from the prior; 1c.simulate_probe() executes them on Aer;
-1_inversion.lindblad_inversion() recovers T1, T2, delta_omega, epsilon_sx.
-Ground truth is read by the simulator, by the calibration-prior generator
-(which perturbs T1, T2, eps by U(1±f) and passes SPAM through exactly -- an
-oracle-SPAM idealisation; see --spam-scale/--spam-swap), and by the final
-comparison.
+Each instance is a simulated qubit whose noise matches Canary's model, with a
+calibration prior a few percent off the truth. Canary builds its probe from
+the prior, runs it on the simulator, and we compare what it recovers (T1, T2,
+delta_omega, epsilon) with the true values.
 
-epsilon truth is 1c.effective_gate_epsilon(): the per-gate error of the
-simulated channel, including gate-time decoherence, in 1_inversion's
-convention -- not the sampled depolarizing budget alone.
-
-SPAM is not benchmarked: the inversion consumes it as a known constant and
-never estimates it. delta_omega has no prior: CalibrationPrior deliberately
-omits it, so prior_value is NaN for that parameter.
-
-delta_omega is compared SIGNED (a wrong-sign estimate is an error). The CSV
-carries signed_error and z_score = (canary - truth)/sigma_canary, and the
-printed summary reports R2 of Canary next to R2 of the calibration prior
-alone, the paired error against the prior and the |z| coverage. In this
-regime the prior's envelope is only +/-10% (SC) / +/-5% (TI) over wide
-log-uniform truth ranges, so the prior alone reaches R2 ~ 0.98-0.998: a high
-R2 here is expected and does not by itself show that Canary measures well.
-This is the correctly specified (model-consistent) regime by design: the
-model-mismatched test is 3_benchmark.py.
-
-Output: one CSV, no figures.
+The prior alone already scores a high R2 here, so read R2 next to R2_prior,
+beats_prior and the |z| coverage. SPAM is given to Canary, not measured.
+The noisy test is 3_benchmark.py. Output is one CSV.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import importlib.util
 import logging
 import multiprocessing as mp
 import pathlib
@@ -46,18 +25,12 @@ from typing import Any, Dict, List
 import numpy as np
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+REPO_SRC = SCRIPT_DIR.parent / "src"
+if REPO_SRC.is_dir():
+    sys.path.insert(0, str(REPO_SRC))
 
-
-def _load(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(name, SCRIPT_DIR / filename)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-inv = _load("inversion", "1_inversion.py")
-sim = _load("sim1c", "1c_simulation_models.py")
+from quantum_canary import inversion as inv
+from quantum_canary import simulation as sim
 
 SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 1000, 500, 500
 ARCHITECTURES = ("superconducting", "trapped_ion")
@@ -77,19 +50,14 @@ CSV_COLUMNS = [
 ]
 NAN = float("nan")
 
-# Benchmark-design configuration (CLI flags). These defaults reproduce the
-# pre-flag benchmark exactly; each value is recorded (resolved) in the CSV.
 DEFAULT_CFG: Dict[str, Any] = {
-    "perturbation_frac": None,          # None -> 1c _CALIB_PERTURBATION table
-    "spam_scale": 1.0,                  # multiplies the SPAM handed to the inversion
-    "spam_swap": False,                 # swap p0|1 <-> p1|0 handed to the inversion
-    "spam_spread": 0.0,                 # 1c generate_device(spam_spread_frac=...)
-    "cold_start": False,                # arch_default profile instead of the prior
-    "dw_population": "estimator_window",  # 1c generate_device(dw_population=...)
+    "perturbation_frac": None,
+    "spam_scale": 1.0,
+    "spam_swap": False,
+    "spam_spread": 0.0,
+    "cold_start": False,
+    "dw_population": "estimator_window",
 }
-# Upper clip for the SPAM handed to the inversion: keeps each readout error
-# below 0.5 and 1 - p0|1 - p1|0 >= 0.002 > 0, so the readout contrast used by
-# the forward models never vanishes or inverts.
 SPAM_CLIP_MAX = 0.499
 
 
@@ -112,9 +80,7 @@ def _signed_error(value: float, truth_value: float) -> float:
 
 
 def _z_score(value: float, truth_value: float, sigma: float) -> float:
-    """(estimate - truth) / reported sigma; NaN when either is non-finite or
-    sigma is not positive. Calibrated uncertainties give |z| <= 1 (<= 2) in
-    ~68.3% (~95.4%) of instances."""
+    """(estimate - truth) / sigma, or NaN if that can't be computed."""
     if not (np.isfinite(value) and np.isfinite(truth_value)
             and np.isfinite(sigma) and sigma > 0):
         return NAN
@@ -122,7 +88,7 @@ def _z_score(value: float, truth_value: float, sigma: float) -> float:
 
 
 def _r2(truth: np.ndarray, estimate: np.ndarray) -> float:
-    """1 - SS_res/SS_tot of estimate against truth (NaN if SS_tot = 0)."""
+    """Coefficient of determination of estimate against truth."""
     ss_tot = float(np.sum((truth - truth.mean()) ** 2))
     if ss_tot <= 0.0:
         return NAN
@@ -150,7 +116,7 @@ def _resolve_cfg(cfg: Any = None) -> Dict[str, Any]:
 
 
 def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolved config values recorded in every row of the instance."""
+    """Config values written to every row."""
     pf = c["perturbation_frac"]
     if pf is None:
         pf = sim.resolve_calibration_perturbation(architecture, "ideal")
@@ -160,9 +126,7 @@ def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _inversion_spam(prior: Any, c: Dict[str, Any]):
-    """SPAM handed to the inversion: the prior's (oracle) SPAM scaled by
-    spam_scale, then swapped if spam_swap, then clipped to [0, SPAM_CLIP_MAX].
-    Truth and the prior_value columns are untouched."""
+    """Readout errors given to Canary: the prior's, scaled, optionally swapped, clipped."""
     p01 = prior.spam_p0_given_1_prior * c["spam_scale"]
     p10 = prior.spam_p1_given_0_prior * c["spam_scale"]
     if c["spam_swap"]:
@@ -186,8 +150,6 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
         p0_given_1, p1_given_0 = _inversion_spam(prior, c)
 
         if c["cold_start"]:
-            # Architecture-default grid and eps_typical; the prior is still
-            # generated above and recorded in the prior_* columns.
             profile = inv.BackendProfile.from_architecture(
                 architecture, backend_name=f"ideal_parity_sim::{architecture}",
                 p0_given_1=p0_given_1, p1_given_0=p1_given_0)
@@ -216,8 +178,6 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
         if len(shots_list) != len(circuits):
             raise RuntimeError(f"{len(shots_list)} shot entries != {len(circuits)} circuits")
 
-        # Independent shot noise per circuit: circuit i uses Aer seed seed*1000 + i
-        # (a probe has far fewer than 1000 circuits, so seeds never collide across instances).
         sim_result = sim.simulate_probe(circuits, truth, shots=shots_list,
                                         t_s=0.0, dt_ns=profile.dt_ns,
                                         seed=int(seed) * 1000)
@@ -227,7 +187,6 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
             shots_echo=SHOTS_ECHO, qubit_id=0, timestamp=timestamp)
 
         tv_now = sim.evaluate_truth_at(truth, 0, 0.0)
-        # delta_omega is compared SIGNED: a wrong-sign estimate is an error.
         true_values = {"T1_s": float(tv_now["T1_s"]),
                        "T2_s": float(tv_now["T2_s"]),
                        "delta_omega": float(tv_now["delta_omega_rad_s"]),
@@ -241,7 +200,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                   "delta_omega": float(result.delta_omega_sigma),
                   "epsilon_sx": float(result.epsilon_sx_sigma)}
         chi2 = {"T1_s": float(result.t1_chi2_dof),
-                "T2_s": float(result.echo_chi2_dof),  # T2_s is the echo T2
+                "T2_s": float(result.echo_chi2_dof),
                 "delta_omega": float(result.ramsey_chi2_dof),
                 "epsilon_sx": float(result.gate_chi2_dof)}
         chi2_secondary = {"T2_s": float(result.ramsey_chi2_dof)}
@@ -249,8 +208,6 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                   "T2_s": float(prior.T2_prior_s),
                   "delta_omega": NAN,
                   "epsilon_sx": float(prior.epsilon_prior)}
-        # Post-inversion comparison only: would the true |delta_omega| alias
-        # (accumulate > pi) at the shortest Ramsey delay actually probed?
         dw_aliased = {"delta_omega": bool(abs(true_values["delta_omega"])
                                           * meta["ramsey_delays_s"][0] > np.pi)}
 
@@ -357,11 +314,7 @@ def write_csv(rows: List[Dict[str, Any]], path: pathlib.Path) -> None:
 
 
 def summarize(rows: List[Dict[str, Any]]) -> None:
-    """Per architecture and parameter: failures (never dropped silently),
-    median relative error of Canary and of the calibration prior alone, the
-    fraction of instances where Canary beats the prior, R2 of each (the
-    prior's R2 shows how much of R2 needs no measurement at all), and the
-    coverage of |z| <= 1 / <= 2 (nominal 68.3% / 95.4%)."""
+    """Print errors, R2 against the prior-only R2, and |z| coverage per parameter."""
     print("\n[ideal_parity] summary, all instances, nothing removed "
           "(R2 and errors over converged instances; failures counted)")
     print("  R2(prior) is the score of the calibration prior with NO measurement: "
