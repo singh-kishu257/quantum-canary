@@ -1,32 +1,45 @@
-"""Quantum Canary: low-shot recovery of T1, T2 (echo), T2* (Ramsey), qubit
-detuning and single-qubit gate error from a fixed set of probe circuits.
+"""Quantum Canary: qubit health checks before, during and after a job on IBM
+superconducting hardware.
 
-Modules
--------
-quantum_canary.inversion   the Canary engine: profiles and priors, probe
-                           circuits, forward models and the inversion
-                           (identical to research/1_inversion.py).
-quantum_canary.online      interleaving Canary rounds into a running workflow,
-                           per-round health and cross-round drift
-                           (research/1b_online.py).
-quantum_canary.simulation  the literature-grounded device simulator used to
-                           validate Canary (research/1c_simulation_models.py).
-quantum_canary.runner      run_ibm() and run_simulation(): one call from
-                           qubits to a CanaryReport.
+    import quantum_canary as canary
 
-Quick start
------------
->>> import quantum_canary as canary  
->>> report = canary.run_simulation("superconducting", n_qubits=2)
->>> report.print()
+    before = canary.check(backend, qubits=[13, 14, 2], spares=[3, 4])
+    before.print()                 # health, layout to use, dynamical decoupling advice
 
-Hardware: superconducting (IBM, Qiskit Runtime). Trapped-ion qubits are
-supported in simulation only.
+    run = canary.run_monitored(backend, my_isa_circuits, before, interval=20)
+    run.print()                    # qubit health in every Canary round
+
+    after = canary.check(backend, qubits=before.layout)
+    canary.compare(before, after).print()    # did anything drift?
+
+Each check runs 17 short probe circuits per qubit and recovers T1, T2 (echo),
+T2* (Ramsey), the frequency offset and the single-qubit gate error.
+
+Modules: inversion (the Canary engine), online (interleaved monitoring),
+simulation (the device simulator used to validate Canary), runner (one
+probe run), workflow (check, run_monitored, compare), display, cli.
 """
 
 __version__ = "1.0.0"
 
 from . import inversion, online, simulation
+from .workflow import (
+    CheckReport,
+    DriftReport,
+    MonitoredRun,
+    check,
+    compare,
+    run_monitored,
+)
+from .runner import (
+    DEFAULT_PROBE_BLOCKS,
+    DEFAULT_SHOTS,
+    CanaryReport,
+    QubitReport,
+    run_ibm,
+    run_simulation,
+)
+from .display import banner, render_report
 from .inversion import (
     ARCH_DEFAULTS,
     NATIVE_INVERSE_PAIRS,
@@ -56,18 +69,14 @@ from .online import (
     online_inversion,
     parse_inline_results,
 )
-from .runner import (
-    DEFAULT_PROBE_BLOCKS,
-    DEFAULT_SHOTS,
-    CanaryReport,
-    QubitReport,
-    run_ibm,
-    run_simulation,
-)
-from .display import render_report
 
 __all__ = [
     "__version__", "inversion", "online", "simulation",
+    # the job workflow
+    "check", "run_monitored", "compare", "CheckReport", "MonitoredRun", "DriftReport",
+    # single probe runs and display
+    "run_ibm", "run_simulation", "CanaryReport", "QubitReport",
+    "DEFAULT_SHOTS", "DEFAULT_PROBE_BLOCKS", "render_report", "banner",
     # engine
     "ARCH_DEFAULTS", "NATIVE_INVERSE_PAIRS", "BackendProfile", "CalibrationSource",
     "InversionResult", "build_probe_circuits", "fetch_live_spam", "forward_echo",
@@ -77,7 +86,4 @@ __all__ = [
     # online monitoring
     "CanaryInterleaver", "OnlineInversionResult", "build_inline_probe_circuits",
     "chi2_scaled_z", "interleave_circuits", "online_inversion", "parse_inline_results",
-    # runners and display
-    "DEFAULT_PROBE_BLOCKS", "DEFAULT_SHOTS", "CanaryReport", "QubitReport",
-    "run_ibm", "run_simulation", "render_report",
 ]

@@ -1,8 +1,9 @@
 """Command-line interface: `quantum-canary` (or `python -m quantum_canary`).
 
-  quantum-canary ibm --backend ibm_fez --qubits 13,14,2
-  quantum-canary ibm --fake fake_fez --qubits 0,1      # local dry run, no account
-  quantum-canary simulate --architecture superconducting --qubits 3
+  quantum-canary check --backend ibm_fez --qubits 13,14,2 --spares 3,4
+  quantum-canary check --fake fake_fez --qubits 13,14      # local dry run, no account
+  quantum-canary ibm --backend ibm_fez --qubits 13,14,2    # full per-qubit report
+  quantum-canary simulate --qubits 3
   quantum-canary selftest
 """
 from __future__ import annotations
@@ -40,23 +41,46 @@ def _emit(report, args) -> None:
         _status(f"wrote {args.json}")
 
 
-def _cmd_ibm(args) -> int:
-    from .runner import run_ibm
+def _backend(args):
+    """The IBM backend (or fake backend) named on the command line, or None."""
     try:
         import qiskit_ibm_runtime  # noqa: F401
     except ImportError:
         _status("qiskit-ibm-runtime is required: pip install \"quantum-canary[ibm]\"")
-        return 2
+        return None
     if args.fake:
         from qiskit_ibm_runtime.fake_provider import FakeProviderForBackendV2
         backend = FakeProviderForBackendV2().backend(args.fake)
         _status(f"local dry run on {backend.name} (fake backend noise model, no account)")
-    else:
-        from qiskit_ibm_runtime import QiskitRuntimeService
-        kwargs = {k: v for k, v in (("channel", args.channel), ("instance", args.instance))
-                  if v is not None}
-        _status("connecting to IBM Quantum (saved account)...")
-        backend = QiskitRuntimeService(**kwargs).backend(args.backend)
+        return backend
+    from qiskit_ibm_runtime import QiskitRuntimeService
+    kwargs = {k: v for k, v in (("channel", args.channel), ("instance", args.instance))
+              if v is not None}
+    _status("connecting to IBM Quantum (saved account)...")
+    return QiskitRuntimeService(**kwargs).backend(args.backend)
+
+
+def _cmd_check(args) -> int:
+    from .workflow import check
+    backend = _backend(args)
+    if backend is None:
+        return 2
+    _status(f"{backend.name}: checking qubits {args.qubits}"
+            + (f" and spares {args.spares}" if args.spares else "") + " in one job...")
+    result = check(backend, args.qubits, spares=args.spares or ())
+    print(result.render(color=False if args.no_color else None))
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump(result.to_dict(), f, indent=2, default=str)
+        _status(f"wrote {args.json}")
+    return 0
+
+
+def _cmd_ibm(args) -> int:
+    from .runner import run_ibm
+    backend = _backend(args)
+    if backend is None:
+        return 2
     _status(f"{backend.name}: building probes for qubits {args.qubits} and submitting one job...")
     report = run_ibm(backend, args.qubits, probe_blocks=args.probe_blocks)
     _emit(report, args)
@@ -83,8 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     from .runner import DEFAULT_PROBE_BLOCKS
     ap = argparse.ArgumentParser(
         prog="quantum-canary",
-        description="Quantum Canary: low-shot recovery of T1, T2, T2*, detuning and "
-                    "single-qubit gate error from a fixed set of probe circuits.")
+        description="Quantum Canary: qubit health checks before, during and after a "
+                    "job on IBM superconducting hardware.")
     ap.add_argument("--version", action="version", version=f"quantum-canary {__version__}")
     sub = ap.add_subparsers(dest="command", required=True)
 
@@ -97,15 +121,28 @@ def build_parser() -> argparse.ArgumentParser:
                        help=f"block-interleaved execution (default {DEFAULT_PROBE_BLOCKS}; "
                             "1 = circuit by circuit)")
 
-    p_ibm = sub.add_parser("ibm", help="run on an IBM (superconducting) backend")
-    target = p_ibm.add_mutually_exclusive_group(required=True)
-    target.add_argument("--backend", help="IBM backend name, e.g. ibm_fez")
-    target.add_argument("--fake", metavar="NAME",
-                        help="qiskit-ibm-runtime fake backend for a local dry run, e.g. fake_fez")
-    p_ibm.add_argument("--qubits", required=True, type=_parse_qubits,
+    def _target_flags(p):
+        target = p.add_mutually_exclusive_group(required=True)
+        target.add_argument("--backend", help="IBM backend name, e.g. ibm_fez")
+        target.add_argument("--fake", metavar="NAME",
+                            help="qiskit-ibm-runtime fake backend for a local dry run, "
+                                 "e.g. fake_fez")
+        p.add_argument("--qubits", required=True, type=_parse_qubits,
                        help="physical qubits, comma-separated, e.g. 13,14,2")
-    p_ibm.add_argument("--channel", default=None, help="QiskitRuntimeService channel")
-    p_ibm.add_argument("--instance", default=None, help="QiskitRuntimeService instance")
+        p.add_argument("--channel", default=None, help="QiskitRuntimeService channel")
+        p.add_argument("--instance", default=None, help="QiskitRuntimeService instance")
+
+    p_check = sub.add_parser("check", help="check qubits before a job: health, layout, "
+                                           "dynamical decoupling")
+    _target_flags(p_check)
+    p_check.add_argument("--spares", type=_parse_qubits, default=None,
+                         help="spare qubits to swap in for RED ones, e.g. 3,4")
+    p_check.add_argument("--json", metavar="PATH", help="also write the result as JSON")
+    p_check.add_argument("--no-color", action="store_true", help="plain-text output")
+    p_check.set_defaults(func=_cmd_check)
+
+    p_ibm = sub.add_parser("ibm", help="full per-qubit report on an IBM backend")
+    _target_flags(p_ibm)
     _output_flags(p_ibm)
     p_ibm.set_defaults(func=_cmd_ibm)
 
@@ -133,6 +170,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (AttributeError, ValueError):
             pass
     args = build_parser().parse_args(argv)
+    if args.command != "selftest":
+        from .display import banner
+        print(banner())
+        print()
     return int(args.func(args) or 0)
 
 

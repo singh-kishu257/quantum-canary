@@ -1,0 +1,315 @@
+"""The job workflow: check qubits before a job, watch them during it, compare after.
+
+    before = canary.check(backend, qubits=[13, 14, 2], spares=[3, 4])
+    run    = canary.run_monitored(backend, my_circuits, before, interval=20)
+    after  = canary.check(backend, qubits=before.layout)
+    drift  = canary.compare(before, after)
+
+Everything here is a wrapper around the existing pieces: run_ibm() for the
+probe, CanaryInterleaver for interleaved rounds, and the same two-sample
+z-test with Holm correction that CanaryInterleaver.drift_report() uses.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence
+
+import numpy as np
+from scipy.stats import norm as _norm
+
+from . import online
+from .runner import (DEFAULT_SHOTS, CanaryReport, QubitReport, _captured,
+                     _counts_from_pub, _shots_list, run_ibm)
+
+__all__ = ["CheckReport", "MonitoredRun", "DriftReport",
+           "check", "run_monitored", "compare",
+           "DD_T2_RATIO", "DD_PHASE_RAD", "DD_SEQUENCE"]
+
+# Dynamical-decoupling heuristics, applied per qubit (both are simple, stated
+# rules of thumb, not fitted thresholds):
+#   T2*/T2 < DD_T2_RATIO: Ramsey loses coherence that the echo recovers, i.e.
+#       slow frequency noise that a decoupling sequence refocuses.
+#   |delta_omega| * T2* > DD_PHASE_RAD: the qubit's frequency offset turns
+#       more than this many radians of phase in one coherence time while
+#       idle, a coherent error decoupling cancels.
+DD_T2_RATIO = 0.8
+DD_PHASE_RAD = 1.0
+# Sequence suggested when DD is recommended (a Qiskit Runtime option value;
+# XY4 tolerates pulse imperfections better than XX).
+DD_SEQUENCE = "XY4"
+_HEALTH_RANK = {"GREEN": 0, "YELLOW": 1, "RED": 2}
+
+
+def _dd_reasons(q: QubitReport) -> List[str]:
+    r = q.result
+    reasons = []
+    if (np.isfinite(r.T2_ramsey_s) and np.isfinite(r.T2_s) and r.T2_s > 0
+            and r.T2_ramsey_s / r.T2_s < DD_T2_RATIO):
+        reasons.append(f"T2*/T2 = {r.T2_ramsey_s / r.T2_s:.2f} < {DD_T2_RATIO}")
+    if np.isfinite(r.delta_omega) and np.isfinite(r.T2_ramsey_s):
+        phase = abs(r.delta_omega) * r.T2_ramsey_s
+        if phase > DD_PHASE_RAD:
+            reasons.append(f"|Δω|·T2* = {phase:.1f} rad > {DD_PHASE_RAD:g}")
+    return reasons
+
+
+@dataclass
+class CheckReport:
+    """Result of check(): per-qubit health, the layout to use and the
+    dynamical-decoupling recommendation."""
+    report: CanaryReport
+    requested: List[int]
+    layout: List[int]
+    swaps: Dict[int, int]
+    unresolved: List[int]
+    dd_reasons: Dict[int, List[str]]
+
+    @property
+    def qubits(self) -> Dict[int, QubitReport]:
+        return {q.qubit: q for q in self.report.qubits}
+
+    @property
+    def health(self) -> Dict[int, str]:
+        return {q: self.qubits[q].health for q in self.layout}
+
+    @property
+    def dd_recommended(self) -> bool:
+        return any(self.dd_reasons.get(q) for q in self.layout)
+
+    @property
+    def dd_options(self) -> Dict[str, Any]:
+        """Qiskit Runtime dynamical_decoupling options for the job."""
+        if self.dd_recommended:
+            return {"enable": True, "sequence_type": DD_SEQUENCE}
+        return {"enable": False}
+
+    def monitor(self, interval: int = 20) -> online.CanaryInterleaver:
+        """A CanaryInterleaver on the layout, built from the checked profiles."""
+        return online.CanaryInterleaver(
+            qubit_ids=list(self.layout),
+            profiles={q: self.qubits[q].profile for q in self.layout},
+            interval_n=int(interval))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"requested": self.requested, "layout": self.layout, "swaps": self.swaps,
+                "unresolved": self.unresolved, "dd_recommended": self.dd_recommended,
+                "dd_options": self.dd_options, "dd_reasons": self.dd_reasons,
+                "report": self.report.to_dict()}
+
+    def render(self, color: Optional[bool] = None) -> str:
+        from .display import render_check
+        return render_check(self, color=color)
+
+    def print(self, color: Optional[bool] = None, file=None) -> None:
+        _print(self.render(color=color), file)
+
+
+def check(backend, qubits: Sequence[int], spares: Sequence[int] = (),
+          shots: Optional[Dict[str, int]] = None, sampler=None) -> CheckReport:
+    """Probe `qubits` (and any `spares`) before a job, in one Canary run.
+
+    Returns the health of each qubit, a layout in which every RED qubit is
+    replaced by the healthiest spare (GREEN before YELLOW, then the longest
+    T2), and whether dynamical decoupling is recommended. Spares should be
+    chosen so they fit your circuit's connectivity; check() does not route.
+    """
+    requested = [int(q) for q in qubits]
+    spare_list = [int(q) for q in spares if int(q) not in requested]
+    report = run_ibm(backend, requested + spare_list, shots=shots, sampler=sampler)
+    by_q = {q.qubit: q for q in report.qubits}
+
+    pool = sorted((q for q in spare_list if by_q[q].health != "RED"),
+                  key=lambda q: (_HEALTH_RANK[by_q[q].health],
+                                 -(by_q[q].result.T2_s if np.isfinite(by_q[q].result.T2_s) else 0.0)))
+    layout, swaps, unresolved = [], {}, []
+    for q in requested:
+        if by_q[q].health == "RED" and pool:
+            new = pool.pop(0)
+            swaps[q] = new
+            layout.append(new)
+        else:
+            if by_q[q].health == "RED":
+                unresolved.append(q)
+            layout.append(q)
+    dd = {q.qubit: _dd_reasons(q) for q in report.qubits}
+    return CheckReport(report=report, requested=requested, layout=layout, swaps=swaps,
+                       unresolved=unresolved, dd_reasons=dd)
+
+
+@dataclass
+class MonitoredRun:
+    """Result of run_monitored(): your circuits' results, untouched, plus the
+    health of the monitored qubits in every Canary round."""
+    results: List[Any]
+    rounds: List[online.OnlineInversionResult]
+    monitor: online.CanaryInterleaver
+    layout: List[int]
+    interval: int
+    job_id: Optional[str] = None
+
+    @property
+    def flagged_rounds(self) -> List[int]:
+        """Rounds in which any monitored qubit was not GREEN."""
+        return [r.round_index for r in self.rounds
+                if any(h != "GREEN" for h in r.health_summary().values())]
+
+    def circuits_in_round(self, round_index: int) -> range:
+        """Indices (into your circuit list) run just before a round."""
+        start = round_index * self.interval
+        return range(start, min(start + self.interval, len(self.results)))
+
+    def render(self, color: Optional[bool] = None) -> str:
+        from .display import render_monitored
+        return render_monitored(self, color=color)
+
+    def print(self, color: Optional[bool] = None, file=None) -> None:
+        _print(self.render(color=color), file)
+
+
+def run_monitored(backend, circuits: Sequence[Any], check_report: CheckReport,
+                  interval: int = 20, shots: int = 1024, sampler=None) -> MonitoredRun:
+    """Run your circuits with a Canary round after every `interval` of them,
+    on check_report.layout, all in one job.
+
+    `circuits` must already be transpiled for `backend` (ISA circuits, as
+    SamplerV2 requires), laid out on check_report.layout. Their results are
+    returned untouched, in order, in MonitoredRun.results.
+
+    Leave dynamical decoupling off here: Qiskit Runtime applies it to every
+    circuit in the job, which would put pulses inside Canary's probe delays
+    and distort its measurements. Use check_report.dd_options for runs
+    without Canary rounds.
+    """
+    import warnings
+    from qiskit import transpile
+
+    dd = getattr(getattr(sampler, "options", None), "dynamical_decoupling", None)
+    if getattr(dd, "enable", False) is True:
+        warnings.warn("dynamical decoupling is enabled on this sampler: it also acts on "
+                      "Canary's probe delays, so the monitored rounds will be distorted",
+                      stacklevel=2)
+
+    monitor = check_report.monitor(interval)
+    (job_circuits, round_map), _ = _captured(monitor.prepare, list(circuits))
+
+    algo_pos = {i for rmap in round_map for i in rmap["algo_indices"]}
+    pubs: List[Any] = [None] * len(job_circuits)
+    canary_shots: Dict[int, int] = {}
+    cache: Dict[int, Any] = {}
+    for rmap in round_map:
+        for qid, meta in monitor.canary_metadata.items():
+            start = rmap["canary_start_idx"] + meta["circuit_start_idx"]
+            for k, sh in enumerate(_shots_list(meta, DEFAULT_SHOTS)):
+                qc = job_circuits[start + k]
+                if id(qc) not in cache:
+                    cache[id(qc)] = transpile(qc, backend=backend, initial_layout=[qid],
+                                              optimization_level=0)
+                pubs[start + k] = (cache[id(qc)], None, sh)
+                canary_shots[start + k] = sh
+    for i in algo_pos:
+        pubs[i] = (job_circuits[i], None, int(shots))
+
+    if sampler is None:
+        from qiskit_ibm_runtime import SamplerV2
+        sampler = SamplerV2(mode=backend)
+    job = sampler.run(pubs)
+    pub_results = job.result()
+
+    job_results = [pub_results[i] if i in algo_pos
+                   else _counts_from_pub(pub_results[i], pubs[i][0], canary_shots[i])
+                   for i in range(len(pubs))]
+    (algo_per_round, rounds), _ = _captured(monitor.process, job_results, round_map)
+    results = [res for per_round in algo_per_round for res in per_round]
+    return MonitoredRun(results=results, rounds=rounds, monitor=monitor,
+                        layout=list(check_report.layout), interval=int(interval),
+                        job_id=job.job_id() if hasattr(job, "job_id") else None)
+
+
+_DRIFT_PARAMS = (("T1_s", "T1_sigma_s", "t1_chi2_dof"),
+                 ("T2_s", "T2_sigma_s", None),
+                 ("delta_omega", "delta_omega_sigma", "ramsey_chi2_dof"),
+                 ("epsilon_sx", "epsilon_sx_sigma", "gate_chi2_dof"))
+
+
+@dataclass
+class DriftReport:
+    """Result of compare(): per qubit, z-scores between the two checks and
+    which parameters drifted."""
+    z_scores: Dict[int, Dict[str, float]]
+    drifted: Dict[int, Dict[str, bool]]
+    health_before: Dict[int, str]
+    health_after: Dict[int, str]
+    z_threshold: float
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @property
+    def drifted_qubits(self) -> List[int]:
+        return [q for q, d in self.drifted.items()
+                if any(d.values()) or self.health_after[q] == "RED"]
+
+    @property
+    def stable(self) -> bool:
+        return not self.drifted_qubits
+
+    def render(self, color: Optional[bool] = None) -> str:
+        from .display import render_drift
+        return render_drift(self, color=color)
+
+    def print(self, color: Optional[bool] = None, file=None) -> None:
+        _print(self.render(color=color), file)
+
+
+def _qubit_map(x) -> Dict[int, QubitReport]:
+    if isinstance(x, CheckReport):
+        return {q: x.qubits[q] for q in x.layout}
+    if isinstance(x, CanaryReport):
+        return {q.qubit: q for q in x.qubits}
+    raise TypeError(f"expected a CheckReport or CanaryReport, got {type(x).__name__}")
+
+
+def compare(before, after, z_threshold: float = 2.0) -> DriftReport:
+    """Compare two checks of the same qubits (e.g. before and after a job).
+
+    Uses the same test as CanaryInterleaver.drift_report(): a two-sample
+    z-score per parameter with chi2-inflated sigmas (T2 as reported), and a
+    Holm correction across each qubit's four parameters at the family level
+    2*(1 - Phi(z_threshold)).
+    """
+    b, a = _qubit_map(before), _qubit_map(after)
+    common = [q for q in b if q in a]
+    if not common:
+        raise ValueError("the two checks share no qubits")
+    alpha = 2.0 * _norm.sf(z_threshold)
+    z_all, drifted = {}, {}
+    for q in common:
+        rb, ra = b[q].result, a[q].result
+        z = {}
+        for name, sig, chi in _DRIFT_PARAMS:
+            if chi is None:
+                z[name] = online.chi2_scaled_z(getattr(ra, name) - getattr(rb, name),
+                                               getattr(ra, sig), getattr(rb, sig))
+            else:
+                z[name] = online.chi2_scaled_z(getattr(ra, name) - getattr(rb, name),
+                                               getattr(ra, sig), getattr(rb, sig),
+                                               getattr(ra, chi), getattr(rb, chi))
+        p = {k: float(2.0 * _norm.sf(abs(v))) if np.isfinite(v) else float("nan")
+             for k, v in z.items()}
+        holm = online._holm_adjust(p)
+        z_all[q] = z
+        drifted[q] = {k: bool(np.isfinite(v) and v < alpha) for k, v in holm.items()}
+    return DriftReport(z_scores=z_all, drifted=drifted,
+                       health_before={q: b[q].health for q in common},
+                       health_after={q: a[q].health for q in common},
+                       z_threshold=float(z_threshold))
+
+
+def _print(text: str, file=None) -> None:
+    import sys
+    stream = sys.stdout if file is None else file
+    try:
+        stream.write(text + "\n")
+    except UnicodeEncodeError:
+        enc = getattr(stream, "encoding", None) or "ascii"
+        stream.write((text + "\n").encode(enc, errors="replace").decode(enc))
+    stream.flush()
