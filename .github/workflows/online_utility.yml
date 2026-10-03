@@ -1,0 +1,122 @@
+name: Online Utility - Canary before an error-mitigated task (Parallel Matrix)
+
+# research/online_utility.py: the same simulated 16-qubit devices and the same
+# 6-qubit error-mitigation task, placed by the calibration record vs by
+# Canary. Instances are split into SHARDS parallel jobs (disjoint instance
+# ranges; instance i always uses seed i), then merged into one validated CSV.
+
+on:
+  workflow_dispatch:
+    inputs:
+      n_instances:
+        description: "Instances (simulated devices)"
+        required: false
+        default: "100"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: online-utility-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  N_INSTANCES: ${{ github.event.inputs.n_instances || '100' }}
+  SHARDS: "20"
+  OPENBLAS_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
+  PYTHONPATH: src
+
+jobs:
+  run:
+    name: shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]   # 0..SHARDS-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: research/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r research/requirements.txt
+
+      - name: Instance range of this shard
+        id: range
+        run: |
+          N="${N_INSTANCES}"; K="${SHARDS}"; S="${{ matrix.shard }}"
+          BASE=$(( N / K )); REM=$(( N % K ))
+          if [ "$S" -lt "$REM" ]; then COUNT=$(( BASE + 1 )); START=$(( S * (BASE + 1) ));
+          else COUNT=$BASE; START=$(( REM * (BASE + 1) + (S - REM) * BASE )); fi
+          echo "start=$START" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "shard $S: instances $START..$(( START + COUNT - 1 )) ($COUNT)"
+
+      - name: Run shard
+        if: steps.range.outputs.count != '0'
+        run: |
+          python research/online_utility.py \
+            --n-instances "${{ steps.range.outputs.count }}" \
+            --instance-start "${{ steps.range.outputs.start }}" \
+            --workers 4 \
+            --out "online_utility_shard${{ matrix.shard }}.csv"
+
+      - name: Upload shard CSV
+        if: steps.range.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: online-utility-shard${{ matrix.shard }}
+          path: online_utility_shard${{ matrix.shard }}.csv
+          if-no-files-found: error
+          retention-days: 90
+
+  merge:
+    name: merge
+    needs: run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: research/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r research/requirements.txt
+
+      - name: Download shard CSVs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: online-utility-shard*
+          merge-multiple: true
+          path: shard_inputs
+
+      - name: Combine into online_utility.csv
+        run: |
+          ARGS=()
+          for f in shard_inputs/*.csv; do ARGS+=(--input "$f"); done
+          python research/online_utility.py --combine \
+            --n-instances "${N_INSTANCES}" "${ARGS[@]}" \
+            --out online_utility.csv
+
+      - name: Upload online_utility.csv
+        uses: actions/upload-artifact@v4
+        with:
+          name: online-utility-combined
+          path: online_utility.csv
+          if-no-files-found: error
+          retention-days: 90
