@@ -37,12 +37,46 @@ of 1_inversion.py represent none of them):
       window the estimator resolves, conditioned on each qubit's true T2.
   --time-resolved: the probe runs circuit after circuit from T_MEASURE_S and
       each shot chunk sees the truth at its own time (details below).
-  Also on (unchanged): log-T1 OU drift and low-pass detuning drift
-  (superconducting), OU detuning drift (trapped ion), sign-following
-  drive-amplitude error (coherent_fraction 0.10, --coherent-fraction).
-OFF by default (Class C magnitudes): --t1-telegraph, --detuning-1-over-f;
-motional heating stays disabled; crosstalk is inactive because the probes are
-single-qubit, so --crosstalk-scale has no effect here.
+  Also on (unchanged): log-T1 OU drift (superconducting), OU detuning drift
+  (trapped ion), sign-following drive-amplitude error (coherent_fraction
+  0.10, --coherent-fraction).
+  Every other noise mechanism 1c implements is also ON by default, each
+  where 1c implements it (the effective value is recorded per row):
+  --detuning-1-over-f (superconducting): the detuning drift is 1/f^alpha
+      noise (alpha from 1c sc.detuning_1_over_f.alpha) instead of the
+      single-pole low-pass process.
+  --t1-telegraph (superconducting): two-state T1 switching on top of the OU
+      log-T1 drift (rate Class A, amplitude Class C).
+  --heating-gate-error (trapped ion): the motional-heating contribution to
+      the gate error (1c ti.heating_to_gate_error.mapping_coefficient, Class
+      C; 1c labels this mapping "not a validated physical prediction").
+  --spam-spread (default 0.5): per-instance readout-error heterogeneity, each
+      instance's true p0|1 and p1|0 drawn log-uniform in [(1-f), (1+f)] x the
+      architecture base value (1c spam.per_qubit_spread_frac, Class C; no
+      literature value, f = 0.5 is this benchmark's choice).
+  Crosstalk is not used: it needs two qubits in one circuit layer and every
+  benchmark device has one qubit, so --crosstalk-scale has no effect here.
+
+QISKIT EXPERIMENTS HEAD-TO-HEAD (on by default, --no-qiskit-experiments to
+skip). On the SAME DeviceTruth instance, with the SAME calibration prior
+used only to choose its settings, and starting at the same T_MEASURE_S as
+an independent run (as if it were run instead of Canary), qiskit-experiments
+measures the four parameters with its standard experiments: T1 (T1), T2
+(T2Hahn, one echo), delta_omega (T2Ramsey: 2*pi*(Frequency - osc_freq)) and
+epsilon (StandardRB EPG_sx). Its circuits are transpiled by
+qiskit-experiments itself to the IBM basis (rz, sx, x) and executed by the
+same 1c simulator (same noise, drift and time-resolved execution, run
+circuit after circuit as a provider does); its own analyses produce the
+estimates. Settings (fixed here, see QE_* constants): T1 delays 20 points
+over (0, 3*T1_prior]; T2Ramsey 40 delays over (0, 2*T2_prior] with
+osc_freq = 4/T2_prior; T2Hahn 20 delays over (0, 3*T2_prior]; RB 10 lengths
+log-spaced up to clip(1/(2*eps_prior), 50, 2000) Cliffords x 10 samples.
+Each qiskit-experiments estimate is scored against the truth averaged over
+ITS OWN execution window (qe_true_value), exactly as Canary's is over its
+own. Note on epsilon: RB's EPG is an average gate infidelity, which also
+counts transverse (x, y) decay during the gate, while true_value (1c
+effective_gate_epsilon) counts the Z-survival only; part of a qiskit-
+experiments epsilon error is therefore this definitional difference.
 
 TRUTH DEFINITIONS (true_value is always built from the exact parameters the
 simulator used): T1 as sampled and drifted. T2 is the Markovian T2, i.e. the
@@ -94,7 +128,8 @@ SPAM is not benchmarked: the inversion consumes it as a known constant and
 never estimates it. delta_omega has no prior: CalibrationPrior deliberately
 omits it, so prior_value is NaN for that parameter.
 
-Output: one CSV, no figures.
+Output: one CSV (one row per instance and parameter, Canary and
+qiskit-experiments columns side by side), no figures.
 """
 
 from __future__ import annotations
@@ -151,8 +186,31 @@ CSV_COLUMNS = [
     "spam_p0_given_1_used", "spam_p1_given_0_used",
     "signed_error", "z_score", "probe_blocks",
     "quasi_static_scale", "detuning_drift_scale", "t1_drift_scale",
+    "heating_gate_error",
+    # qiskit-experiments on the same instance (see the module docstring)
+    "qe_value", "qe_sigma", "qe_true_value", "qe_absolute_error",
+    "qe_relative_error", "qe_signed_error", "qe_z_score", "qe_quality",
+    "qe_fit_status", "qe_quantity", "qe_shots_total", "qe_run_duration_s",
 ]
 NAN = float("nan")
+
+# qiskit-experiments settings (module docstring). Delays and RB lengths are
+# chosen from the same calibration prior Canary receives.
+QE_BASIS = ["rz", "sx", "x"]
+QE_SHOTS = {"t1": 500, "ramsey": 500, "hahn": 500, "rb": 200}
+QE_N_DELAYS = {"t1": 20, "ramsey": 40, "hahn": 20}
+QE_T1_SPAN, QE_RAMSEY_SPAN, QE_HAHN_SPAN = 3.0, 2.0, 3.0   # x the T1 / T2 prior
+QE_RAMSEY_OSC = 4.0                                        # osc_freq = QE_RAMSEY_OSC / T2_prior
+QE_RB_N_LENGTHS, QE_RB_SAMPLES = 10, 10
+QE_RB_LMIN, QE_RB_LMAX = 50, 2000
+# Aer seed base of the qiskit-experiments circuits: entry i of instance s uses
+# s*1000 + QE_SEED_BASE + i, disjoint from Canary's s*1000 + i (i < 1000).
+QE_SEED_BASE = 1_000_000_000
+QE_FAMILY_OF = {"T1_s": "t1", "T2_s": "hahn", "delta_omega": "ramsey", "epsilon_sx": "rb"}
+QE_QUANTITY = {"T1_s": "T1 (qiskit_experiments T1)",
+               "T2_s": "T2 (qiskit_experiments T2Hahn, 1 echo)",
+               "delta_omega": "2*pi*(Frequency - osc_freq) (qiskit_experiments T2Ramsey)",
+               "epsilon_sx": "EPG_sx (qiskit_experiments StandardRB)"}
 
 # Benchmark-design configuration (CLI flags); each value is recorded
 # (resolved) in the CSV. The defaults are the model-mismatched benchmark
@@ -163,16 +221,18 @@ DEFAULT_CFG: Dict[str, Any] = {
     "perturbation_frac": None,          # None -> 1c _CALIB_PERTURBATION table
     "spam_scale": 1.0,                  # multiplies the SPAM handed to the inversion
     "spam_swap": False,                 # swap p0|1 <-> p1|0 handed to the inversion
-    "spam_spread": 0.0,                 # 1c generate_device(spam_spread_frac=...)
+    "spam_spread": 0.5,                 # 1c generate_device(spam_spread_frac=...); readout heterogeneity
     "cold_start": False,                # arch_default profile instead of the prior
     "dw_population": "literature",      # 1c generate_device(dw_population=...)
     "t_measure_s": T_MEASURE_S,         # simulation / truth-evaluation time
     "coherent_fraction": None,          # None -> 1c registry value
     "crosstalk_scale": 1.0,             # no effect: probes are single-qubit
-    "detuning_1_over_f": False,         # superconducting only
+    "detuning_1_over_f": True,          # applied to superconducting (1c implements it there only)
     "alpha": None,                      # 1/f alpha override; needs detuning_1_over_f
     "time_resolved": True,              # 1c simulate_probe(time_resolved=...)
-    "t1_telegraph": False,              # superconducting only; Class C amplitude
+    "t1_telegraph": True,               # applied to superconducting only; Class C amplitude
+    "heating_gate_error": True,         # applied to trapped ion only (1c enable_heating_gate_error)
+    "qiskit_experiments": True,         # run the qiskit-experiments head-to-head
     "gate_detuning": True,              # 1c generate_device(detuning_during_gates=...)
     "quasi_static": True,               # 1c generate_device(quasi_static_dephasing=...); SC only
     "spam_perturbation_frac": None,     # None -> the resolved perturbation_frac
@@ -249,9 +309,20 @@ def _resolve_cfg(cfg: Any = None) -> Dict[str, Any]:
     return out
 
 
+def _effective_mechanisms(architecture: str, c: Dict[str, Any]) -> Dict[str, bool]:
+    """Architecture-specific mechanisms as they actually act: 1c implements
+    1/f detuning and T1 telegraph for superconducting qubits only, and the
+    motional-heating gate error for trapped ions only."""
+    sc = architecture == "superconducting"
+    return {"detuning_1_over_f": bool(c["detuning_1_over_f"]) and sc,
+            "t1_telegraph": bool(c["t1_telegraph"]) and sc,
+            "heating_gate_error": bool(c["heating_gate_error"]) and not sc}
+
+
 def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
     """Resolved config values recorded in every row of the instance."""
     extra = sim.get_architecture_profile(architecture).extra
+    eff = _effective_mechanisms(architecture, c)
     pf = c["perturbation_frac"]
     if pf is None:
         pf = sim.resolve_calibration_perturbation(architecture, REGIME)
@@ -259,7 +330,7 @@ def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
     if cf is None:
         cf = extra["coherent_fraction"]
     alpha = NAN
-    if c["detuning_1_over_f"]:
+    if eff["detuning_1_over_f"]:
         alpha = (c["alpha"] if c["alpha"] is not None
                  else extra.get("detuning_1_over_f_alpha", NAN))  # SC-only key
     spf = c["spam_perturbation_frac"]
@@ -279,9 +350,10 @@ def _config_columns(architecture: str, c: Dict[str, Any]) -> Dict[str, Any]:
             "cold_start": bool(c["cold_start"]), "dw_population": str(c["dw_population"]),
             "t_measure_s": float(c["t_measure_s"]), "coherent_fraction": float(cf),
             "crosstalk_scale": float(c["crosstalk_scale"]),
-            "detuning_1_over_f": bool(c["detuning_1_over_f"]), "alpha": float(alpha),
+            "detuning_1_over_f": eff["detuning_1_over_f"], "alpha": float(alpha),
             "time_resolved": bool(c["time_resolved"]),
-            "t1_telegraph": bool(c["t1_telegraph"]),
+            "t1_telegraph": eff["t1_telegraph"],
+            "heating_gate_error": eff["heating_gate_error"],
             "probe_blocks": int(c["probe_blocks"]),
             "quasi_static_scale": float(c["quasi_static_scale"]),
             "detuning_drift_scale": float(c["detuning_drift_scale"]),
@@ -357,19 +429,128 @@ def _time_resolved_truth(truth: Any, sim_result: Any):
     return true_values, spread
 
 
+def _qe_experiments(prior: Any, seed: int):
+    """The four qiskit-experiments experiments, with settings chosen from the
+    calibration prior (QE_* constants). Returns ({family: experiment}, osc_freq)."""
+    from qiskit_experiments.library import T1, T2Ramsey, T2Hahn, StandardRB
+    t1p, t2p, epsp = float(prior.T1_prior_s), float(prior.T2_prior_s), float(prior.epsilon_prior)
+    osc = QE_RAMSEY_OSC / t2p
+    # Longest sequence ~ 1/(2*eps_prior) Cliffords: the RB survival decays to
+    # about 1/e there (p = 1 - 2*EPC, EPC ~ eps per Clifford), so the decay
+    # fit is constrained (standard practice), capped at QE_RB_LMAX.
+    lmax = max(QE_RB_LMIN, min(QE_RB_LMAX, int(1.0 / (2.0 * epsp))))
+    lengths = sorted({int(round(x)) for x in np.geomspace(1, lmax, QE_RB_N_LENGTHS)})
+    grid = lambda span, n: [float(x) for x in np.linspace(0.0, span, n + 1)[1:]]
+    exps = {
+        "t1": T1((0,), delays=grid(QE_T1_SPAN * t1p, QE_N_DELAYS["t1"])),
+        "ramsey": T2Ramsey((0,), delays=grid(QE_RAMSEY_SPAN * t2p, QE_N_DELAYS["ramsey"]),
+                           osc_freq=osc),
+        "hahn": T2Hahn((0,), delays=grid(QE_HAHN_SPAN * t2p, QE_N_DELAYS["hahn"]),
+                       num_echoes=1),
+        "rb": StandardRB((0,), lengths=lengths, num_samples=QE_RB_SAMPLES, seed=int(seed)),
+    }
+    for exp in exps.values():
+        exp.set_transpile_options(basis_gates=QE_BASIS, optimization_level=0)
+        exp.analysis.set_options(plot=False)
+    return exps, osc
+
+
+def _ufloat_parts(value: Any):
+    """(nominal, std) of a qiskit-experiments result value (ufloat or float)."""
+    if hasattr(value, "nominal_value"):
+        return float(value.nominal_value), float(value.std_dev)
+    try:
+        return float(value), NAN
+    except (TypeError, ValueError):
+        return NAN, NAN
+
+
+def _run_qiskit_experiments(truth: Any, prior: Any, seed: int, t_measure_s: float,
+                            time_resolved: bool) -> Dict[str, Any]:
+    """Run the four qiskit-experiments experiments on `truth` with the 1c
+    simulator (same execution model as Canary's probe: time-resolved from
+    t_measure_s, circuit after circuit), analyse them with qiskit-experiments'
+    own analyses, and return per parameter the estimate, its sigma, the
+    analysis quality and the truth over that experiment's execution window."""
+    from qiskit_experiments.framework import ExperimentData
+    exps, osc = _qe_experiments(prior, seed)
+    circuits, shots, family = [], [], []
+    for fam, exp in exps.items():
+        # qiskit-experiments' own transpilation (adds the RB count_ops metadata).
+        tc = exp._transpiled_circuits()
+        circuits.extend(tc)
+        shots.extend([QE_SHOTS[fam]] * len(tc))
+        family.extend([fam] * len(tc))
+    seed_base = int(seed) * 1000 + QE_SEED_BASE
+    if len(circuits) > 1000 or seed_base + len(circuits) >= 2**31 - 1:
+        raise RuntimeError("qiskit-experiments Aer seeds would overlap or overflow")
+    res = sim.simulate_probe(circuits, truth, shots=shots, t_s=t_measure_s, dt_ns=None,
+                             seed=seed_base, time_resolved=time_resolved)
+
+    results: Dict[str, Dict[str, Any]] = {}
+    for fam, exp in exps.items():
+        idx = [i for i, f in enumerate(family) if f == fam]
+        data = ExperimentData(experiment=exp)
+        data.add_data([{"counts": res.counts_list[i], "metadata": circuits[i].metadata,
+                        "shots": shots[i]} for i in idx])
+        exp.analysis.run(data, replace_results=True).block_for_results()
+        frame = data.analysis_results(dataframe=True)
+        results[fam] = {str(name): (row["value"], row["quality"])
+                        for name, row in zip(frame["name"], frame.to_dict("records"))} \
+            if len(frame) else {}
+
+    def _truth(param: str) -> float:
+        fam = QE_FAMILY_OF[param]
+        idx = [i for i, f in enumerate(family) if f == fam]
+        if not time_resolved:
+            if param == "epsilon_sx":
+                return float(sim.effective_gate_epsilon(truth, 0, t_measure_s))
+            key = {"T1_s": "T1_s", "T2_s": "T2_s", "delta_omega": "delta_omega_rad_s"}[param]
+            return float(sim.evaluate_truth_at(truth, 0, t_measure_s)[key])
+        vals, weights = [], []
+        for i in idx:
+            for rec in res.chunk_records[i]:
+                if param == "epsilon_sx":
+                    vals.append(sim.effective_gate_epsilon(truth, 0, rec["t_mid_s"]))
+                else:
+                    key = {"T1_s": "T1_s", "T2_s": "T2_s",
+                           "delta_omega": "delta_omega_rad_s"}[param]
+                    vals.append(float(rec["truth"][0][key]))
+                weights.append(float(rec["shots"]))
+        v, w = np.array(vals, dtype=float), np.array(weights, dtype=float)
+        return float(v[0] + np.sum(w * (v - v[0])) / np.sum(w))
+
+    pick = {"T1_s": ("t1", "T1"), "T2_s": ("hahn", "T2"),
+            "delta_omega": ("ramsey", "Frequency"), "epsilon_sx": ("rb", "EPG_sx")}
+    out: Dict[str, Any] = {"shots_total": int(sum(shots)),
+                           "run_duration_s": float(res.run_duration_s) if time_resolved
+                           else float(sim.probe_run_duration_s(circuits, truth, shots,
+                                                               t_s=t_measure_s))}
+    for param, (fam, name) in pick.items():
+        entry = results[fam].get(name)
+        if entry is None:
+            value, sigma, quality, status = NAN, NAN, "", "qe_no_result"
+        else:
+            value, sigma = _ufloat_parts(entry[0])
+            quality = str(entry[1])
+            if param == "delta_omega":   # verified sign: dw/2pi = Frequency - osc_freq
+                value, sigma = 2.0 * np.pi * (value - osc), 2.0 * np.pi * sigma
+            status = "ok" if np.isfinite(value) and np.isfinite(sigma) else "qe_non_finite"
+        out[param] = {"value": value, "sigma": sigma, "quality": quality,
+                      "status": status, "truth": _truth(param)}
+    return out
+
+
 def run_one_instance(architecture: str, instance_id: int, seed: int,
                      cfg: Any = None) -> List[Dict[str, Any]]:
     timestamp = datetime.now(timezone.utc).isoformat()
     c = _resolve_cfg(cfg)
     t_measure_s = c["t_measure_s"]
     cfg_cols = _config_columns(architecture, c)
+    eff = _effective_mechanisms(architecture, c)
     try:
-        if (c["detuning_1_over_f"] and architecture != "superconducting") or \
-                (c["alpha"] is not None and not c["detuning_1_over_f"]):
-            raise ValueError("detuning_1_over_f is superconducting-only and alpha "
-                             "requires detuning_1_over_f")
-        if c["t1_telegraph"] and architecture != "superconducting":
-            raise ValueError("t1_telegraph is superconducting-only")
+        if c["alpha"] is not None and not eff["detuning_1_over_f"]:
+            raise ValueError("alpha requires detuning_1_over_f (superconducting only)")
         if c["dw_halfwidth_hz"] is not None and c["dw_population"] != "literature":
             raise ValueError("dw_halfwidth_hz requires dw_population='literature'")
         overrides = ({"dw_halfwidth_hz": float(c["dw_halfwidth_hz"])}
@@ -377,11 +558,12 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
         truth = sim.generate_device(architecture, n_qubits=1, seed=seed, regime=REGIME,
                                     overrides=overrides,
                                     crosstalk_scale=c["crosstalk_scale"],
-                                    detuning_1_over_f=c["detuning_1_over_f"],
+                                    detuning_1_over_f=eff["detuning_1_over_f"],
+                                    enable_heating_gate_error=eff["heating_gate_error"],
                                     spam_spread_frac=c["spam_spread"],
                                     perturbation_frac=c["perturbation_frac"],
                                     dw_population=c["dw_population"],
-                                    t1_telegraph=c["t1_telegraph"],
+                                    t1_telegraph=eff["t1_telegraph"],
                                     quasi_static_dephasing=c["quasi_static"],
                                     detuning_during_gates=c["gate_detuning"])
         if c["coherent_fraction"] is not None:
@@ -491,6 +673,34 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
             "spam_p1_given_0_used": float(p1_given_0),
         }
 
+        # qiskit-experiments on the same truth, prior and start time. A failure
+        # here is recorded in qe_fit_status and never drops Canary's rows.
+        qe_cols: Dict[str, Dict[str, Any]] = {p: {} for p in PARAMETERS}
+        if c["qiskit_experiments"]:
+            try:
+                qe = _run_qiskit_experiments(truth, prior, seed, t_measure_s,
+                                             bool(c["time_resolved"]))
+                for param in PARAMETERS:
+                    q = qe[param]
+                    qe_cols[param] = {
+                        "qe_value": q["value"], "qe_sigma": q["sigma"],
+                        "qe_true_value": q["truth"],
+                        "qe_absolute_error": _abs_error(q["value"], q["truth"]),
+                        "qe_relative_error": _rel_error(q["value"], q["truth"]),
+                        "qe_signed_error": _signed_error(q["value"], q["truth"]),
+                        "qe_z_score": _z_score(q["value"], q["truth"], q["sigma"]),
+                        "qe_quality": q["quality"], "qe_fit_status": q["status"],
+                        "qe_quantity": QE_QUANTITY[param],
+                        "qe_shots_total": qe["shots_total"],
+                        "qe_run_duration_s": qe["run_duration_s"]}
+            except Exception as exc:
+                for param in PARAMETERS:
+                    qe_cols[param] = {"qe_fit_status": f"qe_exception:{type(exc).__name__}:{exc}",
+                                      "qe_quantity": QE_QUANTITY[param]}
+        else:
+            for param in PARAMETERS:
+                qe_cols[param] = {"qe_fit_status": "not_run"}
+
         rows = []
         for param in PARAMETERS:
             tv, cv, sg, pv = true_values[param], canary[param], sigmas[param], priors[param]
@@ -508,7 +718,8 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                 prior_relative_error=_rel_error(pv, tv),
                 dw_aliased=dw_aliased.get(param, NAN), **cfg_cols, **instance_cols,
                 run_duration_s=run_duration_s, truth_rel_spread=truth_spread[param],
-                signed_error=_signed_error(cv, tv), z_score=_z_score(cv, tv, sg)))
+                signed_error=_signed_error(cv, tv), z_score=_z_score(cv, tv, sg),
+                **qe_cols[param]))
         return rows
 
     except Exception as exc:
@@ -525,10 +736,16 @@ def _worker(job) -> List[Dict[str, Any]]:
 
 
 def run_architecture(architecture: str, n_instances: int, seed_offset: int,
-                     n_workers: int, cfg: Any = None) -> List[Dict[str, Any]]:
-    jobs = [(architecture, i, seed_offset + i, cfg) for i in range(n_instances)]
-    print(f"[nisq_benchmark] {architecture}: {n_instances} instances, seeds "
-          f"{seed_offset}..{seed_offset + n_instances - 1}, {n_workers} workers", flush=True)
+                     n_workers: int, cfg: Any = None,
+                     instance_start: int = 0) -> List[Dict[str, Any]]:
+    """Instances instance_start .. instance_start + n_instances - 1, instance
+    i with seed seed_offset + i (shards of one benchmark use disjoint ranges
+    and combine into one contiguous 0..N-1 set)."""
+    ids = range(instance_start, instance_start + n_instances)
+    jobs = [(architecture, i, seed_offset + i, cfg) for i in ids]
+    print(f"[nisq_benchmark] {architecture}: instances {ids.start}..{ids.stop - 1}, seeds "
+          f"{seed_offset + ids.start}..{seed_offset + ids.stop - 1}, {n_workers} workers",
+          flush=True)
 
     results: List[Any] = [None] * n_instances
     if n_workers <= 1:
@@ -544,7 +761,7 @@ def run_architecture(architecture: str, n_instances: int, seed_offset: int,
 
 
 def validate_rows(rows: List[Dict[str, Any]], n_instances: int,
-                  architectures: List[str]) -> List[str]:
+                  architectures: List[str], instance_start: int = 0) -> List[str]:
     problems: List[str] = []
     by_arch: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
@@ -553,11 +770,13 @@ def validate_rows(rows: List[Dict[str, Any]], n_instances: int,
     if sorted(by_arch) != sorted(architectures):
         problems.append(f"architectures {sorted(by_arch)} != {sorted(architectures)}")
 
+    expected_ids = list(range(instance_start, instance_start + n_instances))
     for architecture, arch_rows in sorted(by_arch.items()):
         ids = sorted({r["instance_id"] for r in arch_rows})
-        if ids != list(range(n_instances)):
+        if ids != expected_ids:
             problems.append(f"{architecture}: instance_ids are not contiguous "
-                            f"0..{n_instances - 1} (a gap means instances were dropped)")
+                            f"{expected_ids[0]}..{expected_ids[-1]} (a gap means "
+                            f"instances were dropped)")
         if len(arch_rows) != n_instances * len(PARAMETERS):
             problems.append(f"{architecture}: {len(arch_rows)} rows, expected "
                             f"{n_instances * len(PARAMETERS)}")
@@ -574,7 +793,8 @@ def validate_rows(rows: List[Dict[str, Any]], n_instances: int,
         if any(not str(r["fit_status"]).strip() for r in arch_rows):
             problems.append(f"{architecture}: a row has a blank fit_status")
         for flag in ("time_resolved", "t1_telegraph", "gate_detuning", "quasi_static",
-                     "dw_population", "probe_blocks"):
+                     "dw_population", "probe_blocks", "detuning_1_over_f",
+                     "heating_gate_error", "spam_spread"):
             if len({r[flag] for r in arch_rows}) > 1:
                 problems.append(f"{architecture}: mixed {flag} values across rows")
 
@@ -653,6 +873,42 @@ def summarize(rows: List[Dict[str, Any]]) -> None:
               f"(lower bound) median {_fmt(float(np.median(durations)) if len(durations) else NAN)} s, "
               f"max {_fmt(float(np.max(durations)) if len(durations) else NAN)} s")
 
+        # qiskit-experiments on the same instances, each scored against the
+        # truth over its own execution window (qe_true_value).
+        qe_rows = [r for r in arch_rows if r["parameter"] == "T1_s"]
+        if not any(str(r.get("qe_fit_status", "")) not in ("", "not_run") for r in qe_rows):
+            continue
+        c_shots = np.array([r["shots_total"] for r in qe_rows], dtype=float)
+        q_shots = np.array([r["qe_shots_total"] for r in qe_rows], dtype=float)
+        q_dur = np.array([r["qe_run_duration_s"] for r in qe_rows], dtype=float)
+        print(f"     qiskit-experiments, same instances (shots/qubit: Canary "
+              f"{_fmt(float(np.nanmedian(c_shots)))}, qiskit-experiments "
+              f"{_fmt(float(np.nanmedian(q_shots)))}; QE run duration median "
+              f"{_fmt(float(np.nanmedian(q_dur)))} s)")
+        print(f"     {'parameter':12s} {'fail':>5s} {'medRE_QE':>9s} {'medRE_Can':>9s} "
+              f"{'Can<QE':>7s} {'R2_QE':>7s} {'R2_Can':>7s} {'QE|z|<=2':>9s}  quantity")
+        for param in PARAMETERS:
+            pr = [r for r in arch_rows if r["parameter"] == param]
+            qt = np.array([r["qe_true_value"] for r in pr], dtype=float)
+            qv = np.array([r["qe_value"] for r in pr], dtype=float)
+            qre = np.array([r["qe_relative_error"] for r in pr], dtype=float)
+            qz = np.array([r["qe_z_score"] for r in pr], dtype=float)
+            tv = np.array([r["true_value"] for r in pr], dtype=float)
+            cv = np.array([r["canary_value"] for r in pr], dtype=float)
+            cre = np.array([r["relative_error"] for r in pr], dtype=float)
+            qok = np.array([r["qe_fit_status"] == "ok" for r in pr]) & np.isfinite(qv) & np.isfinite(qt)
+            cok = np.array([bool(r["success"]) for r in pr]) & np.isfinite(cv) & np.isfinite(tv)
+            both = qok & cok & np.isfinite(qre) & np.isfinite(cre)
+            fin_qz = np.isfinite(qz)
+            print(f"     {param:12s} {len(pr) - int(qok.sum()):5d} "
+                  f"{_fmt(float(np.median(qre[qok & np.isfinite(qre)])) if (qok & np.isfinite(qre)).any() else NAN, True):>9s} "
+                  f"{_fmt(float(np.median(cre[both])) if both.any() else NAN, True):>9s} "
+                  f"{_fmt(float(np.mean(cre[both] < qre[both])) if both.any() else NAN, True):>7s} "
+                  f"{_fmt(_r2(qt[qok], qv[qok]) if qok.sum() > 1 else NAN):>7s} "
+                  f"{_fmt(_r2(tv[cok], cv[cok]) if cok.sum() > 1 else NAN):>7s} "
+                  f"{_fmt(float(np.mean(np.abs(qz[fin_qz]) <= 2)) if fin_qz.any() else NAN, True):>9s}  "
+                  f"{QE_QUANTITY[param]}")
+
 
 def _read_csv(path: pathlib.Path) -> List[Dict[str, Any]]:
     with open(path, newline="", encoding="utf-8") as f:
@@ -675,10 +931,14 @@ def _read_csv(path: pathlib.Path) -> List[Dict[str, Any]]:
                         "spam_perturbation_frac", "dw_halfwidth_hz", "t2_ramsey_over_echo",
                         "dw_true_rad_s", "spam_p0_given_1_true", "spam_p1_given_0_true",
                         "spam_p0_given_1_used", "spam_p1_given_0_used",
-                        "signed_error", "z_score"):
+                        "signed_error", "z_score",
+                        "qe_value", "qe_sigma", "qe_true_value", "qe_absolute_error",
+                        "qe_relative_error", "qe_signed_error", "qe_z_score",
+                        "qe_shots_total", "qe_run_duration_s"):
                 row[key] = float(row[key]) if row[key] not in ("", None) else NAN
             for key in ("spam_swap", "cold_start", "detuning_1_over_f",
-                        "time_resolved", "t1_telegraph", "gate_detuning", "quasi_static"):
+                        "time_resolved", "t1_telegraph", "gate_detuning", "quasi_static",
+                        "heating_gate_error"):
                 row[key] = str(row[key]).strip().lower() == "true"
             flag = str(row["dw_aliased"]).strip().lower()
             row["dw_aliased"] = {"true": True, "false": False}.get(flag, NAN)
@@ -732,8 +992,9 @@ def main() -> None:
                     help="scale the SPAM handed to the inversion (truth untouched)")
     ap.add_argument("--spam-swap", action="store_true",
                     help="swap p0|1 and p1|0 handed to the inversion (truth untouched)")
-    ap.add_argument("--spam-spread", type=float, default=0.0,
-                    help="generate_device(spam_spread_frac=...)")
+    ap.add_argument("--spam-spread", type=float, default=DEFAULT_CFG["spam_spread"],
+                    help="per-instance readout-error heterogeneity, "
+                         "generate_device(spam_spread_frac=...) (default 0.5; 0 = off)")
     ap.add_argument("--cold-start", action="store_true",
                     help="use the architecture-default profile instead of the prior")
     ap.add_argument("--dw-population", choices=["literature", "estimator_window", "independent"],
@@ -761,17 +1022,30 @@ def main() -> None:
     ap.add_argument("--crosstalk-scale", type=float, default=1.0,
                     help="generate_device(crosstalk_scale=...); no effect in this "
                          "single-qubit benchmark")
-    ap.add_argument("--detuning-1-over-f", action="store_true",
-                    help="superconducting only: 1/f^alpha detuning drift")
+    ap.add_argument("--detuning-1-over-f", action=argparse.BooleanOptionalAction, default=True,
+                    help="1/f^alpha detuning drift, applied to superconducting qubits "
+                         "(default on; --no-detuning-1-over-f for the low-pass process)")
     ap.add_argument("--alpha", type=float, default=None,
-                    help="1/f^alpha exponent override; requires --detuning-1-over-f")
+                    help="1/f^alpha exponent override (superconducting, with "
+                         "--detuning-1-over-f)")
     ap.add_argument("--time-resolved", action=argparse.BooleanOptionalAction, default=True,
                     help="time-resolved probe run starting at --t-measure (default on; "
                          "--no-time-resolved freezes the truth at --t-measure for every "
                          "circuit and shot)")
-    ap.add_argument("--t1-telegraph", action="store_true",
-                    help="superconducting only: opt-in two-state T1 switching "
-                         "(Class C switching amplitude; off by default)")
+    ap.add_argument("--t1-telegraph", action=argparse.BooleanOptionalAction, default=True,
+                    help="two-state T1 switching, applied to superconducting qubits "
+                         "(Class C switching amplitude; default on)")
+    ap.add_argument("--heating-gate-error", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="motional-heating gate error, applied to trapped ions "
+                         "(1c enable_heating_gate_error, Class C mapping; default on)")
+    ap.add_argument("--qiskit-experiments", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="also run qiskit-experiments (T1, T2Hahn, T2Ramsey, StandardRB) "
+                         "on the same instances (default on)")
+    ap.add_argument("--instance-start", type=int, default=0,
+                    help="first instance id (for parallel shards; instance i uses seed "
+                         "seed_offset + i)")
     ap.add_argument("--probe-blocks", type=int, default=DEFAULT_CFG["probe_blocks"],
                     help="block-interleaved execution: run the probe list this many "
                          "times with a share of each circuit's shots "
@@ -780,6 +1054,8 @@ def main() -> None:
 
     if args.n_instances <= 0:
         sys.exit("--n-instances must be positive")
+    if args.instance_start < 0:
+        sys.exit("--instance-start must be non-negative")
     if args.probe_blocks < 1:
         sys.exit("--probe-blocks must be >= 1")
     if args.perturbation_frac is not None and not 0.0 <= args.perturbation_frac < 1.0:
@@ -794,14 +1070,9 @@ def main() -> None:
         sys.exit("--coherent-fraction must be in [0, 1]")
     if args.crosstalk_scale < 0.0:
         sys.exit("--crosstalk-scale must be non-negative")
-    if args.alpha is not None and not args.detuning_1_over_f:
-        sys.exit("--alpha is only valid with --detuning-1-over-f")
-    if args.detuning_1_over_f and args.architecture in ("trapped_ion", "all"):
-        sys.exit("--detuning-1-over-f is superconducting only "
-                 "(use --architecture superconducting)")
-    if args.t1_telegraph and args.architecture in ("trapped_ion", "all"):
-        sys.exit("--t1-telegraph is superconducting only "
-                 "(use --architecture superconducting)")
+    if args.alpha is not None and (not args.detuning_1_over_f
+                                   or args.architecture != "superconducting"):
+        sys.exit("--alpha requires --detuning-1-over-f and --architecture superconducting")
     if args.spam_perturbation_frac is not None and not 0.0 <= args.spam_perturbation_frac < 1.0:
         sys.exit("--spam-perturbation-frac must be in [0, 1)")
     if args.dw_halfwidth_hz is not None:
@@ -822,7 +1093,9 @@ def main() -> None:
            "gate_detuning": args.gate_detuning, "quasi_static": args.quasi_static,
            "spam_perturbation_frac": args.spam_perturbation_frac,
            "dw_halfwidth_hz": args.dw_halfwidth_hz,
-           "probe_blocks": args.probe_blocks}
+           "probe_blocks": args.probe_blocks,
+           "heating_gate_error": args.heating_gate_error,
+           "qiskit_experiments": args.qiskit_experiments}
     if args.combine:
         combine(args.input, args.out, args.n_instances)
         return
@@ -840,9 +1113,11 @@ def main() -> None:
     for architecture in architectures:
         offset = (args.seed_offset if args.seed_offset is not None
                   else ARCH_SEED_OFFSET[architecture])
-        rows.extend(run_architecture(architecture, args.n_instances, offset, n_workers, cfg))
+        rows.extend(run_architecture(architecture, args.n_instances, offset, n_workers, cfg,
+                                     instance_start=args.instance_start))
 
-    problems = validate_rows(rows, args.n_instances, architectures)
+    problems = validate_rows(rows, args.n_instances, architectures,
+                             instance_start=args.instance_start)
     write_csv(rows, args.out)
     summarize(rows)
     print(f"[nisq_benchmark] elapsed "

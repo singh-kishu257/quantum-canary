@@ -8,6 +8,8 @@ qiskit==2.4.2
 qiskit-aer==0.17.2
 qiskit-ionq==1.1.1
 requests>=2.31
+# 3_benchmark.py head-to-head (T1, T2Hahn, T2Ramsey, StandardRB).
+qiskit-experiments==0.14.2
 
 # Hardware scripts (5_ibm_hardware.py) and figures (fig_generation/).
 qiskit-ibm-runtime>=0.20

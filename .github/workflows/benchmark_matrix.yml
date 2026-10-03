@@ -1,4 +1,10 @@
-name: NISQ Benchmark - Parallel Matrix
+name: NISQ Benchmark - Canary vs qiskit-experiments (Parallel Matrix)
+
+# 3_benchmark.py on the NISQ simulator with every 1c noise mechanism on, and
+# qiskit-experiments (T1, T2Hahn, T2Ramsey, StandardRB) run on the same
+# simulated qubits. Each architecture is split into SHARDS parallel jobs
+# (disjoint instance ranges, instance i always uses seed offset + i), then
+# merged into one validated CSV.
 
 on:
   workflow_dispatch:
@@ -17,26 +23,23 @@ concurrency:
 
 env:
   N_INSTANCES: ${{ github.event.inputs.n_instances || '300' }}
+  SHARDS: "10"
+  OPENBLAS_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
 
 jobs:
-  run:
-    name: ${{ matrix.architecture }}
+  selftest:
+    name: selftest (1c simulation layer)
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - architecture: superconducting
-            seed_offset: 0
-          - architecture: trapped_ion
-            seed_offset: 100000
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: research/requirements.txt
 
       - name: Install dependencies
         run: |
@@ -46,25 +49,62 @@ jobs:
       - name: Self-test the simulation layer
         run: python research/1c_simulation_models.py
 
-      - name: Run benchmark
+  run:
+    name: ${{ matrix.architecture }} shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [superconducting, trapped_ion]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]   # must list 0..SHARDS-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: research/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r research/requirements.txt
+
+      - name: Instance range of this shard
+        id: range
+        run: |
+          N="${N_INSTANCES}"; K="${SHARDS}"; S="${{ matrix.shard }}"
+          BASE=$(( N / K )); REM=$(( N % K ))
+          if [ "$S" -lt "$REM" ]; then COUNT=$(( BASE + 1 )); START=$(( S * (BASE + 1) ));
+          else COUNT=$BASE; START=$(( REM * (BASE + 1) + (S - REM) * BASE )); fi
+          echo "start=$START" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "shard $S: instances $START..$(( START + COUNT - 1 )) ($COUNT)"
+
+      - name: Run benchmark shard
+        if: steps.range.outputs.count != '0'
         run: |
           python research/3_benchmark.py \
             --architecture "${{ matrix.architecture }}" \
-            --n-instances "${N_INSTANCES}" \
-            --seed-offset "${{ matrix.seed_offset }}" \
-            --out "nisq_benchmark_${{ matrix.architecture }}.csv"
+            --n-instances "${{ steps.range.outputs.count }}" \
+            --instance-start "${{ steps.range.outputs.start }}" \
+            --workers 4 \
+            --out "nisq_benchmark_${{ matrix.architecture }}_shard${{ matrix.shard }}.csv"
 
-      - name: Upload architecture CSV
+      - name: Upload shard CSV
+        if: steps.range.outputs.count != '0'
         uses: actions/upload-artifact@v4
         with:
-          name: nisq-benchmark-${{ matrix.architecture }}
-          path: nisq_benchmark_${{ matrix.architecture }}.csv
+          name: nisq-benchmark-${{ matrix.architecture }}-shard${{ matrix.shard }}
+          path: nisq_benchmark_${{ matrix.architecture }}_shard${{ matrix.shard }}.csv
           if-no-files-found: error
           retention-days: 90
 
   merge:
     name: merge
-    needs: run
+    needs: [selftest, run]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -73,26 +113,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: research/requirements.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r research/requirements.txt
 
-      - name: Download architecture CSVs
+      - name: Download shard CSVs
         uses: actions/download-artifact@v4
         with:
-          pattern: nisq-benchmark-*
+          pattern: nisq-benchmark-*-shard*
           merge-multiple: true
           path: benchmark_inputs
 
       - name: Combine into nisq_benchmark.csv
         run: |
-          python research/3_benchmark.py \
-            --combine \
-            --n-instances "${N_INSTANCES}" \
-            --input benchmark_inputs/nisq_benchmark_superconducting.csv \
-            --input benchmark_inputs/nisq_benchmark_trapped_ion.csv \
+          ARGS=()
+          for f in benchmark_inputs/*.csv; do ARGS+=(--input "$f"); done
+          python research/3_benchmark.py --combine \
+            --n-instances "${N_INSTANCES}" "${ARGS[@]}" \
             --out nisq_benchmark.csv
 
       - name: Upload nisq_benchmark.csv
