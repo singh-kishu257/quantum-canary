@@ -47,6 +47,7 @@ DEFAULT_PROBE_BLOCKS = 10
 # research/3_benchmark.py constants and default configuration (regime="nisq").
 _NISQ_T_CALIB_S = 0.0
 _NISQ_T_MEASURE_S = 3600.0
+_NISQ_SPAM_SPREAD = 0.5      # per-qubit readout-error heterogeneity (3_benchmark --spam-spread)
 _SPAM_CLIP_MAX = 0.499
 # Probe family whose shot chunks define each parameter's comparison truth in
 # a time-resolved run (3_benchmark.TRUTH_FAMILIES).
@@ -326,11 +327,18 @@ def _simulate_one(architecture: str, regime: str, seed: int, qubit: int,
                                                perturbation_frac=None)
         t_s = 0.0
     else:
+        # Every simulator mechanism, as research/3_benchmark.py's defaults apply
+        # them: 1/f detuning drift and T1 telegraph switching exist for
+        # superconducting qubits only, the motional-heating gate error for
+        # trapped ions only; crosstalk needs two qubits and cannot act here.
+        sc = architecture == "superconducting"
         truth = sim.generate_device(architecture, n_qubits=1, seed=seed, regime="nisq",
                                     overrides=None, crosstalk_scale=1.0,
-                                    detuning_1_over_f=False, spam_spread_frac=0.0,
+                                    detuning_1_over_f=sc,
+                                    enable_heating_gate_error=not sc,
+                                    spam_spread_frac=_NISQ_SPAM_SPREAD,
                                     perturbation_frac=None, dw_population="literature",
-                                    t1_telegraph=False, quasi_static_dephasing=True,
+                                    t1_telegraph=sc, quasi_static_dephasing=True,
                                     detuning_during_gates=True)
         prior = sim.generate_calibration_prior(
             truth, qubit=0, t0_s=_NISQ_T_CALIB_S, perturbation_frac=None,
@@ -392,10 +400,15 @@ def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
     Each qubit is an independent simulated device, generated and probed
     exactly as one instance of the research benchmarks:
       regime="nisq"  (default) research/3_benchmark.py with its default
-                     settings: drift, quasi-static dephasing (superconducting),
+                     settings: every simulator mechanism (crosstalk excepted,
+                     as each qubit is a separate one-qubit device). T1 drift and
+                     two-state T1 switching, 1/f frequency drift and
+                     quasi-static dephasing (superconducting); OU frequency
+                     drift and motional-heating gate error (trapped ion);
                      literature detuning population, detuning during gates,
-                     coherent gate error, stale calibration and SPAM priors
-                     (1 h old), time-resolved block-interleaved execution.
+                     coherent gate error, per-qubit readout heterogeneity,
+                     stale calibration and SPAM priors (1 h old), and
+                     time-resolved block-interleaved execution.
       regime="ideal" research/2_ideal_parity.py: correctly specified,
                      stationary Markovian noise.
     Qubit i uses seed (seed + i); seed defaults to the benchmarks' offset for

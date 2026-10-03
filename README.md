@@ -29,8 +29,10 @@ Python 3.10 or newer.
 ## Quick start (command line)
 
 ```bash
-# In silico: 3 simulated superconducting qubits under drift, quasi-static
-# dephasing, detuning, coherent gate error and a 1-hour-old calibration.
+# In silico: 3 simulated superconducting qubits with every simulator noise
+# mechanism on (T1 drift and switching, 1/f frequency drift, quasi-static
+# dephasing, detuning, coherent gate error, varying readout error) and a
+# 1-hour-old calibration.
 quantum-canary simulate --architecture superconducting --qubits 3
 
 # Local dry run of the hardware path on a fake IBM backend (no account needed).
@@ -128,9 +130,12 @@ monitor.drift_report(0)
 ### Simulator
 
 `quantum_canary.simulation` is the device simulator Canary is validated on:
-literature-sourced T1/T2/gate-error populations, drift processes,
-quasi-static dephasing, detuning (including during gate pulses), coherent
-gate error, stale calibration priors and time-resolved execution. Every
+literature-sourced T1/T2/gate-error populations, T1 drift and two-state T1
+switching, 1/f and OU frequency drift, quasi-static dephasing, detuning
+(including during gate pulses), coherent gate error, per-qubit readout
+heterogeneity, motional heating (trapped ions), stale calibration priors and
+time-resolved execution. `run_simulation(regime="nisq")` switches all of them
+on (crosstalk needs two qubits in a circuit and does not act there). Every
 numerical default is registered with its source in
 `quantum_canary.simulation.MODEL_PROVENANCE`.
 
