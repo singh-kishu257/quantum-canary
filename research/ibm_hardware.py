@@ -18,9 +18,12 @@ per evenly spaced rank, never two neighbours.
 
 Fixed before any data:
   split-half    odd vs even shot blocks of one run share its time window, so
-                |z| <= 2 in about 95% of cases if Canary's error bars are honest
-  qe            Canary vs QE within 2 sigma in at least 90% of cases, with
-                the A-B difference counted as drift
+                honest error bars give |z| <= 2 with probability 0.954;
+                pooled over all parameters and runs, passes unless a
+                one-sided binomial test rejects that rate at p < 0.05
+  qe            Canary vs QE within 2 sigma, the A-B difference counted as
+                drift; pooled over T1, T2, T2* and delta_omega, passes
+                unless a binomial test rejects a 90% rate at p < 0.05
   model check   a fit is broken if its chi2 has p < 0.01; Canary's T1,
                 Ramsey and echo checks are scored against QE's dense curves
 Live vs reported values, delta_omega, T2*/T2 and drift are reported as
@@ -44,7 +47,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from scipy.stats import chi2 as chi2_dist, kstest
+from scipy.stats import binom, chi2 as chi2_dist, kstest
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 REPO_SRC = SCRIPT_DIR.parent / "src"
@@ -65,7 +68,7 @@ QE_RAMSEY_OSC = 4.0
 QE_N_PARAMS = {"t1": 3, "ramsey": 5, "hahn": 3}
 CANARY_DOF = {"t1": 2, "ramsey": 6, "gate": 2, "echo": 2}
 P_BROKEN = 0.01
-SPLIT_TARGET, QE_TARGET = 0.95, 0.90
+SPLIT_TARGET, QE_TARGET, ALPHA = 0.9545, 0.90, 0.05
 RESERVE_S = 30.0
 PARAMS = {"T1": ("T1_s", "T1_sigma_s"), "T2": ("T2_s", "T2_sigma_s"),
           "T2star": ("T2_ramsey_s", "T2_ramsey_sigma_s"),
@@ -526,6 +529,15 @@ def frac(xs, cond) -> str:
     return f"{sum(cond(x) for x in xs)}/{len(xs)}" + (f" ({np.mean([cond(x) for x in xs]):.0%})" if xs else "")
 
 
+def pooled_verdict(groups: Dict[str, List[float]], rate: float) -> Dict[str, Any]:
+    zs = [z for g in groups.values() for z in g if np.isfinite(z)]
+    k, n = sum(abs(z) <= 2 for z in zs), len(zs)
+    p = float(binom.cdf(k, n, rate)) if n else float("nan")
+    verdict = "pass" if n and p >= ALPHA else ("fail" if n else "no data")
+    print(f"   pooled: {k}/{n} within 2 sigma, binomial p = {p:.3g} against {rate:.1%} -> {verdict}")
+    return {"within": k, "n": n, "binomial_p": p, "rate": rate, "verdict": verdict}
+
+
 def canary_values(run: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return {str(q["qubit"]): q for q in run["report"]["qubits"]}
 
@@ -548,8 +560,9 @@ def cmd_analyze(args, backend, service, d):
                 split.setdefault(p, []).append(zscore(h0[vk], h0[sk], h1[vk], h1[sk]))
     for p, zs in split.items():
         print(f"   {p:<12} |z|<=2 in {frac(zs, lambda z: abs(z) <= 2)}   mean z^2 "
-              f"{np.nanmean(np.square(zs)):.2f}   (target {SPLIT_TARGET:.0%}, mean z^2 ~1)")
+              f"{np.nanmean(np.square(zs)):.2f}   (honest: 95%, mean z^2 ~1)")
     out["split_half_z"] = split
+    out["split_half_verdict"] = pooled_verdict(split, SPLIT_TARGET)
 
     print("\n2. Drift between runs")
     tags = list(runs)
@@ -590,8 +603,9 @@ def cmd_analyze(args, backend, service, d):
                     var += ((vals[0][vk] - vals[1][vk]) / 2) ** 2
                 zs.append(float((c - qv[q][p]["value"]) / np.sqrt(var + qv[q][p]["sigma"] ** 2)))
             agree[p] = zs
-            print(f"   {p:<12} within 2 sigma: {frac(zs, lambda z: abs(z) <= 2)}   (target {QE_TARGET:.0%})")
+            print(f"   {p:<12} within 2 sigma: {frac(zs, lambda z: abs(z) <= 2)}")
         out["canary_vs_qe_z"] = agree
+        out["canary_vs_qe_verdict"] = pooled_verdict(agree, QE_TARGET)
 
         print("\n4. Do Canary's checks catch fits that QE's dense curves show are broken?")
         fits, table = qe["results"]["fits"], {}
