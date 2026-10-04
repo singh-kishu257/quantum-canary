@@ -108,6 +108,10 @@ class CanaryReport:
     timestamp: str
     regime: Optional[str] = None  # simulation only: "ideal" | "nisq"
     job_id: Optional[str] = None  # hardware only
+    groups: Optional[List[List[int]]] = None  # hardware only: qubits probed together
+    # hardware only: per qubit, every shot block's counts as
+    # {"circuit": k, "block": b, "counts": {...}} (not in to_dict())
+    block_counts: Optional[Dict[int, List[Dict[str, Any]]]] = field(default=None, repr=False)
 
     @property
     def shots_per_qubit(self) -> int:
@@ -122,6 +126,7 @@ class CanaryReport:
                 "job_id": self.job_id, "shots": dict(self.shots),
                 "probe_blocks": self.probe_blocks,
                 "circuits_per_qubit": self.circuits_per_qubit,
+                "groups": self.groups,
                 "timestamp": self.timestamp,
                 "qubits": [q.to_dict() for q in self.qubits]}
 
@@ -189,14 +194,18 @@ def _captured(fn, *args, **kwargs):
 # Hardware (IBM, superconducting)
 # --------------------------------------------------------------------------
 
-def _counts_from_pub(pub_result, circuit, shots: int) -> Dict[str, int]:
-    """Counts of a one-clbit probe circuit from a SamplerV2 PUB result. Raises
-    if the register is missing or the counts do not add up to the shots
-    requested: the inversion must never see fabricated counts."""
+def _counts_from_pub(pub_result, circuit, shots: int,
+                     bit: Optional[int] = None) -> Dict[str, int]:
+    """Counts of one probe qubit from a SamplerV2 PUB result: the circuit's
+    only clbit, or clbit `bit` of a parallel probe circuit. Raises if the
+    register is missing or the counts do not add up to the shots requested:
+    the inversion must never see fabricated counts."""
     creg = circuit.cregs[0].name
     data = getattr(pub_result.data, creg, None)
     if data is None:
         raise RuntimeError(f"classical register {creg!r} missing from the sampler result")
+    if bit is not None and data.num_bits > 1:
+        data = data.slice_bits([int(bit)])
     raw = data.get_counts()
     counts = {str(k): int(v) for k, v in raw.items()}
     if not set(counts) <= {"0", "1"} or sum(counts.values()) != shots:
@@ -204,8 +213,59 @@ def _counts_from_pub(pub_result, circuit, shots: int) -> Dict[str, int]:
     return counts
 
 
+def probe_groups(backend, qubits: Sequence[int],
+                 shot_plans: Optional[Dict[int, List[int]]] = None) -> List[List[int]]:
+    """Split `qubits` into groups probed in parallel: no two qubits in a group
+    are neighbours on the backend's coupling map, and (if shot_plans is given)
+    all share the same per-circuit shot list. Greedy, in the order given.
+    Without a coupling map every qubit gets its own group."""
+    qubits = [int(q) for q in qubits]
+    cmap = getattr(backend, "coupling_map", None)
+    if cmap is None:
+        return [[q] for q in qubits]
+    members = set(qubits)
+    nbr: Dict[int, set] = {q: set() for q in qubits}
+    for a, b in cmap.get_edges():
+        if a in members and b in members:
+            nbr[a].add(b)
+            nbr[b].add(a)
+    groups: List[List[int]] = []
+    for q in qubits:
+        for g in groups:
+            same_plan = shot_plans is None or shot_plans[g[0]] == shot_plans[q]
+            if same_plan and not nbr[q] & set(g):
+                g.append(q)
+                break
+        else:
+            groups.append([q])
+    return groups
+
+
+def _parallel_circuit(circuits: Sequence[Any], name: str):
+    """One circuit holding each one-qubit probe circuit on its own qubit and
+    clbit (qubit j of the result is circuits[j])."""
+    from qiskit import QuantumCircuit
+    out = QuantumCircuit(len(circuits), len(circuits), name=name)
+    for j, qc in enumerate(circuits):
+        out.compose(qc, qubits=[j], clbits=[j], inplace=True)
+    return out
+
+
+def _block_numbers(shots_list: Sequence[int], n_blocks: int) -> List[int]:
+    """Block number of every entry of inversion.interleave_probe_blocks()'s
+    plan, in the same order."""
+    out = []
+    for b in range(int(n_blocks)):
+        for sh in shots_list:
+            base, rem = divmod(int(sh), int(n_blocks))
+            if base + (1 if b < rem else 0) > 0:
+                out.append(b)
+    return out
+
+
 def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = None,
-            probe_blocks: int = DEFAULT_PROBE_BLOCKS, sampler=None) -> CanaryReport:
+            probe_blocks: int = DEFAULT_PROBE_BLOCKS, sampler=None,
+            parallel: bool = True) -> CanaryReport:
     """Run the Canary probe on physical `qubits` of an IBM (superconducting)
     backend and invert each qubit.
 
@@ -220,11 +280,19 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
                   the submitted order only.
     sampler:      optional SamplerV2-compatible sampler; default
                   qiskit_ibm_runtime.SamplerV2(mode=backend).
+    parallel:     probe several qubits in the same circuits (default). Qubits
+                  are split by probe_groups() so that no two neighbours on
+                  the coupling map are probed together; each group runs the
+                  17 probe circuits once, so the shots executed scale with
+                  the number of groups rather than qubits. False probes one
+                  qubit at a time, in separate circuits.
 
     Priors come from the backend's own calibration
     (BackendProfile.from_ibm_backend, the profile get_live_profile builds for
     an IBM backend): prior_confidence is "live" when both T1 and T2 were read
     from it, otherwise "arch_default". All circuits are submitted as one job.
+    Each qubit's counts are its own clbit only, and the engine inverts every
+    qubit separately, exactly as for a one-qubit run.
     """
     from qiskit import transpile
 
@@ -238,7 +306,7 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
         raise ValueError(f"qubits {qubits} outside 0..{n_backend - 1} of {backend.name}")
     shots = _check_shots(shots)
 
-    profiles, logs, metas, circuits, owners = {}, {}, {}, [], []
+    profiles, logs, metas, probes, plans = {}, {}, {}, {}, {}
     for q in qubits:
         # The call get_live_profile() makes for an IBM backend. Calling it
         # directly also accepts any Qiskit BackendV2 with properties() (e.g.
@@ -250,15 +318,24 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
             raise ValueError("run_ibm supports superconducting backends only "
                              f"(got architecture {profile.architecture!r})")
         qcs, meta = inv.build_probe_circuits(profile)
-        profiles[q], logs[q], metas[q] = profile, log, meta
-        circuits.extend(qcs)
-        owners.extend([q] * len(qcs))
+        profiles[q], logs[q], metas[q], probes[q] = profile, log, meta, qcs
+        plans[q] = _shots_list(meta, shots)
 
-    shots_list = [s for q in qubits for s in _shots_list(metas[q], shots)]
-    transpiled = [transpile(qc, backend=backend, initial_layout=[q], optimization_level=0)
-                  for qc, q in zip(circuits, owners)]
+    # Circuit k of every qubit in a group shares one circuit (same family and
+    # shots for all members); units[i] is (group, k) of circuit i.
+    groups = probe_groups(backend, qubits, plans) if parallel else [[q] for q in qubits]
+    units, unit_circuits, unit_shots = [], [], []
+    for g in groups:
+        for k, sh in enumerate(plans[g[0]]):
+            qc = (probes[g[0]][k] if len(g) == 1 else
+                  _parallel_circuit([probes[q][k] for q in g], f"{probes[g[0]][k].name}_x{len(g)}"))
+            unit_circuits.append(transpile(qc, backend=backend, initial_layout=g,
+                                           optimization_level=0))
+            unit_shots.append(sh)
+            units.append((g, k))
     block_circuits, block_shots, block_index = inv.interleave_probe_blocks(
-        transpiled, shots_list, int(probe_blocks))
+        unit_circuits, unit_shots, int(probe_blocks))
+    block_no = _block_numbers(unit_shots, int(probe_blocks))
 
     if sampler is None:
         from qiskit_ibm_runtime import SamplerV2
@@ -267,28 +344,32 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
     job_id = job.job_id() if hasattr(job, "job_id") else None
     pub_results = job.result()
 
-    block_counts = [_counts_from_pub(pub_results[i], block_circuits[i], block_shots[i])
-                    for i in range(len(block_circuits))]
-    counts_all = inv.merge_block_counts(block_counts, block_index, len(circuits))
+    blocks: Dict[int, List[Dict[str, Any]]] = {q: [] for q in qubits}
+    for i, (u, b) in enumerate(zip(block_index, block_no)):
+        g, k = units[u]
+        for pos, q in enumerate(g):
+            blocks[q].append({"circuit": k, "block": b, "counts": _counts_from_pub(
+                pub_results[i], block_circuits[i], block_shots[i], bit=pos)})
 
     timestamp = datetime.now(timezone.utc).isoformat()
-    reports, start = [], 0
+    reports = []
     for q in qubits:
-        n = len(_shots_list(metas[q], shots))
+        counts = inv.merge_block_counts([e["counts"] for e in blocks[q]],
+                                        [e["circuit"] for e in blocks[q]], len(plans[q]))
         result, log = _captured(
-            inv.lindblad_inversion, counts_all[start:start + n], metas[q], profiles[q],
+            inv.lindblad_inversion, counts, metas[q], profiles[q],
             shots_t1=shots["t1"], shots_ramsey=shots["ramsey"],
             shots_gate=shots["gate"], shots_echo=shots["echo"],
             qubit_id=q, timestamp=timestamp)
-        start += n
         reports.append(QubitReport(qubit=q, result=result, profile=profiles[q],
                                    health=_health(q, result), engine_log=logs[q] + log))
 
     return CanaryReport(mode="hardware", backend=str(getattr(backend, "name", backend)),
                         architecture="superconducting", shots=shots,
                         probe_blocks=int(probe_blocks),
-                        circuits_per_qubit=len(circuits) // len(qubits),
-                        qubits=reports, timestamp=timestamp, job_id=job_id)
+                        circuits_per_qubit=len(plans[qubits[0]]),
+                        qubits=reports, timestamp=timestamp, job_id=job_id,
+                        groups=[list(g) for g in groups], block_counts=blocks)
 
 
 # --------------------------------------------------------------------------

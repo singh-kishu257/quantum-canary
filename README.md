@@ -16,7 +16,9 @@ hardware.
 
 Each check runs 17 short circuits per qubit (11,900 shots) and measures T1,
 T2 (echo), T2\* (Ramsey), the qubit's frequency offset Δω and its
-single-qubit gate error.
+single-qubit gate error. Qubits are checked in parallel, never two
+neighbours in the same circuit, so checking more qubits costs little extra
+QPU time (`run_ibm(..., parallel=False)` checks one qubit at a time).
 
 ## Install
 
