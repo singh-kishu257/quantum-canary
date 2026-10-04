@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import io
+import math
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -251,6 +252,61 @@ def _parallel_circuit(circuits: Sequence[Any], name: str):
     return out
 
 
+REPEAT_PARAMETER = "canary_repeat"
+
+
+def uniform_pubs(circuits: Sequence[Any], shots_list: Sequence[int]) -> List[Any]:
+    """SamplerV2 PUBs that all ask for the same number of shots, as
+    qiskit-ibm-runtime requires (mixed shots are deprecated in SamplerV2 and
+    rejected by its client-side successor).
+
+    With s the gcd of shots_list, circuit i gets an inert rz(theta) before
+    its first instruction and runs shots_list[i] // s bindings of theta = 0
+    with s shots each: rz(0) is the identity and costs nothing on IBM
+    hardware (a virtual frame change), so the executions are those of
+    shots_list[i] shots of the original circuit. Counts summed over the
+    bindings (BitArray.get_counts() unions them) are those counts; see
+    flatten_result() for a result in the original shape. If every entry
+    already has the same shots, the circuits are returned unchanged."""
+    from qiskit.circuit import Parameter
+    shots_list = [int(s) for s in shots_list]
+    if len(set(shots_list)) <= 1:
+        return [(qc, None, s) for qc, s in zip(circuits, shots_list)]
+    s = 0
+    for sh in shots_list:
+        s = math.gcd(s, sh)
+    theta = Parameter(REPEAT_PARAMETER)
+    cache: Dict[int, Any] = {}
+    pubs = []
+    for qc, sh in zip(circuits, shots_list):
+        if id(qc) not in cache:
+            first = next(inst for inst in qc.data if inst.qubits)
+            out = qc.copy_empty_like()
+            out.rz(theta, first.qubits[0])
+            out.compose(qc, inplace=True)
+            cache[id(qc)] = out
+        pubs.append((cache[id(qc)], np.zeros((sh // s, 1)), s))
+    return pubs
+
+
+def flatten_result(pub_result):
+    """A uniform_pubs() result in the shape of an ordinary one-binding PUB:
+    every BitArray's bindings concatenated into one array of all its shots."""
+    from qiskit.primitives import BitArray, DataBin, SamplerPubResult
+    data = pub_result.data
+    if not data.shape:
+        return pub_result
+    fields = {name: BitArray.concatenate_shots([value[i] for i in range(value.shape[0])])
+              for name, value in data.items() if isinstance(value, BitArray)}
+    return SamplerPubResult(DataBin(**fields), metadata=pub_result.metadata)
+
+
+def pub_executions(pub) -> int:
+    """Circuit executions a PUB asks for: bindings times shots."""
+    values = pub[1] if len(pub) > 1 else None
+    return int(pub[2]) * (int(np.asarray(values).shape[0]) if values is not None else 1)
+
+
 def _block_numbers(shots_list: Sequence[int], n_blocks: int) -> List[int]:
     """Block number of every entry of inversion.interleave_probe_blocks()'s
     plan, in the same order."""
@@ -340,7 +396,7 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
     if sampler is None:
         from qiskit_ibm_runtime import SamplerV2
         sampler = SamplerV2(mode=backend)
-    job = sampler.run([(qc, None, sh) for qc, sh in zip(block_circuits, block_shots)])
+    job = sampler.run(uniform_pubs(block_circuits, block_shots))
     job_id = job.job_id() if hasattr(job, "job_id") else None
     pub_results = job.result()
 

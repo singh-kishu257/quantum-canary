@@ -20,7 +20,8 @@ from scipy.stats import norm as _norm
 
 from . import online
 from .runner import (DEFAULT_SHOTS, CanaryReport, QubitReport, _captured,
-                     _counts_from_pub, _shots_list, run_ibm)
+                     _counts_from_pub, _shots_list, flatten_result, run_ibm,
+                     uniform_pubs)
 
 __all__ = ["CheckReport", "MonitoredRun", "DriftReport",
            "check", "run_monitored", "compare",
@@ -207,8 +208,8 @@ def run_monitored(backend, circuits: Sequence[Any], check_report: CheckReport,
     (job_circuits, round_map), _ = _captured(monitor.prepare, list(circuits))
 
     algo_pos = {i for rmap in round_map for i in rmap["algo_indices"]}
-    pubs: List[Any] = [None] * len(job_circuits)
-    canary_shots: Dict[int, int] = {}
+    circs: List[Any] = [None] * len(job_circuits)
+    shots_of: List[int] = [0] * len(job_circuits)
     cache: Dict[int, Any] = {}
     for rmap in round_map:
         for qid, meta in monitor.canary_metadata.items():
@@ -218,10 +219,10 @@ def run_monitored(backend, circuits: Sequence[Any], check_report: CheckReport,
                 if id(qc) not in cache:
                     cache[id(qc)] = transpile(qc, backend=backend, initial_layout=[qid],
                                               optimization_level=0)
-                pubs[start + k] = (cache[id(qc)], None, sh)
-                canary_shots[start + k] = sh
+                circs[start + k], shots_of[start + k] = cache[id(qc)], sh
     for i in algo_pos:
-        pubs[i] = (job_circuits[i], None, int(shots))
+        circs[i], shots_of[i] = job_circuits[i], int(shots)
+    pubs = uniform_pubs(circs, shots_of)
 
     if sampler is None:
         from qiskit_ibm_runtime import SamplerV2
@@ -229,8 +230,8 @@ def run_monitored(backend, circuits: Sequence[Any], check_report: CheckReport,
     job = sampler.run(pubs)
     pub_results = job.result()
 
-    job_results = [pub_results[i] if i in algo_pos
-                   else _counts_from_pub(pub_results[i], pubs[i][0], canary_shots[i])
+    job_results = [flatten_result(pub_results[i]) if i in algo_pos
+                   else _counts_from_pub(pub_results[i], circs[i], shots_of[i])
                    for i in range(len(pubs))]
     (algo_per_round, rounds), _ = _captured(monitor.process, job_results, round_map)
     results = [res for per_round in algo_per_round for res in per_round]

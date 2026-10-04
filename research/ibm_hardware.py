@@ -83,7 +83,7 @@ if REPO_SRC.is_dir():
 
 import quantum_canary as canary
 from quantum_canary import inversion as inv
-from quantum_canary.runner import DEFAULT_PROBE_BLOCKS, probe_groups
+from quantum_canary.runner import DEFAULT_PROBE_BLOCKS, probe_groups, pub_executions
 
 DATA_DIR = SCRIPT_DIR / "data" / "hardware"
 TAGS = ("A", "B", "C", "D")
@@ -264,15 +264,20 @@ def reported(backend, qubits: List[int], at: str, chains: Optional[List[List[int
 class Recorder:
     """A SamplerV2 that keeps the job, the PUBs and the raw result.
 
-    On a fake backend every PUB is simulated on its own: Aer's noisy
-    simulation of a fake backend lets one circuit's delay noise leak into
-    the next circuit of the same call, so a batch would not be simulated
-    faithfully. Real backends get one ordinary job."""
+    On a fake backend the PUBs are simulated in one call per set of qubits:
+    Aer's noisy simulation of a fake backend lets delay noise leak between
+    circuits on different qubits within one call, so a whole job in one
+    call would not be simulated faithfully. Real backends get one ordinary
+    job."""
 
     def __init__(self, backend, fake: bool = False):
-        from qiskit_ibm_runtime import SamplerV2
-        self.sampler = SamplerV2(mode=backend)
-        self.options = self.sampler.options
+        if fake:
+            from qiskit_aer.primitives import SamplerV2 as AerSampler
+            self.sampler = AerSampler.from_backend(backend)
+        else:
+            from qiskit_ibm_runtime import SamplerV2
+            self.sampler = SamplerV2(mode=backend)
+        self.options = getattr(self.sampler, "options", None)
         self.fake = fake
         self.pubs: List[Any] = []
         self.job = None
@@ -283,8 +288,24 @@ class Recorder:
         self.pubs = list(pubs)
         rec = self
         if self.fake:
-            self.raw = PrimitiveResult([self.sampler.run([p]).result()[0] for p in self.pubs],
-                                       metadata={})
+            plain, bound = [], {}
+            for c, values, shots in self.pubs:
+                if values is not None and c.parameters:
+                    if id(c) not in bound:
+                        bound[id(c)] = c.assign_parameters({p: 0.0 for p in c.parameters})
+                    plain.append((bound[id(c)], None, shots * len(values)))
+                else:
+                    plain.append((c, values, shots))
+            by_set: Dict[frozenset, List[int]] = {}
+            for i, p in enumerate(plain):
+                c = p[0]
+                key = frozenset(c.find_bit(q).index for inst in c.data for q in inst.qubits)
+                by_set.setdefault(key, []).append(i)
+            results: List[Any] = [None] * len(plain)
+            for idx in by_set.values():
+                for i, r in zip(idx, self.sampler.run([plain[i] for i in idx]).result()):
+                    results[i] = r
+            self.raw = PrimitiveResult(results, metadata={})
         else:
             self.job = self.sampler.run(self.pubs)
 
@@ -411,7 +432,7 @@ def run_canary(args, backend, service, qubits: List[int], tag: str,
     payload = {"tag": tag, "backend": backend.name, "fake": bool(args.fake),
                "qubits": qubits, "groups": report.groups, "t_submit": t_submit, "t_done": t_done,
                "job_id": report.job_id, "qpu_seconds": qpu_seconds(rec.job, bool(args.fake)),
-               "n_pubs": len(rec.pubs), "shots_executed": int(sum(p[2] for p in rec.pubs)),
+               "n_pubs": len(rec.pubs), "shots_executed": sum(pub_executions(p) for p in rec.pubs),
                "shots_per_qubit": report.shots_per_qubit,
                "probe_blocks": args.probe_blocks, "sampler_options": str(rec.options),
                "execution_spans": execution_spans(rec.raw), "reported": rep_before,
