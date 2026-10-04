@@ -3,7 +3,11 @@
 The task is the usual way to validate error mitigation: a small circuit whose
 exact answer is known, here a 6-qubit Trotterised transverse-field Ising chain
 measured for its average magnetisation, run with zero-noise extrapolation
-(CZ folding x1, x3, x5, linear fit) and readout correction.
+(CZ folding x1, x3, x5, linear fit) and readout correction. Two Trotter
+steps: a pilot on one device (seed 0) showed linear ZNE recovers the exact
+answer at 2 steps (error 0.002) but not at 4 (error 0.16, success
+probability ~0.4); the depth was fixed on that check alone, with no arm
+comparison involved.
 
 The device is a simulated 16-qubit line with every noise mechanism of the
 simulator switched on, crosstalk between neighbours included, plus a CZ noise
@@ -13,23 +17,30 @@ qubits during the gate). Its calibration record is one hour old.
 
 On the same device, starting at the same moment and with the same random
 numbers, the task is placed on six neighbouring qubits chosen by:
-  calibration         the stale calibration record
-  calibration_budget  the same window, with the shots Canary would use added
-                      to the task
-  canary              Canary's check of all 16 qubits, RED qubits excluded
-  canary_dd           as canary, with XX dynamical decoupling on the qubits
-                      Canary flags
-  oracle              the true parameters (a reference, not a method)
+  calibration   the stale calibration record
+  canary        Canary's check of all 16 qubits, RED qubits excluded
+  canary_dd     as canary, with XX dynamical decoupling on the qubits Canary
+                flags
+  oracle        the true parameters (a reference, not a method)
 Every arm ranks windows with the same estimated success probability and the
 same two-qubit error record; only the single-qubit numbers differ. The truth
 is used to score results and to build the oracle, never by an arm. After the
 canary job, Canary checks the window again and compare() says whether it
-drifted; that verdict is scored against the true change.
+drifted; that verdict is scored against the true change. compare() corrects
+for multiple testing within each qubit only, so the same test corrected
+across all qubits of the window is reported next to it.
+
+Canary spends 11,900 shots per qubit. Rather than simulate a baseline that
+gets those shots, each ZNE estimate carries its exact statistical error, so
+the summary reports how often Canary beats the calibration arm by more than
+extra shots could ever buy (more shots shrink only that error).
 
 The primary endpoint is the paired difference in |ZNE estimate - exact|
-between canary and calibration. Known limits: the simulator's decay models
-are the ones Canary fits, measurement takes no time, and CZ gates carry no
-detuning phase. Output is one CSV.
+between canary and calibration. Idle decay of the task circuits is applied
+per delay; the simulator's own idle noise is exact only for circuits with one
+delay length, which holds for Canary's probes. Known limits: the simulator's
+decay models are the ones Canary fits, measurement takes no time, and CZ
+gates carry no detuning phase. Output is one CSV.
 """
 
 from __future__ import annotations
@@ -62,28 +73,30 @@ from quantum_canary.workflow import _dd_reasons
 ARCH = "superconducting"
 N_QUBITS = 16
 WIDTH = 6
-J_DT, H_DT, STEPS = 0.25, 0.35, 4
+J_DT, H_DT, STEPS = 0.25, 0.35, 2
 SCALES = (1, 3, 5)
-SHOTS = 4000
+SHOTS = 2000
 T_CALIB_S = 0.0
 T_CHECK_S = 3600.0
 CZ_NS = 84.0
 REP_DELAY_S = 250e-6
-PROBE_BLOCKS = 10
+PROBE_BLOCKS = 1
 DRIFT_TRUTH_REL = 0.20
 DT_NS = inv.ARCH_DEFAULTS[ARCH]["dt_ns"]
 CANARY_SHOTS_PER_QUBIT = sum(n * canary.DEFAULT_SHOTS[k] for k, n in
                              (("t1", 3), ("ramsey", 8), ("gate", 3), ("echo", 3)))
-ARMS = ("calibration", "calibration_budget", "canary", "canary_dd", "oracle")
+ARMS = ("calibration", "canary", "canary_dd", "oracle")
 PAIRS = [(i, i + 1) for i in range(N_QUBITS - 1)]
 WINDOWS = [tuple(range(s, s + WIDTH)) for s in range(N_QUBITS - WIDTH + 1)]
 
 CSV_COLUMNS = [
     "instance_id", "seed", "arm", "window", "window_start", "same_as_calibration",
-    "exact", "raw_estimate", "zne_estimate", "raw_abs_error", "zne_abs_error",
+    "exact", "raw_estimate", "zne_estimate", "zne_se", "zne_quadratic",
+    "raw_abs_error", "zne_abs_error",
     "esp_true", "dd_applied", "dd_qubits", "red_qubits", "fallback",
     "shots_task", "shots_canary", "job_start_s", "job_duration_s",
-    "drift_flagged", "drift_true", "drift_qubits_flagged", "drift_qubits_true",
+    "drift_flagged", "drift_flagged_familywise", "drift_true", "drift_qubits_flagged",
+    "drift_qubits_true",
     "cz_count", "perturbation_frac", "qiskit_ibm_runtime", "status", "timestamp_utc",
 ]
 NAN = float("nan")
@@ -117,22 +130,54 @@ def _cz_channel(truth, a: int, b: int, t_s: float):
     return relax_b.tensor(relax_a).compose(depolarizing_error(4.0 * e_dep / 3.0, 2))
 
 
+def _is_task(circuit) -> bool:
+    return circuit is not None and any(inst.operation.name == "cz" for inst in circuit.data)
+
+
 _base_noise_model = sim.build_noise_model
+_base_inject = sim._inject_amplitude_errors
 
 
 def _noise_model_with_cz(truth, t_s: float = 0.0, native_gate_names=None, circuit=None,
                          dt_ns=None):
+    """Task circuits: the simulator's gate and readout noise, CZ noise, and no
+    per-name delay noise (their idle decay is inserted per delay instead).
+    Every other circuit, Canary's probes included, is left unchanged."""
+    if not (_is_task(circuit) and "cz_dep_error" in truth.architecture_specific):
+        return _base_noise_model(truth, t_s=t_s, native_gate_names=native_gate_names,
+                                 circuit=circuit, dt_ns=dt_ns)
     nm = _base_noise_model(truth, t_s=t_s, native_gate_names=native_gate_names,
-                           circuit=circuit, dt_ns=dt_ns)
-    if "cz_dep_error" in truth.architecture_specific and circuit is not None and any(
-            inst.operation.name == "cz" for inst in circuit.data):
-        for a, b in PAIRS:
-            nm.add_quantum_error(_cz_channel(truth, a, b, t_s), ["cz"], [a, b])
-            nm.add_quantum_error(_cz_channel(truth, b, a, t_s), ["cz"], [b, a])
+                           circuit=None, dt_ns=dt_ns)
+    for a, b in PAIRS:
+        nm.add_quantum_error(_cz_channel(truth, a, b, t_s), ["cz"], [a, b])
+        nm.add_quantum_error(_cz_channel(truth, b, a, t_s), ["cz"], [b, a])
     return nm
 
 
+def _inject_with_idle_decay(circuit, truth, t_s: float = 0.0):
+    """The simulator's amplitude-error injection, then, for task circuits, a
+    thermal relaxation channel after every delay for that delay's length."""
+    from qiskit_aer.noise import thermal_relaxation_error
+    out = _base_inject(circuit, truth, t_s=t_s)
+    if not _is_task(out):
+        return out
+    new = out.copy_empty_like()
+    for inst in out.data:
+        new.append(inst)
+        if inst.operation.name == "delay":
+            length = sim._delay_seconds(inst, DT_NS)
+            if length > 0:
+                for qb in inst.qubits:
+                    q = out.find_bit(qb).index
+                    tv = sim.evaluate_truth_at(truth, q, t_s)
+                    new.append(thermal_relaxation_error(
+                        tv["T1_s"], min(tv["T2_s"], 2 * tv["T1_s"]), length), [qb])
+    return new
+
+
 sim.build_noise_model = _noise_model_with_cz
+sim._inject_amplitude_errors = _inject_with_idle_decay
+sim._AER_NATIVE = sim._AER_NATIVE | {"quantum_channel"}
 
 
 def _true_cz_error(truth, a: int, b: int, t_s: float) -> float:
@@ -273,14 +318,27 @@ def _run_task(circuits, truth, shots: int, t_s: float, seed: int):
 
 
 def _magnetisation(counts: Dict[str, int], bits: Sequence[int], spam: Sequence[Tuple[float, float]]):
-    """Average <Z> over the window, each qubit corrected for its readout error."""
-    total = sum(counts.values())
-    zs = []
+    """Average <Z> over the window, each qubit corrected for its readout error,
+    and the variance of that estimate (from the per-shot values)."""
+    keys = list(counts)
+    weights = np.array([counts[k] for k in keys], dtype=float)
+    per_shot = np.zeros(len(keys))
     for bit, (p01, p10) in zip(bits, spam):
-        p1 = sum(v for key, v in counts.items() if key[-1 - bit] == "1") / total
-        p1_true = (p1 - p10) / (1.0 - p01 - p10)
-        zs.append(1.0 - 2.0 * p1_true)
-    return float(np.mean(zs))
+        z = np.array([1.0 - 2.0 * int(k[-1 - bit]) for k in keys])
+        per_shot += (z - (p01 - p10)) / (1.0 - p01 - p10)
+    per_shot /= len(bits)
+    n = weights.sum()
+    mean = float(np.sum(weights * per_shot) / n)
+    var = float(np.sum(weights * (per_shot - mean) ** 2) / (n - 1)) / n
+    return mean, var
+
+
+def _zne(values: Sequence[float], variances: Sequence[float]) -> Tuple[float, float]:
+    """Linear fit in the noise scale, evaluated at zero, and its standard error."""
+    x = np.array(SCALES, dtype=float)
+    design = np.vstack([np.ones_like(x), x]).T
+    coeffs = np.linalg.solve(design.T @ design, design.T)[0]
+    return float(coeffs @ np.asarray(values)), float(np.sqrt(coeffs**2 @ np.asarray(variances)))
 
 
 def _probe_qubits(truth, priors, qubits: Sequence[int], t_s: float, seed: int):
@@ -437,8 +495,6 @@ def run_one_instance(instance_id: int, seed: int, cfg: Dict[str, Any]) -> List[D
 
         dd_q = [q for q in w_can if _dd_reasons(before[q])]
         plans = {"calibration": (w_cal, (), shots),
-                 "calibration_budget": (w_cal, (), shots + int(round(
-                     N_QUBITS * CANARY_SHOTS_PER_QUBIT / len(SCALES)))),
                  "canary": (w_can, (), shots),
                  "canary_dd": (w_can, tuple(dd_q), shots),
                  "oracle": (w_orc, (), shots)}
@@ -451,13 +507,16 @@ def run_one_instance(instance_id: int, seed: int, cfg: Dict[str, Any]) -> List[D
             counts, duration = _run_task(circuits, truth, n_shots, t_job, seed * 100_000 + 90_000)
             durations[arm] = duration
             spam = [(priors[q].spam_p0_given_1_prior, priors[q].spam_p1_given_0_prior) for q in window]
-            values = [_magnetisation(c, _window_bits(circ, window), spam)
-                      for c, circ in zip(counts, circuits)]
-            zne = float(np.polyval(np.polyfit(SCALES, values, 1), 0.0))
+            stats = [_magnetisation(c, _window_bits(circ, window), spam)
+                     for c, circ in zip(counts, circuits)]
+            values = [m for m, _ in stats]
+            zne, zne_se = _zne(values, [v for _, v in stats])
+            zne_quad = float(np.polyval(np.polyfit(SCALES, values, 2), 0.0))
             row = dict(base_row)
             row.update(arm=arm, window="-".join(map(str, window)), window_start=window[0],
                        same_as_calibration=bool(window == w_cal), exact=exact,
-                       raw_estimate=values[0], zne_estimate=zne,
+                       raw_estimate=values[0], zne_estimate=zne, zne_se=zne_se,
+                       zne_quadratic=zne_quad,
                        raw_abs_error=abs(values[0] - exact), zne_abs_error=abs(zne - exact),
                        esp_true=float(np.exp(true_score(window))), dd_applied=bool(dd),
                        dd_qubits="-".join(map(str, dd)), red_qubits="-".join(map(str, red)),
@@ -479,6 +538,14 @@ def run_one_instance(instance_id: int, seed: int, cfg: Dict[str, Any]) -> List[D
                                     probe_blocks=PROBE_BLOCKS, circuits_per_qubit=17,
                                     qubits=[after[q] for q in w_can], timestamp=timestamp)
         drift = canary.compare(before_report, after_report)
+        from scipy.stats import norm
+        from quantum_canary import online
+        p_all = {(q, k): float(2.0 * norm.sf(abs(z))) for q, zs in drift.z_scores.items()
+                 for k, z in zs.items() if np.isfinite(z)}
+        alpha = 2.0 * norm.sf(drift.z_threshold)
+        familywise = any(p < alpha for p in online._holm_adjust(p_all).values()
+                         if np.isfinite(p)) or any(
+            drift.health_after[q] == "RED" for q in drift.health_after)
         changed = []
         for q in w_can:
             b0, b1 = probe_windows[q]
@@ -489,7 +556,8 @@ def run_one_instance(instance_id: int, seed: int, cfg: Dict[str, Any]) -> List[D
                 changed.append(q)
         for row in rows:
             if row["arm"] == "canary":
-                row.update(drift_flagged=not drift.stable, drift_true=bool(changed),
+                row.update(drift_flagged=not drift.stable, drift_flagged_familywise=bool(familywise),
+                           drift_true=bool(changed),
                            drift_qubits_flagged="-".join(map(str, drift.drifted_qubits)),
                            drift_qubits_true="-".join(map(str, changed)))
         return rows
@@ -541,11 +609,13 @@ def read_csv(path: pathlib.Path):
             row = dict(raw)
             for k in ("instance_id", "seed"):
                 row[k] = int(row[k])
-            for k in ("exact", "raw_estimate", "zne_estimate", "raw_abs_error", "zne_abs_error",
+            for k in ("exact", "raw_estimate", "zne_estimate", "zne_se", "zne_quadratic",
+                      "raw_abs_error", "zne_abs_error",
                       "esp_true", "job_start_s", "job_duration_s", "perturbation_frac",
                       "window_start", "shots_task", "shots_canary", "cz_count"):
                 row[k] = float(row[k]) if row[k] not in ("", "nan") else NAN
-            for k in ("same_as_calibration", "dd_applied", "fallback", "drift_flagged", "drift_true"):
+            for k in ("same_as_calibration", "dd_applied", "fallback", "drift_flagged",
+                      "drift_flagged_familywise", "drift_true"):
                 row[k] = {"true": True, "false": False}.get(str(row[k]).lower(), NAN)
             rows.append(row)
     return rows
@@ -576,19 +646,21 @@ def summarize(rows) -> None:
     inst = [v for v in by.values() if len(v) == len(ARMS)]
     print(f"\n[online_utility] {len(inst)} complete instances (failures counted above, none dropped)")
     print(f"  exact answer {inst[0]['calibration']['exact']:+.5f} (same task every instance)")
-    print(f"  {'arm':<20}{'median |ZNE err|':>17}{'mean':>10}{'median |raw err|':>18}"
-          f"{'median ESP_true':>17}{'task shots':>12}{'canary shots':>14}")
+    print(f"  {'arm':<13}{'median |ZNE err|':>17}{'mean':>9}{'median |quad ZNE err|':>22}"
+          f"{'median |raw err|':>18}{'median ESP_true':>17}{'task shots':>12}{'canary shots':>14}")
     for arm in ARMS:
         z = np.array([v[arm]["zne_abs_error"] for v in inst])
+        zq = np.array([abs(v[arm]["zne_quadratic"] - v[arm]["exact"]) for v in inst])
         raw = np.array([v[arm]["raw_abs_error"] for v in inst])
         esp = np.array([v[arm]["esp_true"] for v in inst])
-        print(f"  {arm:<20}{np.median(z):>17.4f}{np.mean(z):>10.4f}{np.median(raw):>18.4f}"
-              f"{np.median(esp):>17.4f}{int(np.median([v[arm]['shots_task'] for v in inst])):>12,}"
+        print(f"  {arm:<13}{np.median(z):>17.4f}{np.mean(z):>9.4f}{np.median(zq):>22.4f}"
+              f"{np.median(raw):>18.4f}{np.median(esp):>17.4f}"
+              f"{int(np.median([v[arm]['shots_task'] for v in inst])):>12,}"
               f"{int(np.median([v[arm]['shots_canary'] for v in inst])):>14,}")
     rng = np.random.default_rng(0)
     print("\n  paired comparisons of |ZNE error| (negative = first arm more accurate)")
-    for a, b in (("canary", "calibration"), ("canary", "calibration_budget"),
-                 ("canary_dd", "calibration"), ("canary_dd", "canary"), ("oracle", "calibration")):
+    for a, b in (("canary", "calibration"), ("canary_dd", "calibration"),
+                 ("canary_dd", "canary"), ("oracle", "calibration")):
         d = np.array([v[a]["zne_abs_error"] - v[b]["zne_abs_error"] for v in inst])
         boot = [np.median(rng.choice(d, len(d))) for _ in range(2000)]
         nz = d[d != 0]
@@ -596,16 +668,25 @@ def summarize(rows) -> None:
         print(f"  {a:>10} - {b:<19} median {np.median(d):+.4f}  95% CI [{np.percentile(boot, 2.5):+.4f},"
               f" {np.percentile(boot, 97.5):+.4f}]  {a} better in {np.mean(d < 0):.0%}, tied "
               f"{np.mean(d == 0):.0%}  Wilcoxon p = {p:.3g}")
+    floor = np.array([max(0.0, v["calibration"]["zne_abs_error"] - 2 * v["calibration"]["zne_se"])
+                      for v in inst])
+    beyond = np.mean([v["canary"]["zne_abs_error"] < f for v, f in zip(inst, floor)])
+    print(f"\n  canary below the calibration arm's error floor (|error| - 2 SE, the most extra"
+          f"\n  shots could remove) in {beyond:.0%} of instances; median ZNE SE "
+          f"{np.median([v['calibration']['zne_se'] for v in inst]):.4f}")
     moved = np.mean([not v["canary"]["same_as_calibration"] for v in inst])
     red = np.mean([bool(v["canary"]["red_qubits"]) for v in inst])
     dd = np.mean([bool(v["canary_dd"]["dd_applied"]) for v in inst])
     print(f"\n  Canary chose a different window in {moved:.0%} of instances; found a RED qubit in "
           f"{red:.0%}; applied decoupling in {dd:.0%}")
-    flag = np.array([v["canary"]["drift_flagged"] for v in inst], dtype=bool)
     true = np.array([v["canary"]["drift_true"] for v in inst], dtype=bool)
-    print(f"  drift after the canary job (truth: T1 or T2 moved > {DRIFT_TRUTH_REL:.0%}): "
-          f"flagged&true {np.sum(flag & true)}, flagged&false {np.sum(flag & ~true)}, "
-          f"missed {np.sum(~flag & true)}, quiet&stable {np.sum(~flag & ~true)}")
+    print(f"  drift after the canary job (truth: T1 or T2 moved > {DRIFT_TRUTH_REL:.0%}):")
+    for label, key in (("compare() (per qubit)", "drift_flagged"),
+                       ("corrected across the window", "drift_flagged_familywise")):
+        flag = np.array([v["canary"][key] for v in inst], dtype=bool)
+        print(f"    {label:<29} flagged&true {np.sum(flag & true)}, flagged&false "
+              f"{np.sum(flag & ~true)}, missed {np.sum(~flag & true)}, quiet&stable "
+              f"{np.sum(~flag & ~true)}")
     durs = np.array([v["canary"]["job_duration_s"] for v in inst])
     print(f"  task run length median {np.median(durs):.1f} s (repetition delay {REP_DELAY_S * 1e6:.0f} us)")
 
