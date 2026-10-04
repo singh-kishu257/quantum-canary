@@ -147,6 +147,14 @@ class MonitoredRun:
     layout: List[int]
     interval: int
     job_id: Optional[str] = None
+    execution_segments: Optional[List[Dict[str, Any]]] = None
+
+    @property
+    def execution_order(self) -> str:
+        """Whether the job ran in the submitted order, from IBM's execution
+        spans: "held", "violated", "unresolved" or "unavailable" (see
+        _execution_order)."""
+        return _execution_order(self.execution_segments)
 
     @property
     def flagged_rounds(self) -> List[int]:
@@ -155,7 +163,7 @@ class MonitoredRun:
                 if any(h != "GREEN" for h in r.health_summary().values())]
 
     def circuits_in_round(self, round_index: int) -> range:
-        """Indices (into your circuit list) run just before a round."""
+        """Indices (into your circuit list) submitted just before a round."""
         start = round_index * self.interval
         return range(start, min(start + self.interval, len(self.results)))
 
@@ -175,6 +183,11 @@ def run_monitored(backend, circuits: Sequence[Any], check_report: CheckReport,
     `circuits` must already be transpiled for `backend` (ISA circuits, as
     SamplerV2 requires), laid out on check_report.layout. Their results are
     returned untouched, in order, in MonitoredRun.results.
+
+    The rounds are interleaved in the submitted list. Qiskit Runtime does
+    not guarantee that a job's circuits run in that order, so the job's
+    execution spans are kept in MonitoredRun.execution_segments, and
+    MonitoredRun.execution_order says whether the order held.
 
     Leave dynamical decoupling off here: Qiskit Runtime applies it to every
     circuit in the job, which would put pulses inside Canary's probe delays
@@ -223,7 +236,62 @@ def run_monitored(backend, circuits: Sequence[Any], check_report: CheckReport,
     results = [res for per_round in algo_per_round for res in per_round]
     return MonitoredRun(results=results, rounds=rounds, monitor=monitor,
                         layout=list(check_report.layout), interval=int(interval),
-                        job_id=job.job_id() if hasattr(job, "job_id") else None)
+                        job_id=job.job_id() if hasattr(job, "job_id") else None,
+                        execution_segments=_execution_segments(pub_results, round_map))
+
+
+def _execution_segments(pub_results, round_map) -> Optional[List[Dict[str, Any]]]:
+    """The submitted job in segments (a block of your circuits, then a Canary
+    round, and so on), each with the window [start, stop] (UTC) covering
+    every execution span that holds any of its shots.
+
+    Qiskit Runtime guarantees that a span's data was taken inside the span,
+    not that the span is tight, so a segment's window always contains its
+    real run time but may be wider. start/stop are None if no span names
+    the segment's PUBs. Returns None when the result has no execution spans
+    (local simulators, older qiskit-ibm-runtime)."""
+    metadata = getattr(pub_results, "metadata", None)
+    execution = metadata.get("execution") if isinstance(metadata, dict) else None
+    spans = execution.get("execution_spans") if isinstance(execution, dict) else None
+    if spans is None or len(spans) == 0:
+        return None
+    span_pubs = [(sp, set(sp.pub_idxs)) for sp in spans]
+    segments: List[Dict[str, Any]] = []
+    for rmap in round_map:
+        first = rmap["canary_start_idx"]
+        canary_idx = list(range(first, first + rmap["n_canary_circuits"]))
+        for kind, idx in (("circuits", list(rmap["algo_indices"])), ("canary", canary_idx)):
+            if not idx:
+                continue
+            hits = [sp for sp, pubs in span_pubs if not pubs.isdisjoint(idx)]
+            segments.append({"kind": kind, "round": rmap["round_index"],
+                             "first_pub": idx[0], "last_pub": idx[-1],
+                             "start": min(sp.start for sp in hits) if hits else None,
+                             "stop": max(sp.stop for sp in hits) if hits else None})
+    return segments
+
+
+def _execution_order(segments: Optional[List[Dict[str, Any]]]) -> str:
+    """Whether the segments ran in the submitted order.
+
+    "held"        every segment's window ends no later than the next one starts
+    "violated"    some later segment's window ends before an earlier one's
+                  starts, so it certainly ran first
+    "unresolved"  windows overlap (or a segment has none), so the spans
+                  cannot tell
+    "unavailable" no execution spans were returned
+    """
+    if not segments:
+        return "unavailable"
+    timed = [s for s in segments if s["start"] is not None and s["stop"] is not None]
+    for i, a in enumerate(timed):
+        for b in timed[i + 1:]:
+            if b["stop"] < a["start"]:
+                return "violated"
+    if len(timed) == len(segments) and all(
+            a["stop"] <= b["start"] for a, b in zip(segments, segments[1:])):
+        return "held"
+    return "unresolved"
 
 
 _DRIFT_PARAMS = (("T1_s", "T1_sigma_s", "t1_chi2_dof"),

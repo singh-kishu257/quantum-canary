@@ -4,10 +4,13 @@
 Wraps 1_inversion.py's Lindblad inversion engine with an interleaving
 layer that weaves Canary probe circuits into any running quantum
 workflow's circuit list (VQE, QAOA, simulation, arbitrary circuits —
-this file is not tied to any one algorithm). Canary probes run in the
-same job submission, on the same qubits the algorithm already uses,
+this file is not tied to any one algorithm). Canary probes are submitted
+in the same job, on the same qubits the algorithm already uses,
 between batches of algorithm circuits. The algorithm's own circuits
-and results are never touched or reordered.
+and results are never touched or reordered. The interleaving is in the
+submitted circuit list; whether the backend executes it in that order
+is up to the backend (Qiskit Runtime does not guarantee it), which
+workflow.run_monitored() checks from the job's execution spans.
 
 health_summary() (per round, from InversionResult's own chi2/dof) and
 drift_report() (cross-round, comparing fitted parameters against a
@@ -252,7 +255,8 @@ def _check_interval_n(interval_n) -> None:
 def interleave_circuits(algo_circuits: list, canary_circuits: list,
                         interval_n: int = 10) -> tuple:
     """Weave canary_circuits into algo_circuits every interval_n algorithm
-    circuits, so a full Canary probe round runs after each batch.
+    circuits, so a full Canary probe round follows each batch in the
+    submitted list.
 
     Returns (interleaved_circuit_list, round_map). round_map is a list
     of dicts, one per Canary round inserted, each recording the indices

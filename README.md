@@ -6,8 +6,11 @@ hardware.
 1. **Before the job**: check your qubits. Each one comes back GREEN, YELLOW or
    RED. RED qubits are swapped for healthy spares, and you are told whether
    to switch on dynamical decoupling.
-2. **During the job**: a short Canary round runs on your qubits after every N
-   of your circuits, in the same job.
+2. **During the job**: a short Canary round is placed on your qubits after
+   every N of your circuits, in the same job. Qiskit Runtime does not
+   guarantee that a job's circuits run in the order submitted, so Canary
+   reads IBM's execution timestamps after the job and reports whether that
+   order actually held (see below).
 3. **After the job**: check again and compare. If a qubit drifted, results
    that depend on it may not hold.
 
@@ -41,6 +44,7 @@ circuits = [transpile(c, backend, initial_layout=before.layout) for c in my_circ
 run = canary.run_monitored(backend, circuits, before, interval=20)
 run.print()
 results = run.results            # your results, untouched and in order
+run.execution_order              # "held", "violated", "unresolved" or "unavailable"
 
 # 3. After
 after = canary.check(backend, qubits=before.layout)
@@ -82,6 +86,16 @@ To use IBM hardware, save your account once:
   Canary's own probe delays.
 - **Drift** is a two-sample z-test on each parameter, Holm-corrected across
   the qubit's four parameters, at |z| > 2.
+- **Execution order** (in `run_monitored`): IBM reports time windows that
+  are guaranteed to contain each circuit's shots, but may be wider than
+  the true run time. Each block of your circuits and each Canary round gets
+  the window covering all of its circuits. Canary then reports **held**
+  (every block's window ends before the next one starts), **violated**
+  (a later block's window ends before an earlier one starts), or
+  **unresolved** (windows overlap, so the timestamps cannot tell). If the
+  backend gives no timestamps, as with local simulators, it reports
+  **unavailable**. A round shows the qubits' state between the circuits
+  around it only when the order **held**.
 
 ## Also included
 

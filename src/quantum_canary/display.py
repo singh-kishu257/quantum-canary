@@ -370,9 +370,23 @@ def render_monitored(run, color: Optional[bool] = None) -> str:
                                                "yellow")))
         else:
             lines.append(_kv(s, "Drift", "none since round 0"))
+    order = run.execution_order
+    lines.append(_kv(s, "Run order", {
+        "held": s("held: execution timestamps confirm the submitted order", "green"),
+        "violated": s("violated: timestamps show circuits ran out of submitted order",
+                      "yellow"),
+        "unresolved": s("unresolved: timestamps overlap, order not confirmed", "dim"),
+        "unavailable": s("unavailable: no execution timestamps from this backend",
+                         "dim")}[order]))
     flagged = run.flagged_rounds
-    lines.append(_kv(s, "Verdict", s("all rounds GREEN", "green") if not flagged else
-                     s(f"check circuits before round(s) {flagged}", "yellow")))
+    if not flagged:
+        verdict = s("all rounds GREEN", "green")
+    elif order == "held":
+        verdict = s(f"check circuits before round(s) {flagged}", "yellow")
+    else:
+        verdict = s(f"round(s) {flagged} not GREEN; which circuits ran nearby is unknown",
+                    "yellow")
+    lines.append(_kv(s, "Verdict", verdict))
     lines.append(_rule(s, char="━"))
     return "\n".join(lines)
 
@@ -392,7 +406,7 @@ def render_drift(drift, color: Optional[bool] = None) -> str:
                      + (s(", ".join(moved), "yellow") if moved else "—"))
     lines.append("")
     if drift.stable:
-        lines.append(_kv(s, "Verdict", s("stable: the qubits did not change during the job", "green")))
+        lines.append(_kv(s, "Verdict", s("stable: the qubits did not change between the two checks", "green")))
     else:
         lines.append(_kv(s, "Verdict", s(f"qubit(s) {drift.drifted_qubits} changed: results that "
                                          "depend on them may not hold; re-run or re-learn "

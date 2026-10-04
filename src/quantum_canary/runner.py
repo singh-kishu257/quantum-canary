@@ -213,8 +213,11 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
                   (or a qiskit_ibm_runtime fake backend for a local dry run).
     qubits:       physical qubit indices.
     shots:        per-circuit shots per probe family (default DEFAULT_SHOTS).
-    probe_blocks: block-interleaved execution (default 10, as in the
-                  benchmarks); 1 runs each circuit's shots consecutively.
+    probe_blocks: block-interleaved submission (default 10, as in the
+                  benchmarks); 1 submits each circuit's shots consecutively.
+                  Qiskit Runtime does not guarantee that the circuits of a
+                  job execute in submission order, so on hardware this sets
+                  the submitted order only.
     sampler:      optional SamplerV2-compatible sampler; default
                   qiskit_ibm_runtime.SamplerV2(mode=backend).
 
