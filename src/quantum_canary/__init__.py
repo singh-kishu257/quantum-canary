@@ -15,9 +15,13 @@ superconducting hardware.
 Each check runs 17 short probe circuits per qubit and recovers T1, T2 (echo),
 T2* (Ramsey), the frequency offset and the single-qubit gate error.
 
+On IonQ trapped-ion hardware, run_ionq() measures the single-qubit gate
+error of chosen ions (T1 and T2 there are seconds long).
+
 Modules: inversion (the Canary engine), online (interleaved monitoring),
 simulation (the device simulator used to validate Canary), runner (one
-probe run), workflow (check, run_monitored, compare), display, cli.
+probe run), workflow (check, run_monitored, compare), ionq (IonQ gate-error
+probe), display, cli.
 """
 
 __version__ = "1.0.0"
@@ -39,6 +43,7 @@ from .runner import (
     run_ibm,
     run_simulation,
 )
+from .ionq import IonQReport, run_ionq
 from .display import banner, render_report
 from .inversion import (
     ARCH_DEFAULTS,
@@ -75,7 +80,7 @@ __all__ = [
     # the job workflow
     "check", "run_monitored", "compare", "CheckReport", "MonitoredRun", "DriftReport",
     # single probe runs and display
-    "run_ibm", "run_simulation", "CanaryReport", "QubitReport",
+    "run_ibm", "run_simulation", "run_ionq", "IonQReport", "CanaryReport", "QubitReport",
     "DEFAULT_SHOTS", "DEFAULT_PROBE_BLOCKS", "render_report", "banner",
     # engine
     "ARCH_DEFAULTS", "NATIVE_INVERSE_PAIRS", "BackendProfile", "CalibrationSource",
