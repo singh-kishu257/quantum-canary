@@ -3,7 +3,7 @@ using it give a user better results than trusting the backend's calibration?
 
 Steps, each its own command, all on the same qubits of one backend:
   plan      pick four 3-qubit chains by a fixed rule from the reported calibration
-  smoke     Canary on one qubit, to measure what a run really costs
+  smoke     Canary on one qubit, to check the whole pipeline on hardware
   canary    one Canary run on all chain qubits (--tag A, B, C or D)
   utility   the before/after test right after a Canary run (--tag A or C)
   qe        qiskit-experiments T1, T2Hahn and T2Ramsey on the same qubits
@@ -268,9 +268,12 @@ class Recorder:
     Aer's noisy simulation of a fake backend lets delay noise leak between
     circuits on different qubits within one call, so a whole job in one
     call would not be simulated faithfully. Real backends get one ordinary
-    job."""
+    job. With limit_s, IBM's own estimate of the job (usage_estimation) is
+    read right after submission and the job is cancelled before it runs if
+    the estimate is above limit_s, unless force."""
 
-    def __init__(self, backend, fake: bool = False):
+    def __init__(self, backend, fake: bool = False, limit_s: Optional[float] = None,
+                 force: bool = False):
         if fake:
             from qiskit_aer.primitives import SamplerV2 as AerSampler
             self.sampler = AerSampler.from_backend(backend)
@@ -279,6 +282,9 @@ class Recorder:
             self.sampler = SamplerV2(mode=backend)
         self.options = getattr(self.sampler, "options", None)
         self.fake = fake
+        self.limit_s = limit_s
+        self.force = force
+        self.ibm_estimate_s: Optional[float] = None
         self.pubs: List[Any] = []
         self.job = None
         self.raw = None
@@ -308,6 +314,17 @@ class Recorder:
             self.raw = PrimitiveResult(results, metadata={})
         else:
             self.job = self.sampler.run(self.pubs)
+            try:
+                self.ibm_estimate_s = self.job.usage_estimation.get("quantum_seconds")
+            except Exception:
+                self.ibm_estimate_s = None
+            print(f"job {self.job.job_id()}: IBM estimates "
+                  f"{self.ibm_estimate_s if self.ibm_estimate_s is not None else 'nothing'} s")
+            if (self.limit_s is not None and self.ibm_estimate_s is not None
+                    and self.ibm_estimate_s > self.limit_s and not self.force):
+                self.job.cancel()
+                raise SystemExit(f"cancelled before running: IBM estimates {self.ibm_estimate_s} s, "
+                                 f"more than the {self.limit_s:.0f} s left; pass --force to run anyway")
 
         class _Job:
             def job_id(self):
@@ -356,16 +373,13 @@ def remaining_seconds(service) -> Optional[float]:
         return None
 
 
-def guard(args, service, cost_s: Optional[float]) -> None:
-    if service is None:
-        return
+def recorder(args, backend, service) -> "Recorder":
+    """A Recorder whose jobs are cancelled before running if IBM's own
+    estimate is above the QPU time IBM reports as left (minus RESERVE_S)."""
     left = remaining_seconds(service)
-    print(f"QPU time left: {left if left is not None else 'unknown'} s; "
-          f"this job: {f'~{cost_s:.0f} s' if cost_s else 'unknown (run smoke first)'}")
-    if cost_s is None and not args.force:
-        raise SystemExit("no cost estimate yet: run smoke first, or pass --force")
-    if left is not None and cost_s is not None and cost_s > left - RESERVE_S and not args.force:
-        raise SystemExit("not enough QPU time left for this job; pass --force to try anyway")
+    if service is not None:
+        print(f"QPU time left according to IBM: {left if left is not None else 'unknown'} s")
+    return Recorder(backend, bool(args.fake), None if left is None else left - RESERVE_S, args.force)
 
 
 def family_shots(meta: Dict[str, Any], shots: Dict[str, int]) -> List[int]:
@@ -421,10 +435,8 @@ def split_half(report) -> Dict[str, Any]:
     return out
 
 
-def run_canary(args, backend, service, qubits: List[int], tag: str,
-               cost_s: Optional[float]) -> Dict[str, Any]:
-    guard(args, service, cost_s)
-    rec = Recorder(backend, bool(args.fake))
+def run_canary(args, backend, service, qubits: List[int], tag: str) -> Dict[str, Any]:
+    rec = recorder(args, backend, service)
     t_submit = now()
     rep_before = reported(backend, qubits, t_submit)
     report = canary.run_ibm(backend, qubits, probe_blocks=args.probe_blocks, sampler=rec)
@@ -432,6 +444,7 @@ def run_canary(args, backend, service, qubits: List[int], tag: str,
     payload = {"tag": tag, "backend": backend.name, "fake": bool(args.fake),
                "qubits": qubits, "groups": report.groups, "t_submit": t_submit, "t_done": t_done,
                "job_id": report.job_id, "qpu_seconds": qpu_seconds(rec.job, bool(args.fake)),
+               "ibm_usage_estimate_s": rec.ibm_estimate_s,
                "n_pubs": len(rec.pubs), "shots_executed": sum(pub_executions(p) for p in rec.pubs),
                "shots_per_qubit": report.shots_per_qubit,
                "probe_blocks": args.probe_blocks, "sampler_options": str(rec.options),
@@ -502,7 +515,7 @@ def qe_results(data, qubits: List[int], osc: Dict[int, float]) -> Dict[str, Any]
     return {"values": out, "fits": fits}
 
 
-def run_qe(args, backend, service, qubits: List[int], per_shot_s: Optional[float]):
+def run_qe(args, backend, service, qubits: List[int]):
     from qiskit_experiments.framework import ExperimentData
     priors = {}
     for q in qubits:
@@ -512,8 +525,7 @@ def run_qe(args, backend, service, qubits: List[int], per_shot_s: Optional[float
     batch, osc, groups = qe_experiment(backend, qubits, priors)
     circuits = batch._transpiled_circuits()
     shots_executed = QE_SHOTS * len(circuits)
-    guard(args, service, 2.0 * per_shot_s * shots_executed if per_shot_s else None)
-    rec = Recorder(backend, bool(args.fake))
+    rec = recorder(args, backend, service)
     t_submit = now()
     rep_before = reported(backend, qubits, t_submit)
     job = rec.run([(c, None, QE_SHOTS) for c in circuits])
@@ -534,7 +546,7 @@ def run_qe(args, backend, service, qubits: List[int], per_shot_s: Optional[float
     return {"backend": backend.name, "fake": bool(args.fake), "qubits": qubits, "groups": groups,
             "t_submit": t_submit, "t_done": t_done, "job_id": job.job_id(),
             "qpu_seconds": qpu_seconds(rec.job, bool(args.fake)), "n_pubs": len(circuits),
-            "shots_executed": shots_executed,
+            "ibm_usage_estimate_s": rec.ibm_estimate_s, "shots_executed": shots_executed,
             "shots_per_qubit": QE_SHOTS * sum(QE_N_DELAYS.values()),
             "priors": {str(q): priors[q] for q in qubits},
             "osc_freq_hz": {str(q): osc[q] for q in qubits},
@@ -643,9 +655,7 @@ def cmd_utility(args, backend, service, d):
             cs = ghz_circuits(backend, chain, t, live)
             configs.append(("-".join(map(str, chain)), t, len(cs)))
             circuits.extend(cs)
-    _, per_shot = smoke_costs(d)
-    guard(args, service, per_shot * UTIL_SHOTS * len(circuits) if per_shot else None)
-    rec = Recorder(backend, bool(args.fake))
+    rec = recorder(args, backend, service)
     t_submit = now()
     job = rec.run([(c, None, UTIL_SHOTS) for c in circuits])
     print(f"utility job {job.job_id()}: {len(circuits)} circuits x {UTIL_SHOTS} shots")
@@ -661,7 +671,7 @@ def cmd_utility(args, backend, service, d):
                 "chains": chains, "t_wait_s": T_WAIT, "t_predictions": t_pred,
                 "t_submit": t_submit, "t_done": now(), "job_id": job.job_id(),
                 "qpu_seconds": qpu_seconds(rec.job, bool(args.fake)), "n_pubs": len(circuits),
-                "shots_executed": UTIL_SHOTS * len(circuits),
+                "ibm_usage_estimate_s": rec.ibm_estimate_s, "shots_executed": UTIL_SHOTS * len(circuits),
                 "execution_spans": execution_spans(result), "predictions": pred,
                 "picks": picks, "measured": measured, "summary": summary, "counts": counts})
 
@@ -715,33 +725,13 @@ def plan_of(d: pathlib.Path) -> Dict[str, Any]:
     return plan
 
 
-def smoke_costs(d: pathlib.Path):
-    smoke = load(d / "smoke.json")
-    if not smoke or not smoke.get("qpu_seconds"):
-        return None, None
-    return smoke["qpu_seconds"], smoke["qpu_seconds"] / smoke["shots_executed"]
-
-
 def cmd_smoke(args, backend, service, d):
     plan = plan_of(d)
-    payload = run_canary(args, backend, service, plan["qubits"][:1], "smoke", cost_s=60.0)
+    payload = run_canary(args, backend, service, plan["qubits"][:1], "smoke")
     save(d / "smoke.json", payload)
-    s = payload["qpu_seconds"]
-    if not s:
-        return
-    per_shot = s / payload["shots_executed"]
-    n_groups = len(plan["groups"])
-    canary_run = s * n_groups
-    qe_est = 2.0 * per_shot * QE_SHOTS * sum(QE_N_DELAYS.values()) * n_groups
-    util_est = per_shot * UTIL_SHOTS * len(plan["chains"]) * len(TREATMENTS) * (1 + 2 * GHZ_N)
-    total = len(TAGS) * canary_run + qe_est + len(UTILITY_TAGS) * util_est
-    print(f"\nsmoke: {s:.1f} QPU s for one qubit ({payload['shots_executed']:,} shots)")
-    print(f"projected: Canary {canary_run:.0f} s x {len(TAGS)} + QE ~{qe_est:.0f} s + utility "
-          f"~{util_est:.0f} s x {len(UTILITY_TAGS)} = ~{total:.0f} s")
-    left = remaining_seconds(service)
-    if left is not None:
-        print(f"QPU time left: {left:.0f} s"
-              + ("" if total <= left - RESERVE_S else "  -> too much: drop run D or use fewer chains"))
+    print(f"\nsmoke: IBM measured {payload['qpu_seconds'] or 'n/a'} s for one qubit "
+          f"({payload['shots_executed']:,} shots); QPU time left according to IBM: "
+          f"{remaining_seconds(service) or 'unknown'} s")
 
 
 def cmd_canary(args, backend, service, d):
@@ -749,9 +739,7 @@ def cmd_canary(args, backend, service, d):
     path = d / f"canary_{args.tag}.json"
     if path.exists() and not args.force:
         raise SystemExit(f"{path.name} exists; pass --force to overwrite")
-    s, _ = smoke_costs(d)
-    save(path, run_canary(args, backend, service, plan["qubits"], args.tag,
-                          s * len(plan["groups"]) if s else None))
+    save(path, run_canary(args, backend, service, plan["qubits"], args.tag))
 
 
 def cmd_qe(args, backend, service, d):
@@ -759,8 +747,7 @@ def cmd_qe(args, backend, service, d):
     path = d / "qe.json"
     if path.exists() and not args.force:
         raise SystemExit(f"{path.name} exists; pass --force to overwrite")
-    _, per_shot = smoke_costs(d)
-    save(path, run_qe(args, backend, service, plan["qubits"], per_shot))
+    save(path, run_qe(args, backend, service, plan["qubits"]))
 
 
 def cmd_usage(args, backend, service, d):
@@ -929,9 +916,9 @@ def cmd_analyze(args, backend, service, d):
                                  "health": v["health"]}
         print(f"   run {t}: |dw|/2pi " + ", ".join(
             f"q{q} {abs(unrep[f'{t}_{q}']['delta_omega_khz']):.1f}" for q in qubits) + " kHz")
-        print(f"          T2*/T2   " + ", ".join(
+        print("          T2*/T2   " + ", ".join(
             f"q{q} {unrep[f'{t}_{q}']['t2star_over_t2']:.2f}" for q in qubits))
-        print(f"          health   " + ", ".join(f"q{q} {unrep[f'{t}_{q}']['health']}" for q in qubits))
+        print("          health   " + ", ".join(f"q{q} {unrep[f'{t}_{q}']['health']}" for q in qubits))
     out["unreported"] = unrep
 
     print("\n7. Canary chi2/dof on hardware vs theory")

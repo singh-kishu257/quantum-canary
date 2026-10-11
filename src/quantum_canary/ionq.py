@@ -7,16 +7,19 @@ BackendProfile.gate_rep_n. Each ion's epsilon_sx comes from the engine's
 own gate fit (inversion._invert_gate) with the readout errors given.
 
     report = run_ionq(backend, ions=[3, 6, 14], eps_prior=2e-4,
-                      spam=(0.006, 0.004), max_usd=1500)
+                      spam=(0.006, 0.004), max_cost=1500)
 
 Circuits are sent as IonQ native gates with optimization off and IonQ's
 debiasing off (debiasing averages permuted copies of a circuit, which mixes
 up the ions). Each ion is probed in its own circuits by default: on Forte-1
 in August 2026, running several ions in the same circuit gave results
 disturbed by crosstalk. parallel=True shares circuits between ions, in
-batches of at most max_ops gates. IonQ bills per gate per ion per shot, so
-cost does not depend on this: estimate_cost() prices a run before anything
-is sent, and estimate_hours() gives its gate time.
+batches of at most max_ops gates.
+
+Quantum Canary does not price runs. ionq_estimate() asks IonQ for its own
+estimate of a job (cost and execution time, in IonQ's units), and max_cost
+is checked against that estimate only; what you are actually charged is on
+your IonQ account.
 """
 from __future__ import annotations
 
@@ -32,13 +35,8 @@ from scipy.stats import chi2 as _chi2
 
 from . import inversion as inv
 
-__all__ = ["COST_PER_PAIR_SHOT_USD", "IonResult", "IonQReport", "ionq_circuits",
-           "estimate_cost", "estimate_hours", "run_ionq"]
+__all__ = ["IonResult", "IonQReport", "ionq_circuits", "ionq_estimate", "run_ionq"]
 
-# Forte-1, August 2026: 500 pairs x 500 shots cost 64 USD per ion, 1000 pairs
-# 128 USD, 2000 pairs 256 USD, i.e. 2.56e-4 USD per (GPI2, GPI2^-1) pair per
-# shot. Check the current rate before relying on it.
-COST_PER_PAIR_SHOT_USD = 2.56e-4
 DEFAULT_SHOTS = 500
 DEFAULT_MAX_OPS = 24_000
 POOR_FIT_P = 0.01
@@ -80,7 +78,7 @@ class IonQReport:
     spam: Tuple[float, float]
     batches: List[List[int]]
     job_ids: List[str]
-    cost_usd: float
+    ionq_estimates: List[Optional[Dict[str, Any]]]
     results: List[IonResult]
     raw: List[Dict[str, Any]] = field(default_factory=list, repr=False)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -90,12 +88,12 @@ class IonQReport:
                 "gate_rep_n": list(self.gate_rep_n), "eps_prior": self.eps_prior,
                 "p0_given_1": self.spam[0], "p1_given_0": self.spam[1],
                 "batches": [list(b) for b in self.batches], "job_ids": list(self.job_ids),
-                "cost_usd": self.cost_usd, "timestamp": self.timestamp,
+                "ionq_estimates": list(self.ionq_estimates), "timestamp": self.timestamp,
                 "results": [r.to_dict() for r in self.results], "raw": self.raw}
 
     def render(self) -> str:
         lines = [f"IonQ {self.backend}: {len(self.ions)} ions, N = {self.gate_rep_n} pairs, "
-                 f"{self.shots} shots, ~{self.cost_usd:,.0f} USD",
+                 f"{self.shots} shots, jobs {', '.join(str(j) for j in self.job_ids)}",
                  f"  {'ion':>4}  {'epsilon_sx':>12}  {'sigma':>9}  {'chi2/dof':>8}"]
         for r in self.results:
             lines.append(f"  {r.ion:>4}  {r.epsilon_sx:>12.3e}  {r.epsilon_sx_sigma:>9.1e}  "
@@ -146,21 +144,25 @@ def ionq_circuits(ions: Sequence[int], gate_rep_n: Sequence[int],
     return batches, circuits
 
 
-def estimate_cost(circuits: Sequence[Any], shots: int,
-                  rate: float = COST_PER_PAIR_SHOT_USD) -> float:
-    """USD for running `circuits` with `shots` each: native gates / 2 pairs,
-    times shots, times rate."""
-    gates = sum(sum(n for name, n in qc.count_ops().items() if name.startswith("gpi"))
-                for qc in circuits)
-    return gates / 2.0 * int(shots) * float(rate)
-
-
-def estimate_hours(gate_rep_n: Sequence[int], shots: int, n_ions: int,
-                   gate_time_s: Optional[float] = None) -> float:
-    """Hours of gate time for n_ions ions probed one at a time (cooling,
-    readout and queueing come on top)."""
-    t = gate_time_s if gate_time_s else inv.ARCH_DEFAULTS["trapped_ion"]["gate_time_ns"] * 1e-9
-    return 2 * sum(gate_rep_n) * int(shots) * t * int(n_ions) / 3600.0
+def ionq_estimate(backend, circuits: Sequence[Any], shots: int) -> Optional[Dict[str, Any]]:
+    """IonQ's own estimate for one job of `circuits` with `shots` each, from
+    its /jobs/estimate endpoint (qiskit-ionq's client.estimate_job), given the
+    job's native gate count and qubit count: a dict with IonQ's estimated
+    cost, cost unit, execution and queue time and the raw response, or None
+    if the backend gives no estimate (simulators, mock backends, API errors)."""
+    client = getattr(backend, "client", None)
+    if client is None or not hasattr(client, "estimate_job"):
+        return None
+    oneq = sum(n for qc in circuits for name, n in qc.count_ops().items() if name.startswith("gpi"))
+    qubits = len({qc.find_bit(i.qubits[0]).index for qc in circuits for i in qc.data
+                  if i.operation.name == "measure"})
+    try:
+        est = client.estimate_job(backend=str(backend.name), oneq_gates=int(oneq), twoq_gates=0,
+                                  qubits=int(qubits), shots=int(shots), error_mitigation=False)
+    except Exception:
+        return None
+    return {"cost": est.cost, "cost_unit": est.cost_unit, "execution_time_s": est.exec_time,
+            "queue_time_s": est.queue_time, "raw": est.to_dict()}
 
 
 def _p0(counts: Dict[str, float], bit: int) -> Tuple[float, float]:
@@ -177,8 +179,8 @@ def _p0(counts: Dict[str, float], bit: int) -> Tuple[float, float]:
 
 def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
              eps_prior: Optional[float] = None, spam: Optional[Tuple[float, float]] = None,
-             max_ops: int = DEFAULT_MAX_OPS, max_usd: Optional[float] = None,
-             rate: float = COST_PER_PAIR_SHOT_USD, run_options: Optional[Dict[str, Any]] = None,
+             max_ops: int = DEFAULT_MAX_OPS, max_cost: Optional[float] = None,
+             run_options: Optional[Dict[str, Any]] = None,
              parallel: bool = False) -> IonQReport:
     """Run Canary's gate-error probe on `ions` of a qiskit-ionq native-gate
     backend (provider.get_backend("qpu.forte-1", gateset="native"), or the
@@ -187,16 +189,24 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     eps_prior sets the repetition counts (BackendProfile.gate_rep_n);
     spam = (P(0|1), P(1|0)) are the readout errors the fit corrects for. Both
     default to the engine's trapped-ion values; pass the device's published
-    numbers when you have them. max_usd refuses a run whose estimate_cost()
-    is higher. One job per batch of ions (one ion per batch unless
-    parallel=True), all circuits with the same shots.
+    numbers when you have them. One job per batch of ions (one ion per batch
+    unless parallel=True), all circuits with the same shots. With max_cost,
+    IonQ's own estimate (ionq_estimate) of all jobs is fetched first and the
+    run is refused if it is higher, or if IonQ returns no estimate.
     """
     arch = _arch(eps_prior, spam)
     gate_rep_n = _profile(arch).gate_rep_n
     batches, circuits = ionq_circuits(ions, gate_rep_n, max_ops, parallel)
-    cost = estimate_cost(circuits, shots, rate)
-    if max_usd is not None and cost > max_usd:
-        raise ValueError(f"estimated cost {cost:,.0f} USD is above max_usd={max_usd:,.0f}")
+    n_per_batch = len(gate_rep_n)
+    estimates = [ionq_estimate(backend, circuits[b * n_per_batch:(b + 1) * n_per_batch], shots)
+                 for b in range(len(batches))]
+    if max_cost is not None:
+        if any(e is None or e.get("cost") is None for e in estimates):
+            raise ValueError("IonQ returned no cost estimate, so max_cost cannot be checked")
+        total = sum(float(e["cost"]) for e in estimates)
+        if total > max_cost:
+            raise ValueError(f"IonQ estimates {total:,.2f} {estimates[0]['cost_unit']}, "
+                             f"above max_cost={max_cost:,.2f}")
 
     options = {"shots": int(shots)}
     try:
@@ -208,7 +218,6 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
 
     per_ion: Dict[int, Dict[int, Tuple[float, float]]] = {q: {} for q in ions}
     job_ids, raw = [], []
-    n_per_batch = len(gate_rep_n)
     for b, batch in enumerate(batches):
         batch_circuits = circuits[b * n_per_batch:(b + 1) * n_per_batch]
         job = backend.run(batch_circuits, **options)
@@ -248,5 +257,5 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
                       shots=int(shots), gate_rep_n=[int(n) for n in gate_rep_n],
                       eps_prior=float(arch["eps_typical"]),
                       spam=(float(arch["p0_given_1"]), float(arch["p1_given_0"])),
-                      batches=[list(b) for b in batches], job_ids=job_ids, cost_usd=cost,
+                      batches=[list(b) for b in batches], job_ids=job_ids, ionq_estimates=estimates,
                       results=results, raw=raw)

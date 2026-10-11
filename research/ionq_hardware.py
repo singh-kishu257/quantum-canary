@@ -7,8 +7,10 @@ stops can be resumed. Run A and run B measure the same ions; the analysis
 checks that each ion's epsilon_sx repeats within its error bars and sets
 the median against IonQ's published device-average single-qubit error.
 
-  estimate   gates, cost and gate time of one run, nothing sent
-  run        one run (--tag A or B), refused above --max-usd; resumes
+  estimate   repetition counts, gates and shots per ion, and IonQ's own
+             estimate for them; nothing is sent
+  run        one run (--tag A or B); resumes; on hardware refused if IonQ's
+             own estimate of the remaining ions is above --max-cost
   analyze    A vs B per ion, and the map vs IonQ's published numbers
 
 --simulator forte-1 runs on IonQ's free cloud simulator with that noise
@@ -131,19 +133,36 @@ def out_dir(args) -> pathlib.Path:
     return d
 
 
+def ion_estimates(backend, ions, n, shots):
+    """IonQ's own estimate for each ion's job, or None per ion if IonQ gives none."""
+    return {q: ionq.ionq_estimate(backend, ionq.ionq_circuits([q], n)[1], shots) for q in ions}
+
+
+def show_estimates(est) -> Optional[float]:
+    if any(e is None or e.get("cost") is None for e in est.values()):
+        print("IonQ returned no estimate; check the cost on your IonQ account before running")
+        return None
+    unit = next(iter(est.values()))["cost_unit"]
+    total = sum(float(e["cost"]) for e in est.values())
+    times = [e.get("execution_time_s") for e in est.values()]
+    print(f"IonQ's estimate: {total:,.2f} {unit} for {len(est)} ions"
+          + (f", execution {sum(times) / 3600:.1f} h" if all(t is not None for t in times) else "")
+          + " (IonQ's numbers; actual charges are on your IonQ account)")
+    return total
+
+
 def cmd_estimate(args, d):
     p = priors(args)
     arch = ionq._arch(p["eps_prior"], p["spam"])
     n = ionq._profile(arch).gate_rep_n
-    _, circuits = ionq.ionq_circuits(args.ions, n)
-    cost = ionq.estimate_cost(circuits, args.shots)
-    hours = ionq.estimate_hours(n, args.shots, len(args.ions))
+    _, circuits = ionq.ionq_circuits(args.ions[:1], n)
+    gates = sum(c.count_ops().get("gpi2", 0) for c in circuits)
     print(f"ions {args.ions}, one at a time")
     print(f"eps prior {arch['eps_typical']:.2e} ({'published' if p['eps_prior'] is not None else 'engine default'}), "
           f"readout P(0|1) {arch['p0_given_1']:.4f} P(1|0) {arch['p1_given_0']:.4f}")
-    print(f"N = {n} pairs, {len(circuits)} circuits, {args.shots} shots")
-    print(f"one run: {cost:,.0f} USD ({cost / len(args.ions):,.0f} per ion), at least "
-          f"{hours:.1f} h of gate time (August: about 45 min per ion all in)")
+    print(f"per ion: N = {n} pairs, {len(circuits)} circuits, {gates:,} native gates, {args.shots} shots each")
+    if os.environ.get("IONQ_API_KEY") and not args.simulator:
+        show_estimates(ion_estimates(backend_for(args), args.ions, n, args.shots))
 
 
 def cmd_run(args, d):
@@ -162,20 +181,28 @@ def cmd_run(args, d):
                  "ions": args.ions, "shots": args.shots, "t_submit": now(),
                  "characterization": p["characterization"], "eps_prior": p["eps_prior"],
                  "spam": p["spam"], "per_ion": {}}
-    if not args.simulator and args.max_usd is None:
-        raise SystemExit("hardware runs need --max-usd")
+    if not args.simulator and args.max_cost is None:
+        raise SystemExit("hardware runs need --max-cost (in IonQ's cost unit)")
     todo = [q for q in args.ions if str(q) not in state["per_ion"]]
     arch = ionq._arch(state["eps_prior"], state["spam"])
     n = ionq._profile(arch).gate_rep_n
-    per_ion_cost = ionq.estimate_cost(ionq.ionq_circuits([0], n)[1], state["shots"])
-    spent = sum(r["cost_usd"] for r in state["per_ion"].values())
-    print(f"{len(todo)} ions to go ({len(state['per_ion'])} done), ~{per_ion_cost * len(todo):,.0f} USD more")
-    if not args.simulator and spent + per_ion_cost * len(todo) > args.max_usd:
-        raise SystemExit(f"would exceed --max-usd {args.max_usd:,.0f}")
     backend = backend_for(args)
+    print(f"{len(todo)} ions to go ({len(state['per_ion'])} done)")
+    budget = None
+    if not args.simulator:
+        estimated = show_estimates(ion_estimates(backend, todo, n, state["shots"]))
+        done = sum(float(e["cost"]) for r in state["per_ion"].values()
+                   for e in r.get("ionq_estimates") or [] if e and e.get("cost") is not None)
+        if estimated is None:
+            raise SystemExit("IonQ returned no estimate, so --max-cost cannot be checked")
+        if done + estimated > args.max_cost:
+            raise SystemExit(f"IonQ estimates {done + estimated:,.2f} for the whole run, above --max-cost {args.max_cost:,.2f}")
+        budget = args.max_cost - done
     for q in todo:
         report = ionq.run_ionq(backend, [q], shots=state["shots"], eps_prior=state["eps_prior"],
-                               spam=state["spam"])
+                               spam=state["spam"], max_cost=budget)
+        if budget is not None:
+            budget -= sum(float(e["cost"]) for e in report.ionq_estimates)
         state["per_ion"][str(q)] = report.to_dict()
         partial.write_text(json.dumps(state, indent=1, default=str))
         r = report.results[0]
@@ -187,7 +214,7 @@ def cmd_run(args, d):
     payload["report"] = {"ions": args.ions, "shots": state["shots"], "gate_rep_n": reports[0]["gate_rep_n"],
                          "eps_prior": reports[0]["eps_prior"],
                          "p0_given_1": reports[0]["p0_given_1"], "p1_given_0": reports[0]["p1_given_0"],
-                         "cost_usd": sum(r["cost_usd"] for r in reports),
+                         "ionq_estimates": [e for r in reports for e in r.get("ionq_estimates") or []],
                          "job_ids": [j for r in reports for j in r["job_ids"]],
                          "results": [r["results"][0] for r in reports],
                          "per_ion": reports}
@@ -250,7 +277,7 @@ def main() -> None:
     ap.add_argument("--ions", type=lambda s: [int(x) for x in s.split(",")], default=IONS)
     ap.add_argument("--tag", choices=TAGS)
     ap.add_argument("--shots", type=int, default=ionq.DEFAULT_SHOTS)
-    ap.add_argument("--max-usd", type=float, default=None)
+    ap.add_argument("--max-cost", type=float, default=None, help="limit in IonQ's cost unit, checked against IonQ's own estimates")
     ap.add_argument("--eps-prior", type=float, default=None)
     ap.add_argument("--spam", type=float, nargs=2, default=None, metavar=("P0_GIVEN_1", "P1_GIVEN_0"))
     ap.add_argument("--out", default=None)
