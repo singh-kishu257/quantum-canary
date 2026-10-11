@@ -11,10 +11,12 @@ own gate fit (inversion._invert_gate) with the readout errors given.
 
 Circuits are sent as IonQ native gates with optimization off and IonQ's
 debiasing off (debiasing averages permuted copies of a circuit, which mixes
-up the ions). Several ions share each circuit, split into batches so that
-no circuit has more than max_ops gates. IonQ bills per gate per ion per shot,
-so cost does not depend on the batching: estimate_cost() prices a run before
-anything is sent.
+up the ions). Each ion is probed in its own circuits by default: on Forte-1
+in August 2026, running several ions in the same circuit gave results
+disturbed by crosstalk. parallel=True shares circuits between ions, in
+batches of at most max_ops gates. IonQ bills per gate per ion per shot, so
+cost does not depend on this: estimate_cost() prices a run before anything
+is sent, and estimate_hours() gives its gate time.
 """
 from __future__ import annotations
 
@@ -31,7 +33,7 @@ from scipy.stats import chi2 as _chi2
 from . import inversion as inv
 
 __all__ = ["COST_PER_PAIR_SHOT_USD", "IonResult", "IonQReport", "ionq_circuits",
-           "estimate_cost", "run_ionq"]
+           "estimate_cost", "estimate_hours", "run_ionq"]
 
 # Forte-1, August 2026: 500 pairs x 500 shots cost 64 USD per ion, 1000 pairs
 # 128 USD, 2000 pairs 256 USD, i.e. 2.56e-4 USD per (GPI2, GPI2^-1) pair per
@@ -123,13 +125,16 @@ def _profile(arch: Dict[str, Any]) -> inv.BackendProfile:
 
 
 def ionq_circuits(ions: Sequence[int], gate_rep_n: Sequence[int],
-                  max_ops: int = DEFAULT_MAX_OPS) -> Tuple[List[List[int]], List[Any]]:
+                  max_ops: int = DEFAULT_MAX_OPS,
+                  parallel: bool = False) -> Tuple[List[List[int]], List[Any]]:
     """Batches of ions and, for each batch, one circuit per N: every ion of the
     batch runs the engine's gate-repetition circuit on its own qubit and is
-    measured into its own clbit (clbit j is batch[j])."""
+    measured into its own clbit (clbit j is batch[j]). Without parallel every
+    batch is a single ion."""
     from qiskit import QuantumCircuit
     ions = [int(q) for q in ions]
-    batches = inv.split_qubits_for_op_limit(ions, 2 * max(gate_rep_n), max_ops)
+    batches = (inv.split_qubits_for_op_limit(ions, 2 * max(gate_rep_n), max_ops)
+               if parallel else [[q] for q in ions])
     circuits = []
     for batch in batches:
         for n in gate_rep_n:
@@ -150,6 +155,14 @@ def estimate_cost(circuits: Sequence[Any], shots: int,
     return gates / 2.0 * int(shots) * float(rate)
 
 
+def estimate_hours(gate_rep_n: Sequence[int], shots: int, n_ions: int,
+                   gate_time_s: Optional[float] = None) -> float:
+    """Hours of gate time for n_ions ions probed one at a time (cooling,
+    readout and queueing come on top)."""
+    t = gate_time_s if gate_time_s else inv.ARCH_DEFAULTS["trapped_ion"]["gate_time_ns"] * 1e-9
+    return 2 * sum(gate_rep_n) * int(shots) * t * int(n_ions) / 3600.0
+
+
 def _p0(counts: Dict[str, float], bit: int) -> Tuple[float, float]:
     """(weight of 0, total weight) on clbit `bit` of a counts or probability
     dict whose keys are bitstrings with clbit 0 rightmost."""
@@ -166,7 +179,7 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
              eps_prior: Optional[float] = None, spam: Optional[Tuple[float, float]] = None,
              max_ops: int = DEFAULT_MAX_OPS, max_usd: Optional[float] = None,
              rate: float = COST_PER_PAIR_SHOT_USD, run_options: Optional[Dict[str, Any]] = None,
-             ) -> IonQReport:
+             parallel: bool = False) -> IonQReport:
     """Run Canary's gate-error probe on `ions` of a qiskit-ionq native-gate
     backend (provider.get_backend("qpu.forte-1", gateset="native"), or the
     "simulator" backend with a noise model) and fit epsilon_sx per ion.
@@ -175,11 +188,12 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     spam = (P(0|1), P(1|0)) are the readout errors the fit corrects for. Both
     default to the engine's trapped-ion values; pass the device's published
     numbers when you have them. max_usd refuses a run whose estimate_cost()
-    is higher. One job per batch of ions, all circuits with the same shots.
+    is higher. One job per batch of ions (one ion per batch unless
+    parallel=True), all circuits with the same shots.
     """
     arch = _arch(eps_prior, spam)
     gate_rep_n = _profile(arch).gate_rep_n
-    batches, circuits = ionq_circuits(ions, gate_rep_n, max_ops)
+    batches, circuits = ionq_circuits(ions, gate_rep_n, max_ops, parallel)
     cost = estimate_cost(circuits, shots, rate)
     if max_usd is not None and cost > max_usd:
         raise ValueError(f"estimated cost {cost:,.0f} USD is above max_usd={max_usd:,.0f}")
