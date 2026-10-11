@@ -15,9 +15,10 @@ its settings picked from the same prior. Each tool is scored against the
 truth averaged over its own run.
 
 Truth definitions: T2 is the echo T2, delta_omega is signed, and epsilon is
-the Z-survival per gate pair with detuning left out. RB measures average gate
-infidelity instead, so part of qiskit-experiments' epsilon error is a
-difference in definition. Read R2 next to R2_prior, beats_prior and the |z|
+the average gate infidelity of the simulated sx, 1 - F_avg, the quantity
+randomized benchmarking estimates and IBM and IonQ report. Canary's
+inverse-pair probe does not see coherent errors, so its epsilon reads low by
+the coherent share. Read R2 next to R2_prior, beats_prior and the |z|
 coverage. Output is one CSV with both tools side by side.
 """
 
@@ -118,6 +119,32 @@ TRUTH_FAMILIES = {"T1_s": ("t1_",), "T2_s": ("ramsey_X_", "ramsey_Y_", "echo_"),
                   "delta_omega": ("ramsey_X_", "ramsey_Y_"),
                   "epsilon_sx": ("gate_rep_N",)}
 SPAM_CLIP_MAX = 0.499
+
+
+def _avg_gate_infidelity(truth: Any, t_s: float) -> float:
+    """1 - F_avg of qubit 0's sx as the simulator plays it at t_s: relaxation and
+    depolarizing after the pulse, the amplitude over-rotation, and the detuning
+    during the pulse averaged over the quasi-static offset."""
+    from qiskit.circuit.library import SXGate
+    from qiskit.quantum_info import Operator, SuperOp, average_gate_fidelity
+    err, f = sim._gate_noise_channel(truth, 0, t_s)
+    g = Operator(SXGate())
+    core = SuperOp(g).compose(SuperOp(err))
+    if f > 0.0:
+        core = core.compose(SuperOp(g.power(f)))
+    during = bool(truth.architecture_specific.get("detuning_during_gates", False))
+    dw = sim.evaluate_truth_at(truth, 0, t_s)["delta_omega_rad_s"] if during else 0.0
+    qs = truth.architecture_specific.get("quasi_static_dw_std_rad_s")
+    std = float(np.asarray(qs, dtype=float)[0]) if (during and qs is not None) else 0.0
+    nodes, weights = np.polynomial.hermite_e.hermegauss(9)
+    t_g = float(truth.gate_duration_ns) * 1e-9
+    channel = None
+    for x, w in zip(nodes, weights / weights.sum()):
+        a = (dw + std * x) * t_g / 2.0
+        rz = SuperOp(Operator(np.diag([np.exp(-0.5j * a), np.exp(0.5j * a)])))
+        term = rz.compose(core).compose(rz) * w
+        channel = term if channel is None else channel + term
+    return 1.0 - float(average_gate_fidelity(channel, target=g))
 
 
 def _abs_error(value: float, truth_value: float) -> float:
@@ -264,7 +291,7 @@ def _time_resolved_truth(truth: Any, sim_result: Any):
                 continue
             for rec in recs:
                 if param == "epsilon_sx":
-                    vals.append(sim.effective_gate_epsilon(truth, 0, rec["t_mid_s"]))
+                    vals.append(_avg_gate_infidelity(truth, rec["t_mid_s"]))
                 else:
                     key = {"T1_s": "T1_s", "T2_s": "T2_s",
                            "delta_omega": "delta_omega_rad_s"}[param]
@@ -343,14 +370,14 @@ def _run_qiskit_experiments(truth: Any, prior: Any, seed: int, t_measure_s: floa
         idx = [i for i, f in enumerate(family) if f == fam]
         if not time_resolved:
             if param == "epsilon_sx":
-                return float(sim.effective_gate_epsilon(truth, 0, t_measure_s))
+                return float(_avg_gate_infidelity(truth, t_measure_s))
             key = {"T1_s": "T1_s", "T2_s": "T2_s", "delta_omega": "delta_omega_rad_s"}[param]
             return float(sim.evaluate_truth_at(truth, 0, t_measure_s)[key])
         vals, weights = [], []
         for i in idx:
             for rec in res.chunk_records[i]:
                 if param == "epsilon_sx":
-                    vals.append(sim.effective_gate_epsilon(truth, 0, rec["t_mid_s"]))
+                    vals.append(_avg_gate_infidelity(truth, rec["t_mid_s"]))
                 else:
                     key = {"T1_s": "T1_s", "T2_s": "T2_s",
                            "delta_omega": "delta_omega_rad_s"}[param]
@@ -467,7 +494,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
             true_values = {"T1_s": float(tv_now["T1_s"]),
                            "T2_s": float(tv_now["T2_s"]),
                            "delta_omega": float(tv_now["delta_omega_rad_s"]),
-                           "epsilon_sx": sim.effective_gate_epsilon(truth, 0, t_measure_s)}
+                           "epsilon_sx": _avg_gate_infidelity(truth, t_measure_s)}
             truth_spread = dict.fromkeys(PARAMETERS, 0.0)
             run_duration_s = sim.probe_run_duration_s(block_circuits, truth, block_shots,
                                                       t_s=t_measure_s, dt_ns=profile.dt_ns)
