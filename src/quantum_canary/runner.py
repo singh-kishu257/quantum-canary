@@ -301,6 +301,55 @@ def flatten_result(pub_result):
     return SamplerPubResult(DataBin(**fields), metadata=pub_result.metadata)
 
 
+def _is_local(backend) -> bool:
+    """True for a qiskit_ibm_runtime fake backend or an AerSimulator."""
+    try:
+        from qiskit_ibm_runtime.fake_provider.fake_backend import FakeBackendV2
+        if isinstance(backend, FakeBackendV2):
+            return True
+    except ImportError:
+        pass
+    try:
+        from qiskit_aer import AerSimulator
+        return isinstance(backend, AerSimulator)
+    except ImportError:
+        return False
+
+
+def sample(backend, circuits: Sequence[Any], shots_list: Sequence[int], sampler=None):
+    """Run each circuit for its shots and return (results, job_id); results[i]
+    is circuit i's SamplerPubResult, in order, and results.metadata holds
+    the job's metadata (execution spans on IBM hardware).
+
+    On real backends, or with a sampler given, this is one job of
+    uniform_pubs(). On a fake backend or AerSimulator with no sampler given,
+    the circuits are simulated locally in one Aer call per set of qubits
+    they use, as plain circuits with their own shots: Aer's noisy
+    simulation of a fake backend lets delay noise leak between circuits on
+    different qubits within one call, and its handling of many parameter
+    bindings is not reliable, so one batched call would not be simulated
+    faithfully."""
+    if sampler is None and _is_local(backend):
+        from qiskit.primitives import PrimitiveResult
+        from qiskit_aer.primitives import SamplerV2 as AerSampler
+        local = AerSampler.from_backend(backend)
+        by_set: Dict[frozenset, List[int]] = {}
+        for i, qc in enumerate(circuits):
+            used = frozenset(qc.find_bit(q).index for inst in qc.data for q in inst.qubits)
+            by_set.setdefault(used, []).append(i)
+        results: List[Any] = [None] * len(circuits)
+        for idx in by_set.values():
+            out = local.run([(circuits[i], None, int(shots_list[i])) for i in idx]).result()
+            for i, r in zip(idx, out):
+                results[i] = r
+        return PrimitiveResult(results, metadata={}), None
+    if sampler is None:
+        from qiskit_ibm_runtime import SamplerV2
+        sampler = SamplerV2(mode=backend)
+    job = sampler.run(uniform_pubs(circuits, shots_list))
+    return job.result(), (job.job_id() if hasattr(job, "job_id") else None)
+
+
 def pub_executions(pub) -> int:
     """Circuit executions a PUB asks for: bindings times shots."""
     values = pub[1] if len(pub) > 1 else None
@@ -393,12 +442,7 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
         unit_circuits, unit_shots, int(probe_blocks))
     block_no = _block_numbers(unit_shots, int(probe_blocks))
 
-    if sampler is None:
-        from qiskit_ibm_runtime import SamplerV2
-        sampler = SamplerV2(mode=backend)
-    job = sampler.run(uniform_pubs(block_circuits, block_shots))
-    job_id = job.job_id() if hasattr(job, "job_id") else None
-    pub_results = job.result()
+    pub_results, job_id = sample(backend, block_circuits, block_shots, sampler)
 
     blocks: Dict[int, List[Dict[str, Any]]] = {q: [] for q in qubits}
     for i, (u, b) in enumerate(zip(block_index, block_no)):

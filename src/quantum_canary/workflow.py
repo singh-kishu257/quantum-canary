@@ -21,7 +21,7 @@ from scipy.stats import norm as _norm
 from . import online
 from .runner import (DEFAULT_SHOTS, CanaryReport, QubitReport, _captured,
                      _counts_from_pub, _shots_list, flatten_result, run_ibm,
-                     uniform_pubs)
+                     sample)
 
 __all__ = ["CheckReport", "MonitoredRun", "DriftReport",
            "check", "run_monitored", "compare",
@@ -222,22 +222,16 @@ def run_monitored(backend, circuits: Sequence[Any], check_report: CheckReport,
                 circs[start + k], shots_of[start + k] = cache[id(qc)], sh
     for i in algo_pos:
         circs[i], shots_of[i] = job_circuits[i], int(shots)
-    pubs = uniform_pubs(circs, shots_of)
-
-    if sampler is None:
-        from qiskit_ibm_runtime import SamplerV2
-        sampler = SamplerV2(mode=backend)
-    job = sampler.run(pubs)
-    pub_results = job.result()
+    pub_results, job_id = sample(backend, circs, shots_of, sampler)
 
     job_results = [flatten_result(pub_results[i]) if i in algo_pos
                    else _counts_from_pub(pub_results[i], circs[i], shots_of[i])
-                   for i in range(len(pubs))]
+                   for i in range(len(circs))]
     (algo_per_round, rounds), _ = _captured(monitor.process, job_results, round_map)
     results = [res for per_round in algo_per_round for res in per_round]
     return MonitoredRun(results=results, rounds=rounds, monitor=monitor,
                         layout=list(check_report.layout), interval=int(interval),
-                        job_id=job.job_id() if hasattr(job, "job_id") else None,
+                        job_id=job_id,
                         execution_segments=_execution_segments(pub_results, round_map))
 
 
