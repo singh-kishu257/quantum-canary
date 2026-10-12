@@ -47,7 +47,7 @@ from quantum_canary import simulation as sim
 REGIME = "nisq"
 T_CALIB_S = 0.0
 T_MEASURE_S = 3600.0
-SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 1000, 500, 500
+SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 600, 500, 500
 ARCHITECTURES = ("superconducting", "trapped_ion")
 ARCH_SEED_OFFSET = {"superconducting": 0, "trapped_ion": 100_000}
 PARAMETERS = ("T1_s", "T2_s", "delta_omega", "epsilon_sx")
