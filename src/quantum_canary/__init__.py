@@ -1,38 +1,39 @@
-"""Quantum Canary: qubit health checks before, during and after a job on IBM
-superconducting hardware.
+"""Quantum Canary: qubit health checks for IBM superconducting hardware.
 
     import quantum_canary as canary
 
-    before = canary.check(backend, qubits=[13, 14, 2], spares=[3, 4])
-    before.print()                 # health, layout to use, dynamical decoupling advice
+    r = canary.check(backend, [13, 14])          # one short job -> Report
+    r.print()                                    # numbers, fit (chi2/dof), health, DD advice
+    r.save("before.json")
 
-    run = canary.run_monitored(backend, my_isa_circuits, before, interval=20)
-    run.print()                    # qubit health in every Canary round
+    d = canary.compare(r, canary.load("after.json"))
+    d.print(); d.changed                         # what moved beyond its error bars
 
-    after = canary.check(backend, qubits=before.layout)
-    canary.compare(before, after).print()    # did anything drift?
+    mon = canary.Monitor(backend, [13, 14])      # workflows longer than ~30 minutes:
+    mon.check()                                  # baseline, then again between jobs
+    mon.changed; mon.print()
 
-Each check runs 17 short probe circuits per qubit and recovers T1, T2 (echo),
-T2* (Ramsey), the frequency offset and the single-qubit gate error.
+    canary.simulate(3)                           # no backend needed
+    canary.run_ionq(backend, [3, 6], eps_prior=2e-4, spam=(0.006, 0.004))
 
-On IonQ trapped-ion hardware, run_ionq() measures the single-qubit gate
-error of chosen ions (T1 and T2 there are seconds long).
+Each check runs 17 short probe circuits per qubit (8,700 shots) and recovers T1,
+T2 (echo), T2* (Ramsey), the frequency offset and the single-qubit gate error.
+Qubits are probed in at most two parallel groups, never two neighbours at once.
 
-Modules: inversion (the Canary engine), online (interleaved monitoring),
-simulation (the device simulator used to validate Canary), runner (one
-probe run), workflow (check, run_monitored, compare), ionq (IonQ gate-error
-probe), display, cli.
+Advanced, in submodules: runner (run_ibm, run_simulation, CanaryReport),
+workflow (the older check with spares, run_monitored for Canary rounds inside a
+job, compare), inversion (the Canary engine), simulation (the validation
+simulator), online, ionq, display, cli.
 """
 
 __version__ = "1.0.0"
 
 from . import inversion, online, simulation
+from . import workflow
 from .workflow import (
     CheckReport,
     DriftReport,
     MonitoredRun,
-    check,
-    compare,
     run_monitored,
 )
 from .runner import (
@@ -45,6 +46,8 @@ from .runner import (
 )
 from .ionq import IonQReport, run_ionq
 from .display import banner, render_report
+from .api import Monitor, QubitResult, Report, check, compare, load, simulate
+from . import api
 from .inversion import (
     ARCH_DEFAULTS,
     NATIVE_INVERSE_PAIRS,
@@ -75,20 +78,7 @@ from .online import (
     parse_inline_results,
 )
 
-__all__ = [
-    "__version__", "inversion", "online", "simulation",
-    # the job workflow
-    "check", "run_monitored", "compare", "CheckReport", "MonitoredRun", "DriftReport",
-    # single probe runs and display
-    "run_ibm", "run_simulation", "run_ionq", "IonQReport", "CanaryReport", "QubitReport",
-    "DEFAULT_SHOTS", "DEFAULT_PROBE_BLOCKS", "render_report", "banner",
-    # engine
-    "ARCH_DEFAULTS", "NATIVE_INVERSE_PAIRS", "BackendProfile", "CalibrationSource",
-    "InversionResult", "build_probe_circuits", "fetch_live_spam", "forward_echo",
-    "forward_gate", "forward_gate_affine", "forward_ramsey_xy", "forward_t1",
-    "get_live_profile", "interleave_probe_blocks", "lindblad_inversion",
-    "merge_block_counts", "register_native_pair", "split_qubits_for_op_limit",
-    # online monitoring
-    "CanaryInterleaver", "OnlineInversionResult", "build_inline_probe_circuits",
-    "chi2_scaled_z", "interleave_circuits", "online_inversion", "parse_inline_results",
-]
+# The simple interface. Every name imported above stays importable from the top
+# level for existing code, but only these are the documented API.
+__all__ = ["__version__", "check", "compare", "load", "Monitor", "simulate", "run_ionq",
+           "Report", "QubitResult", "IonQReport"]

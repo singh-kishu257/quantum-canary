@@ -41,7 +41,7 @@ __all__ = [
 
 # Shots per circuit of each probe family: the values every research benchmark
 # (2_ideal_parity.py, 3_benchmark.py) and the IBM hardware runs used.
-DEFAULT_SHOTS: Dict[str, int] = {"t1": 300, "ramsey": 1000, "gate": 500, "echo": 500}
+DEFAULT_SHOTS: Dict[str, int] = {"t1": 300, "ramsey": 600, "gate": 500, "echo": 500}
 # Block-interleaved execution: 3_benchmark.py's default (probe_blocks = 10).
 DEFAULT_PROBE_BLOCKS = 10
 
@@ -218,8 +218,11 @@ def probe_groups(backend, qubits: Sequence[int],
                  shot_plans: Optional[Dict[int, List[int]]] = None) -> List[List[int]]:
     """Split `qubits` into groups probed in parallel: no two qubits in a group
     are neighbours on the backend's coupling map, and (if shot_plans is given)
-    all share the same per-circuit shot list. Greedy, in the order given.
-    Without a coupling map every qubit gets its own group."""
+    all share the same per-circuit shot list. Qubits with the same shot list
+    are two-coloured breadth-first along the coupling map, which gives at most
+    two groups on bipartite layouts such as IBM's heavy-hex; a non-bipartite
+    set falls back to greedy first-fit. Qubits keep their given order within
+    a group. Without a coupling map every qubit gets its own group."""
     qubits = [int(q) for q in qubits]
     cmap = getattr(backend, "coupling_map", None)
     if cmap is None:
@@ -230,11 +233,48 @@ def probe_groups(backend, qubits: Sequence[int],
         if a in members and b in members:
             nbr[a].add(b)
             nbr[b].add(a)
+    parts: List[List[int]] = []
+    for q in qubits:
+        for part in parts:
+            if shot_plans is None or shot_plans[part[0]] == shot_plans[q]:
+                part.append(q)
+                break
+        else:
+            parts.append([q])
+    groups: List[List[int]] = []
+    for part in parts:
+        groups.extend(_two_colour(part, nbr) or _first_fit(part, nbr))
+    return groups
+
+
+def _two_colour(qubits: List[int], nbr: Dict[int, set]) -> Optional[List[List[int]]]:
+    """The two colour classes of `qubits` along `nbr` (breadth-first, the first
+    qubit of each connected piece coloured 0), or None if they are not bipartite."""
+    members = set(qubits)
+    colour: Dict[int, int] = {}
+    for start in qubits:
+        if start in colour:
+            continue
+        colour[start] = 0
+        queue = [start]
+        while queue:
+            q = queue.pop(0)
+            for n in nbr[q] & members:
+                if n not in colour:
+                    colour[n] = 1 - colour[q]
+                    queue.append(n)
+                elif colour[n] == colour[q]:
+                    return None
+    classes = [[q for q in qubits if colour[q] == c] for c in (0, 1)]
+    return [c for c in classes if c]
+
+
+def _first_fit(qubits: List[int], nbr: Dict[int, set]) -> List[List[int]]:
+    """Greedy first-fit groups with no two neighbours, in the order given."""
     groups: List[List[int]] = []
     for q in qubits:
         for g in groups:
-            same_plan = shot_plans is None or shot_plans[g[0]] == shot_plans[q]
-            if same_plan and not nbr[q] & set(g):
+            if not nbr[q] & set(g):
                 g.append(q)
                 break
         else:

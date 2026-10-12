@@ -315,9 +315,15 @@ class DriftReport:
     def stable(self) -> bool:
         return not self.drifted_qubits
 
+    @property
+    def changed(self) -> List[int]:
+        """Qubits that moved beyond their error bars (or are RED after)."""
+        return self.drifted_qubits
+
     def render(self, color: Optional[bool] = None) -> str:
-        from .display import render_drift
-        return render_drift(self, color=color)
+        """The plain table quantum-canary compare prints (color is ignored)."""
+        from .api import drift_table
+        return drift_table(self)
 
     def print(self, color: Optional[bool] = None, file=None) -> None:
         _print(self.render(color=color), file)
