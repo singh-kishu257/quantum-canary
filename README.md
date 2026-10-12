@@ -66,20 +66,29 @@ backend = FakeProviderForBackendV2().backend("fake_fez")
 From the terminal:
 
 ```bash
-quantum-canary check --backend ibm_fez --qubits 13,14 --spares 12
-quantum-canary check --fake fake_fez --qubits 13,14
+quantum-canary check ibm_kingston 13,14                  # IBM hardware
+quantum-canary check fake_fez 13,14                      # local, no account
+quantum-canary check ibm_kingston 13,14 --json before.json
+quantum-canary compare before.json after.json            # what changed
 ```
+
+`check` prints each qubit's T1, T2, T2\*, frequency offset and gate error with
+error bars, a **fit** column (each probe's χ²/dof against its limit: whether
+the numbers can be trusted) and the health verdict with its reason.
 
 To use IBM hardware, save your account once:
 `QiskitRuntimeService.save_account(channel="ibm_quantum_platform", token="...")`.
 
 ## What the answers mean
 
-- **GREEN**: every probe fits its model, and T2\* agrees with T2.
-- **YELLOW**: a probe fits poorly, or T2\* and T2 differ by more than 20%. The
-  qubit has slow frequency noise, coherent errors, or has changed since its
-  last calibration. Usable, but watch it.
-- **RED**: a measurement failed. Swap the qubit out.
+- **GREEN**: every probe's fit converged and passed its χ²/dof limit, and T2\*
+  is within 20% of T2.
+- **YELLOW**: a probe's χ²/dof is over its limit (that probe's numbers may be
+  wrong), or T2\* and T2 differ by more than 20% (slow frequency noise). The
+  report says which.
+- **RED**: a fit did not converge. Re-run the check.
+- The verdict describes the measurement, not how good the qubit is: a qubit
+  with a short T1 that is measured cleanly is GREEN. Read the numbers for that.
 - **Dynamical decoupling** is recommended for a qubit when T2\*/T2 < 0.8
   (slow frequency noise that decoupling refocuses) or |Δω|·T2\* > 1 rad (its
   frequency offset turns a large phase while it sits idle). Turn it on in
