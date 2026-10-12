@@ -321,7 +321,9 @@ def _qe_experiments(prior: Any, seed: int):
         "rb": StandardRB((0,), lengths=lengths, num_samples=QE_RB_SAMPLES, seed=int(seed)),
     }
     for exp in exps.values():
-        exp.set_transpile_options(basis_gates=QE_BASIS, optimization_level=0)
+        # num_processes=1: transpile runs inside a daemonic mp.Pool worker, which may not
+        # start the subprocesses qiskit's parallel transpile uses on fork platforms (Linux CI).
+        exp.set_transpile_options(basis_gates=QE_BASIS, optimization_level=0, num_processes=1)
         exp.analysis.set_options(plot=False)
     return exps, osc
 
