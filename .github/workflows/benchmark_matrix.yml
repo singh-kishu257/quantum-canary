@@ -48,7 +48,7 @@ jobs:
           pip install -r research/requirements.txt
 
       - name: Self-test the simulation layer
-        run: python -m quantum_canary selftest
+        run: python -m quantum_canary.simulation
 
   run:
     name: ${{ matrix.architecture }} shard ${{ matrix.shard }}

@@ -56,7 +56,7 @@ jobs:
         run: git diff --exit-code -- src/quantum_canary/inversion.py src/quantum_canary/simulation.py
 
       - name: Self-test the simulation layer
-        run: python -m quantum_canary selftest
+        run: python -m quantum_canary.simulation
 
       - name: Run benchmark
         run: |
