@@ -35,7 +35,7 @@ from scipy.stats import chi2 as _chi2
 
 from . import inversion as inv
 
-__all__ = ["IonResult", "IonQReport", "ionq_circuits", "ionq_estimate", "run_ionq"]
+__all__ = ["IonResult", "IonQReport", "ionq_circuits", "ionq_estimate", "ionq_priors", "run_ionq"]
 
 DEFAULT_SHOTS = 500
 DEFAULT_MAX_OPS = 24_000
@@ -177,6 +177,46 @@ def _p0(counts: Dict[str, float], bit: int) -> Tuple[float, float]:
     return zero, total
 
 
+def _stat(entry: Any) -> Tuple[Optional[float], Optional[str]]:
+    """(value, statistic) of an IonQ fidelity entry: the median if given, else the mean."""
+    if isinstance(entry, dict):
+        for key in ("median", "mean"):
+            if entry.get(key) is not None:
+                return float(entry[key]), key
+        return None, None
+    return (float(entry), "value") if entry is not None else (None, None)
+
+
+def ionq_priors(backend) -> Optional[Dict[str, Any]]:
+    """The device's published numbers from IonQ's current characterization
+    endpoint, through qiskit-ionq's backend.calibration(): eps_prior = 1 - the
+    single-qubit fidelity (median, else mean) and spam = (P(0|1), P(1|0)) from
+    the SPAM fidelity, split as the engine splits IonQ's combined SPAM error
+    (inversion._TI_SPAM_RATIO_P0_OVER_P1). Values outside (0, 0.5) are left out.
+    None if the backend has no characterization (simulators, mocks, API errors)."""
+    try:
+        cal = backend.calibration() if hasattr(backend, "calibration") else None
+    except Exception:
+        cal = None
+    if cal is None:
+        return None
+    fid = cal.fidelity or {}
+    out: Dict[str, Any] = {"backend": getattr(cal, "backend", None), "date": str(getattr(cal, "date", "")),
+                           "raw": dict(getattr(cal, "_data", {}) or {}), "eps_prior": None, "spam": None}
+    f1, stat = _stat(fid.get("1q"))
+    if f1 is not None and 0.0 < 1.0 - f1 < 0.5:
+        out["eps_prior"], out["eps_stat"] = 1.0 - f1, stat
+        if isinstance(fid.get("1q"), dict) and fid["1q"].get("stderr") is not None:
+            out["eps_stderr"] = float(fid["1q"]["stderr"])
+    fs, _ = _stat(fid.get("spam"))
+    if fs is not None:
+        e = 1.0 - fs if fs > 0.5 else fs
+        if 0.0 < e < 0.5:
+            ratio = inv._TI_SPAM_RATIO_P0_OVER_P1
+            out["spam"] = (e * 2.0 * ratio / (1.0 + ratio), e * 2.0 / (1.0 + ratio))
+    return out
+
+
 def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
              eps_prior: Optional[float] = None, spam: Optional[Tuple[float, float]] = None,
              max_ops: int = DEFAULT_MAX_OPS, max_cost: Optional[float] = None,
@@ -187,13 +227,18 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     "simulator" backend with a noise model) and fit epsilon_sx per ion.
 
     eps_prior sets the repetition counts (BackendProfile.gate_rep_n);
-    spam = (P(0|1), P(1|0)) are the readout errors the fit corrects for. Both
-    default to the engine's trapped-ion values; pass the device's published
-    numbers when you have them. One job per batch of ions (one ion per batch
+    spam = (P(0|1), P(1|0)) are the readout errors the fit corrects for. Each
+    one not given comes from the device's published characterization
+    (ionq_priors), or the engine's trapped-ion value if there is none. One job
+    per batch of ions (one ion per batch
     unless parallel=True), all circuits with the same shots. With max_cost,
     IonQ's own estimate (ionq_estimate) of all jobs is fetched first and the
     run is refused if it is higher, or if IonQ returns no estimate.
     """
+    if eps_prior is None or spam is None:
+        published = ionq_priors(backend) or {}
+        eps_prior = eps_prior if eps_prior is not None else published.get("eps_prior")
+        spam = spam if spam is not None else published.get("spam")
     arch = _arch(eps_prior, spam)
     gate_rep_n = _profile(arch).gate_rep_n
     batches, circuits = ionq_circuits(ions, gate_rep_n, max_ops, parallel)

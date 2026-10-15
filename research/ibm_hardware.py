@@ -83,7 +83,7 @@ if REPO_SRC.is_dir():
 
 import quantum_canary as canary
 from quantum_canary import inversion as inv
-from quantum_canary.runner import DEFAULT_PROBE_BLOCKS, probe_groups, pub_executions
+from quantum_canary.runner import DEFAULT_PROBE_BLOCKS, ibm_sampler, probe_groups, pub_executions
 
 DATA_DIR = SCRIPT_DIR / "data" / "hardware"
 TAGS = ("A", "B", "C", "D")
@@ -262,7 +262,7 @@ def reported(backend, qubits: List[int], at: str, chains: Optional[List[List[int
 
 
 class Recorder:
-    """A SamplerV2 that keeps the job, the PUBs and the raw result.
+    """A sampler that keeps the job, the PUBs and the raw result.
 
     On a fake backend the PUBs are simulated in one call per set of qubits:
     Aer's noisy simulation of a fake backend lets delay noise leak between
@@ -278,8 +278,7 @@ class Recorder:
             from qiskit_aer.primitives import SamplerV2 as AerSampler
             self.sampler = AerSampler.from_backend(backend)
         else:
-            from qiskit_ibm_runtime import SamplerV2
-            self.sampler = SamplerV2(mode=backend)
+            self.sampler = ibm_sampler(backend)
         self.options = getattr(self.sampler, "options", None)
         self.fake = fake
         self.limit_s = limit_s

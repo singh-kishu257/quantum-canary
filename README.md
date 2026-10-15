@@ -101,6 +101,10 @@ To use IBM hardware, save your account once:
   wrong), or T2\* and T2 differ by more than 20% (slow frequency noise). The
   report says which.
 - **RED**: a fit did not converge. Re-run the check.
+- On simulated qubits that follow the model exactly, each probe goes over its
+  limit about 1% of the time and a qubit comes out YELLOW 7-9% of the time:
+  about half from a fit, half from the T2\*/T2 rule, which estimation noise
+  alone can trip.
 - The verdict describes the measurement, not how good the qubit is: a qubit
   with a short T1 that is measured cleanly is GREEN. Read the numbers for that.
 - **Dynamical decoupling** is recommended for a qubit when T2\*/T2 < 0.8

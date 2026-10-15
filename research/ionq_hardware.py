@@ -41,18 +41,12 @@ REPO_SRC = SCRIPT_DIR.parent / "src"
 if REPO_SRC.is_dir():
     sys.path.insert(0, str(REPO_SRC))
 
-from quantum_canary import inversion as inv
 from quantum_canary import ionq
 
 DATA_DIR = SCRIPT_DIR / "data" / "hardware"
 IONS = [0, 3, 6, 9, 12, 14, 18, 21, 27, 33]
 TAGS = ("A", "B")
 SPLIT_TARGET, ALPHA = 0.9545, 0.05
-CHARACTERIZATION_URLS = (
-    "https://api.ionq.co/v0.4/backends/qpu.{name}/characterizations/current",
-    "https://api.ionq.co/v0.4/characterizations/backends/qpu.{name}/current",
-    "https://api.ionq.co/v0.3/characterizations/backends/qpu.{name}/current",
-)
 
 
 def now() -> str:
@@ -75,37 +69,21 @@ def ssl_setup() -> None:
 
 
 def characterization(name: str) -> Dict[str, Any]:
-    """IonQ's published characterization of qpu.<name>: the device-average
-    single-qubit error and the combined readout error, split into P(0|1)
-    and P(1|0) with the engine's ratio."""
-    import requests
-    for url in CHARACTERIZATION_URLS:
-        url = url.format(name=name)
-        try:
-            r = requests.get(url, headers={"Authorization": f"apiKey {token()}"}, timeout=20)
-        except Exception:
-            continue
-        if not r.ok:
-            continue
-        data = r.json()
-        fid = data.get("fidelity", {}) or data.get("characteristic", {}).get("fidelity", {}) or {}
-        f1q = fid.get("1q", {})
-        f1q = f1q if isinstance(f1q, dict) else {"mean": f1q}
-        stat = "median" if f1q.get("median") is not None else "mean"
-        spam = fid.get("spam")
-        spam = spam.get("mean") if isinstance(spam, dict) else spam
-        out = {"url": url, "fetched": now(), "raw": data, "stat": stat}
-        if f1q.get(stat) is not None:
-            out["eps_1q"] = 1.0 - float(f1q[stat])
-            if f1q.get("stderr") is not None:
-                out["eps_1q_stderr"] = float(f1q["stderr"])
-        if spam is not None:
-            e = float(spam)
-            e = 1.0 - e if e > 0.5 else e
-            ratio = inv._TI_SPAM_RATIO_P0_OVER_P1
-            out["spam"] = (e * 2 * ratio / (1 + ratio), e * 2 / (1 + ratio))
-        return out
-    return {}
+    """IonQ's published characterization of qpu.<name> (ionq.ionq_priors): the
+    device single-qubit error and the readout errors split as the engine does."""
+    ssl_setup()
+    from qiskit_ionq import IonQProvider
+    pri = ionq.ionq_priors(IonQProvider(token()).get_backend(f"qpu.{name}", gateset="native"))
+    if not pri:
+        return {}
+    out = {"fetched": now(), "date": pri["date"], "raw": pri["raw"], "stat": pri.get("eps_stat")}
+    if pri.get("eps_prior") is not None:
+        out["eps_1q"] = pri["eps_prior"]
+    if pri.get("eps_stderr") is not None:
+        out["eps_1q_stderr"] = pri["eps_stderr"]
+    if pri.get("spam") is not None:
+        out["spam"] = pri["spam"]
+    return out
 
 
 def backend_for(args):

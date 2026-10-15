@@ -83,11 +83,13 @@ _PROBE_DOF = {
     "echo":   2,  # 3 delays, 1 param (T2_echo)
 }
 # Nominal family-wise false-YELLOW rate for one qubit-round, Bonferroni-split
-# over the len(_PROBE_DOF) probes. Calibrated for t1/gate/echo. With the
-# earlier single-delay arctan2 Ramsey estimator the Ramsey test was not
-# (measured on correctly specified ideal data: Ramsey alone 11.3% SC / 8.0%
-# TI vs 1.25% nominal; family-wise 15.3% SC / 9.3% TI); those rates predate
-# the unwrapped multi-delay estimator and must be re-measured.
+# over the len(_PROBE_DOF) probes. False rates measured on correctly
+# specified ideal data at 8,700 shots (2026-10-15, 300 qubits per
+# architecture): per probe over its limit, t1 1.0%/0.3%,
+# Ramsey 1.3%/1.0%, gate 2.3%/1.0%, echo 0.3%/0.7% (SC/TI), all within
+# their 95% intervals of 1.25%. A whole qubit is non-GREEN 9.0% SC / 7.3%
+# TI of the time: 5.0% / 3.0% from a fit over its limit and 4.3% / 4.3%
+# from the T2*/T2 rule, which estimation noise alone trips.
 _HEALTH_FAMILY_ALPHA = 0.05
 
 
@@ -147,12 +149,8 @@ class OnlineInversionResult:
         (same value for every probe), otherwise dof-specific:
         chi2.ppf(1 - 0.05/4, dof)/dof with dof from _PROBE_DOF, i.e.
         nominal chi2 quantiles for a 5% family-wise false-YELLOW rate
-        (Bonferroni over the 4 probes) per qubit-round. The t1/gate/echo
-        tests are calibrated; the Ramsey rate measured with the earlier
-        single-delay estimator (false-YELLOW 11.3% SC / 8.0% TI vs 1.25%
-        nominal; family-wise 15.3% SC / 9.3% TI) predates the unwrapped
-        multi-delay estimator and must be re-measured (see
-        _HEALTH_FAMILY_ALPHA).
+        (Bonferroni over the 4 probes) per qubit-round. Measured false rates
+        are in the comment above _HEALTH_FAMILY_ALPHA.
 
         GREEN:  all probe chi2_dof <= threshold AND all sigmas finite
         YELLOW: any probe chi2_dof > threshold, OR T2_ramsey and T2_echo

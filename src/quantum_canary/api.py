@@ -284,7 +284,7 @@ def timeline(baseline, later: Sequence[Any], labels: Optional[Sequence[str]] = N
     """Every later check against the baseline, with the repeated-check threshold."""
     z = repeated_threshold(len(later))
     labels = list(labels) if labels else [f"check {i}" for i in range(1, len(later) + 1)]
-    out = [f"{len(later)} checks against the baseline: changed = |z| > {z:.2f}, so that the "
+    out = [f"{len(later)} check{'s' if len(later) != 1 else ''} against the baseline: changed = |z| > {z:.2f}, so that the "
            f"chance of any false alarm over all of them is that of one check at |z| > {DRIFT_Z:g}"]
     for label, report in zip(labels, later):
         out += ["", f"{label}", drift_table(compare(baseline, report, z_threshold=z))]

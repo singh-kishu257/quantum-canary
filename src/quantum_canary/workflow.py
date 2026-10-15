@@ -182,7 +182,7 @@ def run_monitored(backend, circuits: Sequence[Any], check_report: CheckReport,
     on check_report.layout, all in one job.
 
     `circuits` must already be transpiled for `backend` (ISA circuits, as
-    SamplerV2 requires), laid out on check_report.layout. Their results are
+    IBM's samplers require), laid out on check_report.layout. Their results are
     returned untouched, in order, in MonitoredRun.results.
 
     The rounds are interleaved in the submitted list. Qiskit Runtime does

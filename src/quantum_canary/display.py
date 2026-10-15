@@ -50,7 +50,7 @@ _HEALTH_COLOR = {"GREEN": "green", "YELLOW": "yellow", "RED": "red"}
 _HEALTH_MEANING = {
     "GREEN": "every probe fits the model; T2* and T2 agree",
     "YELLOW": "a probe misfits the model (chi2/dof above its limit) or T2* and T2 "
-              "disagree by > 20%: non-Markovian or coherent noise, or stale priors",
+              "disagree by > 20%: non-Markovian or coherent noise, or significantly stale priors",
     "RED": "a probe fit failed to converge",
 }
 _SOURCE_LABEL = {

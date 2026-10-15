@@ -6,7 +6,7 @@ engine (quantum_canary.inversion, the packaged copy of research/1_inversion.py):
   run_ibm()        live priors from the backend (BackendProfile.from_ibm_backend),
                    the engine's probe circuits (inversion.build_probe_circuits),
                    block-interleaved execution (inversion.interleave_probe_blocks),
-                   one SamplerV2 job, and the engine's inversion
+                   one IBM Sampler job, and the engine's inversion
                    (inversion.lindblad_inversion) per qubit.
   run_simulation() the per-qubit flow of research/2_ideal_parity.py
                    (regime="ideal") or of research/3_benchmark.py with its
@@ -197,7 +197,7 @@ def _captured(fn, *args, **kwargs):
 
 def _counts_from_pub(pub_result, circuit, shots: int,
                      bit: Optional[int] = None) -> Dict[str, int]:
-    """Counts of one probe qubit from a SamplerV2 PUB result: the circuit's
+    """Counts of one probe qubit from a sampler PUB result: the circuit's
     only clbit, or clbit `bit` of a parallel probe circuit. Raises if the
     register is missing or the counts do not add up to the shots requested:
     the inversion must never see fabricated counts."""
@@ -296,9 +296,9 @@ REPEAT_PARAMETER = "canary_repeat"
 
 
 def uniform_pubs(circuits: Sequence[Any], shots_list: Sequence[int]) -> List[Any]:
-    """SamplerV2 PUBs that all ask for the same number of shots, as
+    """Sampler PUBs that all ask for the same number of shots, as
     qiskit-ibm-runtime requires (mixed shots are deprecated in SamplerV2 and
-    rejected by its client-side successor).
+    rejected by its client-side successor, ibm_sampler()).
 
     With s the gcd of shots_list, circuit i gets an inert rz(theta) before
     its first instruction and runs shots_list[i] // s bindings of theta = 0
@@ -384,10 +384,21 @@ def sample(backend, circuits: Sequence[Any], shots_list: Sequence[int], sampler=
                 results[i] = r
         return PrimitiveResult(results, metadata={}), None
     if sampler is None:
-        from qiskit_ibm_runtime import SamplerV2
-        sampler = SamplerV2(mode=backend)
+        sampler = ibm_sampler(backend)
     job = sampler.run(uniform_pubs(circuits, shots_list))
     return job.result(), (job.job_id() if hasattr(job, "job_id") else None)
+
+
+def ibm_sampler(backend):
+    """IBM's client-side Sampler (qiskit_ibm_runtime.executor_sampler), which
+    replaces the deprecated SamplerV2; SamplerV2 on qiskit-ibm-runtime versions
+    without it. Gate and measurement twirling and dynamical decoupling are off
+    by default in both, as Canary's probe circuits require."""
+    try:
+        from qiskit_ibm_runtime.executor_sampler import Sampler
+    except ImportError:
+        from qiskit_ibm_runtime import SamplerV2 as Sampler
+    return Sampler(mode=backend)
 
 
 def pub_executions(pub) -> int:
@@ -423,8 +434,8 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
                   Qiskit Runtime does not guarantee that the circuits of a
                   job execute in submission order, so on hardware this sets
                   the submitted order only.
-    sampler:      optional SamplerV2-compatible sampler; default
-                  qiskit_ibm_runtime.SamplerV2(mode=backend).
+    sampler:      optional sampler (SamplerV2 interface); default
+                  ibm_sampler(backend).
     parallel:     probe several qubits in the same circuits (default). Qubits
                   are split by probe_groups() so that no two neighbours on
                   the coupling map are probed together; each group runs the

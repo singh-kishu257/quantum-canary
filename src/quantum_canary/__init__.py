@@ -26,7 +26,7 @@ job, compare), inversion (the Canary engine), simulation (the validation
 simulator), online, ionq, display, cli.
 """
 
-__version__ = "1.0.0"
+__version__ = "0.9.0"
 
 from . import inversion, online, simulation
 from . import workflow
