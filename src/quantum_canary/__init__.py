@@ -21,8 +21,8 @@ T2 (echo), T2* (Ramsey), the frequency offset and the single-qubit gate error.
 Qubits are probed in at most two parallel groups, never two neighbours at once.
 
 Advanced, in submodules: runner (run_ibm, run_simulation, CanaryReport),
-workflow (the older check with spares, run_monitored for Canary rounds inside a
-job, compare), inversion (the Canary engine), simulation (the validation
+workflow (experimental, not validated on hardware: the older check with spares,
+run_monitored for Canary rounds inside a job, compare), inversion (the Canary engine), simulation (the validation
 simulator), online, ionq, display, cli.
 """
 

@@ -1,9 +1,13 @@
 """The job workflow: check qubits before a job, watch them during it, compare after.
 
-    before = canary.check(backend, qubits=[13, 14, 2], spares=[3, 4])
-    run    = canary.run_monitored(backend, my_circuits, before, interval=20)
-    after  = canary.check(backend, qubits=before.layout)
-    drift  = canary.compare(before, after)
+    from quantum_canary import workflow
+    before = workflow.check(backend, qubits=[13, 14, 2], spares=[3, 4])
+    run    = workflow.run_monitored(backend, my_circuits, before, interval=20)
+    after  = workflow.check(backend, qubits=before.layout)
+    drift  = workflow.compare(before, after)
+
+Experimental: spare swapping and run_monitored (Canary rounds inside your job)
+have not been validated on hardware.
 
 Everything here is a wrapper around the existing pieces: run_ibm() for the
 probe, CanaryInterleaver for interleaved rounds, and the same two-sample
@@ -179,7 +183,8 @@ class MonitoredRun:
 def run_monitored(backend, circuits: Sequence[Any], check_report: CheckReport,
                   interval: int = 20, shots: int = 1024, sampler=None) -> MonitoredRun:
     """Run your circuits with a Canary round after every `interval` of them,
-    on check_report.layout, all in one job.
+    on check_report.layout, all in one job. Experimental: not validated on
+    hardware.
 
     `circuits` must already be transpiled for `backend` (ISA circuits, as
     IBM's samplers require), laid out on check_report.layout. Their results are

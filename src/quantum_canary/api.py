@@ -223,18 +223,30 @@ def simulate(n_qubits: int = 3, architecture: str = "superconducting",
 def load(path) -> Report:
     """A Report from a JSON file written by Report.save() or `quantum-canary check --json`
     (CanaryReport.to_dict() files work too)."""
-    from .inversion import InversionResult
+    from .inversion import ARCH_DEFAULTS, BackendProfile, InversionResult
     data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     rep = data.get("report", data)
+    arch = rep.get("architecture", "superconducting")
     names = {f.name for f in fields(InversionResult)}
     qubits = []
     for q in rep["qubits"]:
         result = {k: v for k, v in q["result"].items() if k in names}
         result["calibration_source"] = None
+        constants = dict(ARCH_DEFAULTS[arch])
+        constants.update({k: q[k] for k in ("p0_given_1", "p1_given_0", "gate_time_ns")
+                          if q.get(k) is not None})
+        constants.update(T1_s=q["T1_prior_s"], T2_s=q["T2_prior_s"])
+        if q.get("eps_prior") is not None:
+            constants["eps_typical"] = q["eps_prior"]
+        profile = BackendProfile(architecture=arch, T1_prior_s=q["T1_prior_s"],
+                                 T2_prior_s=q["T2_prior_s"], dt_ns=q.get("dt_ns"),
+                                 backend_name=rep.get("backend", ""), custom_arch=constants,
+                                 prior_confidence=q.get("prior_confidence") or "arch_default")
         qubits.append(runner.QubitReport(qubit=int(q["qubit"]), result=InversionResult(**result),
-                                         profile=None, health=q["health"], truth=q.get("truth")))
+                                         profile=profile, health=q["health"],
+                                         truth=q.get("truth")))
     raw = runner.CanaryReport(mode=rep.get("mode", "hardware"), backend=rep.get("backend", ""),
-                              architecture=rep.get("architecture", "superconducting"),
+                              architecture=arch,
                               shots=rep.get("shots", {}), probe_blocks=rep.get("probe_blocks", 1),
                               circuits_per_qubit=rep.get("circuits_per_qubit", 0), qubits=qubits,
                               timestamp=rep.get("timestamp", ""), job_id=rep.get("job_id"),

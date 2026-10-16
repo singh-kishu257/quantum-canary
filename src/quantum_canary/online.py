@@ -1,7 +1,7 @@
 """
-1b_online.py — online, non-interrupting qubit health monitor.
+quantum_canary.online — online, non-interrupting qubit health monitor.
 
-Wraps 1_inversion.py's Lindblad inversion engine with an interleaving
+Wraps inversion.py's Lindblad inversion engine with an interleaving
 layer that weaves Canary probe circuits into any running quantum
 workflow's circuit list (VQE, QAOA, simulation, arbitrary circuits —
 this file is not tied to any one algorithm). Canary probes are submitted
@@ -33,7 +33,7 @@ from typing import Optional
 import numpy as np
 from scipy.stats import chi2 as _chi2_dist, norm as _norm_dist
 
-# Package build: the engine is the packaged copy of research/1_inversion.py.
+# The engine is quantum_canary.inversion.
 from . import inversion as inv
 
 __all__ = [
@@ -71,7 +71,7 @@ def chi2_scaled_z(delta: float, sigma_cur: float, sigma_base: float,
 
 
 # Degrees of freedom of each probe's reduced chi-square, dof = n_points -
-# n_params as in 1_inversion.py's _chi2_per_dof / lindblad_inversion.
+# n_params as in inversion.py's _chi2_per_dof / lindblad_inversion.
 _PROBE_DOF = {
     "t1":     2,  # 3 delays, 1 param (T1)
     # Ramsey: delta_omega is a weighted least-squares fit of the unwrapped
@@ -126,7 +126,7 @@ class OnlineInversionResult:
     """Per-round snapshot of every monitored qubit's inverted parameters.
 
     round_index identifies which Canary round produced this snapshot;
-    qubit_results maps qubit_id -> InversionResult (from 1_inversion.py);
+    qubit_results maps qubit_id -> InversionResult (from inversion.py);
     algo_indices / canary_indices record which positions in the original
     (interleaved) job circuit list belonged to the algorithm vs. Canary
     for this round, for audit purposes.
@@ -208,7 +208,7 @@ class OnlineInversionResult:
 def build_inline_probe_circuits(profiles: dict, qubit_ids: list) -> tuple:
     """Build Canary probe circuits for multiple qubits in one flat list.
 
-    1_inversion.py's build_probe_circuits() always targets qubit 0 of a
+    inversion.py's build_probe_circuits() always targets qubit 0 of a
     fresh 1-qubit QuantumCircuit. Here, each qubit's probe set is built
     the same way (as independent 1-qubit circuits); each circuit's name
     is prefixed with f"q{qubit_id}_" (so names are unique across qubits)
@@ -333,7 +333,7 @@ def online_inversion(canary_counts: list, canary_metadata: dict,
                      shots_t1: int = 300, shots_ramsey: int = 1000,
                      shots_gate: int = 500, shots_echo: int = 500
                      ) -> OnlineInversionResult:
-    """Run 1_inversion.py's lindblad_inversion() for every monitored qubit
+    """Run inversion.py's lindblad_inversion() for every monitored qubit
     from a single Canary round's flat counts list, producing one
     OnlineInversionResult summarizing that round.
     """
@@ -395,9 +395,7 @@ class CanaryInterleaver:
                  # 95th, percentile of chi2/dof for dof=2).
                  green_chi2_threshold: Optional[float] = None,
                  yellow_t2_disagree_threshold: float = 0.20,
-                 # |z| > 2 matches the two-sample criterion used for the
-                 # IBM Heron r2 A/B stability check (5_ibm_hardware.py's
-                 # compare_runs()) -- roughly a 95% two-sided normal bound.
+                 # |z| > 2: roughly a 95% two-sided normal bound.
                  # drift_report() uses 2*(1 - Phi(drift_z_threshold)) as
                  # the Holm family alpha across a qubit's 4 parameters.
                  drift_z_threshold: float = 2.0):
@@ -521,10 +519,8 @@ class CanaryInterleaver:
 
     def drift_report(self, qubit_id: int) -> dict:
         """Compare qubit_id's most recent InversionResult against its
-        stored baseline, returning a two-sample z-score per parameter --
-        the same z_j = (A-B)/sqrt(sigma_A^2+sigma_B^2) construction used
-        for the IBM Heron r2 A/B stability check in 5_ibm_hardware.py's
-        compare_runs(). Each |z| is converted to a two-sided normal
+        stored baseline, returning a two-sample z-score per parameter,
+        z_j = (A-B)/sqrt(sigma_A^2+sigma_B^2). Each |z| is converted to a two-sided normal
         p-value ("p_values"), Holm-adjusted across this qubit's 4
         parameters ("p_holm"), and a parameter is flagged as drifted if
         its Holm-adjusted p-value is below the family alpha
@@ -688,7 +684,7 @@ if __name__ == "__main__":
     import tempfile
 
     print("=" * 70)
-    print("[Canary] 1b_online.py self-test (simulation only)")
+    print("[Canary] online.py self-test (simulation only)")
     print("=" * 70)
 
     # Plumbing/smoke test of the interleave -> process -> health/drift
@@ -871,8 +867,8 @@ if __name__ == "__main__":
     # |z|>2 this is only a ~95% two-sided bound (Holm-corrected across each
     # qubit's 4 parameters), so a rare
     # false positive by chance is expected and not itself a bug -- this
-    # is a smoke test, not the statistical false-positive calibration
-    # (that belongs to 3_null_nonm.py). We just check flags stay rare.
+    # is a smoke test, not a false-positive calibration. We just check
+    # that flags stay rare.
     print("\n[6] drift_report() false-positive check "
           "(same truth every round, shot noise only)")
     n_checked = 0
@@ -928,9 +924,9 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 70)
     if not failures:
-        print("[Canary] 1b_online.py self-test PASSED")
+        print("[Canary] online.py self-test PASSED")
     else:
-        print("[Canary] 1b_online.py self-test FAILED:")
+        print("[Canary] online.py self-test FAILED:")
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)

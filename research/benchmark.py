@@ -43,6 +43,7 @@ if REPO_SRC.is_dir():
 
 from quantum_canary import inversion as inv
 from quantum_canary import simulation as sim
+from quantum_canary.runner import average_gate_infidelity as _avg_gate_infidelity
 
 REGIME = "nisq"
 T_CALIB_S = 0.0
@@ -119,32 +120,6 @@ TRUTH_FAMILIES = {"T1_s": ("t1_",), "T2_s": ("ramsey_X_", "ramsey_Y_", "echo_"),
                   "delta_omega": ("ramsey_X_", "ramsey_Y_"),
                   "epsilon_sx": ("gate_rep_N",)}
 SPAM_CLIP_MAX = 0.499
-
-
-def _avg_gate_infidelity(truth: Any, t_s: float) -> float:
-    """1 - F_avg of qubit 0's sx as the simulator plays it at t_s: relaxation and
-    depolarizing after the pulse, the amplitude over-rotation, and the detuning
-    during the pulse averaged over the quasi-static offset."""
-    from qiskit.circuit.library import SXGate
-    from qiskit.quantum_info import Operator, SuperOp, average_gate_fidelity
-    err, f = sim._gate_noise_channel(truth, 0, t_s)
-    g = Operator(SXGate())
-    core = SuperOp(g).compose(SuperOp(err))
-    if f > 0.0:
-        core = core.compose(SuperOp(g.power(f)))
-    during = bool(truth.architecture_specific.get("detuning_during_gates", False))
-    dw = sim.evaluate_truth_at(truth, 0, t_s)["delta_omega_rad_s"] if during else 0.0
-    qs = truth.architecture_specific.get("quasi_static_dw_std_rad_s")
-    std = float(np.asarray(qs, dtype=float)[0]) if (during and qs is not None) else 0.0
-    nodes, weights = np.polynomial.hermite_e.hermegauss(9)
-    t_g = float(truth.gate_duration_ns) * 1e-9
-    channel = None
-    for x, w in zip(nodes, weights / weights.sum()):
-        a = (dw + std * x) * t_g / 2.0
-        rz = SuperOp(Operator(np.diag([np.exp(-0.5j * a), np.exp(0.5j * a)])))
-        term = rz.compose(core).compose(rz) * w
-        channel = term if channel is None else channel + term
-    return 1.0 - float(average_gate_fidelity(channel, target=g))
 
 
 def _abs_error(value: float, truth_value: float) -> float:

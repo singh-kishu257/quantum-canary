@@ -130,8 +130,9 @@ higher; Quantum Canary never prices runs itself.
 - `canary.runner.run_simulation(...)` and `canary.simulation`: the device
   simulator Canary was validated on, with every noise model and its source.
 - `canary.workflow.check(backend, qubits, spares=...)` and
-  `canary.workflow.run_monitored(backend, circuits, check_report)`: Canary
-  rounds placed inside a job, after every N of your circuits. Use it with care:
+  `canary.workflow.run_monitored(backend, circuits, check_report)`
+  (experimental, not validated on hardware): Canary rounds placed inside a
+  job, after every N of your circuits. Use it with care:
   Qiskit Runtime does not guarantee that a job's circuits run in the order
   submitted (`run.execution_order` reports **held**, **violated**,
   **unresolved** or **unavailable** from IBM's timestamps, and a round shows

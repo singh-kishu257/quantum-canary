@@ -1,21 +1,20 @@
 """High-level runners: run the Canary probe on IBM hardware, or in silico.
 
 Nothing in this module changes the Canary method. It only orchestrates the
-engine (quantum_canary.inversion, the packaged copy of research/1_inversion.py):
+engine (quantum_canary.inversion):
 
   run_ibm()        live priors from the backend (BackendProfile.from_ibm_backend),
                    the engine's probe circuits (inversion.build_probe_circuits),
                    block-interleaved execution (inversion.interleave_probe_blocks),
                    one IBM Sampler job, and the engine's inversion
                    (inversion.lindblad_inversion) per qubit.
-  run_simulation() the per-qubit flow of research/2_ideal_parity.py
-                   (regime="ideal") or of research/3_benchmark.py with its
+  run_simulation() the per-qubit flow of research/ideal_parity.py
+                   (regime="ideal") or of research/benchmark.py with its
                    default settings (regime="nisq"), on the simulator in
-                   quantum_canary.simulation (the packaged 1c_simulation_models.py),
+                   quantum_canary.simulation,
                    with the true parameters kept for comparison.
 
-Hardware support is superconducting (IBM, Qiskit Runtime). Trapped-ion
-qubits are supported in simulation only.
+IonQ trapped-ion hardware is run by quantum_canary.ionq.
 """
 from __future__ import annotations
 
@@ -40,22 +39,22 @@ __all__ = [
 ]
 
 # Shots per circuit of each probe family: the values every research benchmark
-# (2_ideal_parity.py, 3_benchmark.py) and the IBM hardware runs used.
+# (ideal_parity.py, benchmark.py) uses.
 DEFAULT_SHOTS: Dict[str, int] = {"t1": 300, "ramsey": 600, "gate": 500, "echo": 500}
-# Block-interleaved execution: 3_benchmark.py's default (probe_blocks = 10).
+# Block-interleaved execution: benchmark.py's default (probe_blocks = 10).
 DEFAULT_PROBE_BLOCKS = 10
 
-# research/3_benchmark.py constants and default configuration (regime="nisq").
+# research/benchmark.py constants and default configuration (regime="nisq").
 _NISQ_T_CALIB_S = 0.0
 _NISQ_T_MEASURE_S = 3600.0
-_NISQ_SPAM_SPREAD = 0.5      # per-qubit readout-error heterogeneity (3_benchmark --spam-spread)
+_NISQ_SPAM_SPREAD = 0.5      # per-qubit readout-error heterogeneity (benchmark --spam-spread)
 _SPAM_CLIP_MAX = 0.499
 # Probe family whose shot chunks define each parameter's comparison truth in
-# a time-resolved run (3_benchmark.TRUTH_FAMILIES).
+# a time-resolved run (benchmark.TRUTH_FAMILIES).
 _TRUTH_FAMILIES = {"T1_s": ("t1_",), "T2_s": ("ramsey_X_", "ramsey_Y_", "echo_"),
                    "delta_omega": ("ramsey_X_", "ramsey_Y_"),
                    "epsilon_sx": ("gate_rep_N",)}
-# research/2_ideal_parity.py and 3_benchmark.py seed offsets per architecture.
+# research/ideal_parity.py and benchmark.py seed offsets per architecture.
 _ARCH_SEED_OFFSET = {"superconducting": 0, "trapped_ion": 100_000}
 
 
@@ -528,7 +527,7 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
 # --------------------------------------------------------------------------
 
 def _time_resolved_truth(truth, sim_result) -> Dict[str, float]:
-    """research/3_benchmark._time_resolved_truth: per parameter, the
+    """research/benchmark._time_resolved_truth: per parameter, the
     shot-weighted mean over the chunks of the probe family that measures it."""
     out: Dict[str, float] = {}
     for param, prefixes in _TRUTH_FAMILIES.items():
@@ -538,7 +537,7 @@ def _time_resolved_truth(truth, sim_result) -> Dict[str, float]:
                 continue
             for rec in recs:
                 if param == "epsilon_sx":
-                    vals.append(sim.effective_gate_epsilon(truth, 0, rec["t_mid_s"]))
+                    vals.append(average_gate_infidelity(truth, rec["t_mid_s"]))
                 else:
                     key = {"T1_s": "T1_s", "T2_s": "T2_s",
                            "delta_omega": "delta_omega_rad_s"}[param]
@@ -549,10 +548,36 @@ def _time_resolved_truth(truth, sim_result) -> Dict[str, float]:
     return out
 
 
+def average_gate_infidelity(truth: Any, t_s: float) -> float:
+    """1 - F_avg of qubit 0's sx as the simulator plays it at t_s: relaxation and
+    depolarizing after the pulse, the amplitude over-rotation, and the detuning
+    during the pulse averaged over the quasi-static offset."""
+    from qiskit.circuit.library import SXGate
+    from qiskit.quantum_info import Operator, SuperOp, average_gate_fidelity
+    err, f = sim._gate_noise_channel(truth, 0, t_s)
+    g = Operator(SXGate())
+    core = SuperOp(g).compose(SuperOp(err))
+    if f > 0.0:
+        core = core.compose(SuperOp(g.power(f)))
+    during = bool(truth.architecture_specific.get("detuning_during_gates", False))
+    dw = sim.evaluate_truth_at(truth, 0, t_s)["delta_omega_rad_s"] if during else 0.0
+    qs = truth.architecture_specific.get("quasi_static_dw_std_rad_s")
+    std = float(np.asarray(qs, dtype=float)[0]) if (during and qs is not None) else 0.0
+    nodes, weights = np.polynomial.hermite_e.hermegauss(9)
+    t_g = float(truth.gate_duration_ns) * 1e-9
+    channel = None
+    for x, w in zip(nodes, weights / weights.sum()):
+        a = (dw + std * x) * t_g / 2.0
+        rz = SuperOp(Operator(np.diag([np.exp(-0.5j * a), np.exp(0.5j * a)])))
+        term = rz.compose(core).compose(rz) * w
+        channel = term if channel is None else channel + term
+    return 1.0 - float(average_gate_fidelity(channel, target=g))
+
+
 def _simulate_one(architecture: str, regime: str, seed: int, qubit: int,
                   shots: Dict[str, int], probe_blocks: int):
-    """One simulated qubit, exactly as one instance of research/2_ideal_parity.py
-    (regime="ideal") or research/3_benchmark.py with default settings
+    """One simulated qubit, exactly as one instance of research/ideal_parity.py
+    (regime="ideal") or research/benchmark.py with default settings
     (regime="nisq"). Returns (InversionResult, profile, truth dict, engine log)."""
     if regime == "ideal":
         truth = sim.generate_device(architecture, n_qubits=1, seed=seed, regime="ideal",
@@ -562,7 +587,7 @@ def _simulate_one(architecture: str, regime: str, seed: int, qubit: int,
                                                perturbation_frac=None)
         t_s = 0.0
     else:
-        # Every simulator mechanism, as research/3_benchmark.py's defaults apply
+        # Every simulator mechanism, as research/benchmark.py's defaults apply
         # them: 1/f detuning drift and T1 telegraph switching exist for
         # superconducting qubits only, the motional-heating gate error for
         # trapped ions only; crosstalk needs two qubits and cannot act here.
@@ -634,7 +659,7 @@ def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
 
     Each qubit is an independent simulated device, generated and probed
     exactly as one instance of the research benchmarks:
-      regime="nisq"  (default) research/3_benchmark.py with its default
+      regime="nisq"  (default) research/benchmark.py with its default
                      settings: every simulator mechanism (crosstalk excepted,
                      as each qubit is a separate one-qubit device). T1 drift and
                      two-state T1 switching, 1/f frequency drift and
@@ -644,8 +669,11 @@ def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
                      coherent gate error, per-qubit readout heterogeneity,
                      stale calibration and SPAM priors (1 h old), and
                      time-resolved block-interleaved execution.
-      regime="ideal" research/2_ideal_parity.py: correctly specified,
+      regime="ideal" research/ideal_parity.py: correctly specified,
                      stationary Markovian noise.
+    The true epsilon_sx is the engine's own epsilon (sim.effective_gate_epsilon)
+    for regime="ideal" and the sx average gate infidelity
+    (average_gate_infidelity) for regime="nisq", as in the two benchmarks.
     Qubit i uses seed (seed + i); seed defaults to the benchmarks' offset for
     the architecture (0 superconducting, 100000 trapped ion), so with default
     settings qubit i reproduces benchmark instance i.
