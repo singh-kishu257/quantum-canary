@@ -4083,11 +4083,11 @@ def _run_validation_tests() -> None:
                                     overrides={"T1_range_s": (150e-6, 150e-6), "T_phi_range_s": (90e-6, 90e-6)})
         profile = inv.BackendProfile.from_architecture("superconducting")
         circuits, meta = inv.build_probe_circuits(profile)
-        result = simulate_probe(circuits, truth_e2e, shots=[300]*meta["n_t1"] + [1000]*meta["n_ramsey"]
+        result = simulate_probe(circuits, truth_e2e, shots=[300]*meta["n_t1"] + [600]*meta["n_ramsey"]
                                 + [500]*meta["n_gate"] + [500]*meta["n_echo"], t_s=0.0)
         inv_result = inv.lindblad_inversion(
             result.counts_list, meta, profile,
-            shots_t1=300, shots_ramsey=1000, shots_gate=500, shots_echo=500)
+            shots_t1=300, shots_ramsey=600, shots_gate=500, shots_echo=500)
         rel_T1_err = abs(inv_result.T1_s - truth_e2e.T1_s[0]) / truth_e2e.T1_s[0]
         check("end-to-end: DeviceTruth -> simulate_probe -> frozen lindblad_inversion recovers T1",
               rel_T1_err < 0.5, f"true={truth_e2e.T1_s[0]*1e6:.1f}us recovered={inv_result.T1_s*1e6:.1f}us")

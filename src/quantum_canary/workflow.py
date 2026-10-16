@@ -94,7 +94,8 @@ class CheckReport:
         return online.CanaryInterleaver(
             qubit_ids=list(self.layout),
             profiles={q: self.qubits[q].profile for q in self.layout},
-            interval_n=int(interval))
+            interval_n=int(interval),
+            **{f"shots_{k}": v for k, v in DEFAULT_SHOTS.items()})
 
     def to_dict(self) -> Dict[str, Any]:
         return {"requested": self.requested, "layout": self.layout, "swaps": self.swaps,

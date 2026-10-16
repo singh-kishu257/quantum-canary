@@ -1,4 +1,4 @@
-"""Fast checks of quantum_canary (no hardware, under a minute). Run: pytest"""
+"""Checks of quantum_canary (no hardware, about a minute). Run: pytest"""
 import contextlib
 import io
 
@@ -99,3 +99,21 @@ def test_ionq_priors_from_characterization():
     assert sum(p["spam"]) / 2 == pytest.approx(0.005)
     assert p["spam"][0] / p["spam"][1] == pytest.approx(inv._TI_SPAM_RATIO_P0_OVER_P1)
     assert ionq.ionq_priors(object()) is None
+
+
+def test_run_monitored_end_to_end():
+    from qiskit import QuantumCircuit, transpile
+    from qiskit_ibm_runtime.fake_provider import FakeProviderForBackendV2
+    from quantum_canary import workflow
+    fez = FakeProviderForBackendV2().backend("fake_fez")
+    raw = canary.runner.run_simulation(n_qubits=1, regime="ideal", seed=3)
+    cr = workflow.CheckReport(report=raw, requested=[0], layout=[0], swaps={}, unresolved=[],
+                              dd_reasons={0: []})
+    assert cr.monitor().shots_ramsey == runner.DEFAULT_SHOTS["ramsey"]
+    qc = QuantumCircuit(1, 1)
+    qc.x(0)
+    qc.measure(0, 0)
+    circuits = [transpile(qc, fez, initial_layout=[0], optimization_level=0)] * 2
+    run = workflow.run_monitored(fez, circuits, cr, interval=2, shots=100)
+    assert len(run.results) == 2 and len(run.rounds) == 1
+    assert set(run.rounds[0].health_summary()) == {0}

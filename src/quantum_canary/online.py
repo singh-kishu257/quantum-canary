@@ -330,7 +330,7 @@ def parse_inline_results(job_results: list, round_map: list,
 
 def online_inversion(canary_counts: list, canary_metadata: dict,
                      profiles: dict, round_index: int = 0,
-                     shots_t1: int = 300, shots_ramsey: int = 1000,
+                     shots_t1: int = 300, shots_ramsey: int = 600,
                      shots_gate: int = 500, shots_echo: int = 500
                      ) -> OnlineInversionResult:
     """Run inversion.py's lindblad_inversion() for every monitored qubit
@@ -385,7 +385,7 @@ class CanaryInterleaver:
     """
 
     def __init__(self, qubit_ids: list, profiles: dict, interval_n: int = 10,
-                 shots_t1: int = 300, shots_ramsey: int = 1000,
+                 shots_t1: int = 300, shots_ramsey: int = 600,
                  shots_gate: int = 500, shots_echo: int = 500,
                  # None: dof-specific per-probe chi2/dof thresholds at a
                  # nominal 5% family-wise level per qubit-round (see _PROBE_DOF and
@@ -755,7 +755,7 @@ if __name__ == "__main__":
         n0 = int(rng_obj.binomial(sh, float(np.clip(p, 0, 1))))
         return {"0": n0, "1": sh-n0}
 
-    SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 1000, 500, 500
+    SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 600, 500, 500
 
     def simulate_qubit_counts(meta, rng_obj):
         return simulate_qubit_counts_with(meta, rng_obj, T1_TRUE, T2_TRUE, DW_TRUE, EPS_TRUE)
