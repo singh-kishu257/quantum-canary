@@ -1,4 +1,4 @@
-"""The simple interface: check qubits, compare checks, watch long workflows.
+"""The simple interface: check qubits, compare checks, check between jobs.
 
     import quantum_canary as canary
 
@@ -10,7 +10,7 @@
     d = canary.compare(r, canary.load("after.json"))
     d.print(); d.changed                       # qubits that moved beyond their error bars
 
-    mon = canary.Monitor(backend, [13, 14])    # workflows longer than ~30 minutes
+    mon = canary.Monitor(backend, [13, 14])    # between jobs, as often as you like
     mon.check()                                # first call is the baseline; repeat between jobs
     mon.changed; mon.print(); mon.save("checks/")
 
@@ -305,7 +305,7 @@ def timeline(baseline, later: Sequence[Any], labels: Optional[Sequence[str]] = N
 
 @dataclass
 class Monitor:
-    """Checks of the same qubits between the jobs of a long workflow. The first
+    """Checks of the same qubits between jobs, as many as you like. The first
     check() is the baseline; every later one is compared with it, with the |z| limit
     raised for the number of checks so far (repeated_threshold)."""
     backend: Any

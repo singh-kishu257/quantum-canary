@@ -9,7 +9,7 @@
     d = canary.compare(r, canary.load("after.json"))
     d.print(); d.changed                         # what moved beyond its error bars
 
-    mon = canary.Monitor(backend, [13, 14])      # workflows longer than ~30 minutes:
+    mon = canary.Monitor(backend, [13, 14])      # between jobs, as often as you like:
     mon.check()                                  # baseline, then again between jobs
     mon.changed; mon.print()
 

@@ -4,8 +4,8 @@ Qubit health checks for IBM superconducting hardware.
 
 1. **Before your job**: check the qubits you will use.
 2. **Your jobs**: run as normal. Canary never touches them.
-3. **Between jobs**, for workflows longer than about 30 minutes: check again
-   every 20-30 minutes.
+3. **Between jobs**, if you like: check again as often as you want (most
+   useful in long workflows).
 4. **After**: check again and compare. If a qubit changed, results that
    depend on it may not hold.
 
@@ -44,7 +44,7 @@ d.print()
 d.changed                                    # qubits that moved beyond their error bars
 ```
 
-For workflows longer than about 30 minutes, check between jobs:
+To check between jobs, as often as you like:
 
 ```python
 mon = canary.Monitor(backend, [13, 14])
