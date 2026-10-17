@@ -159,3 +159,14 @@ def test_frequency_advice_and_bound_hits():
     assert q.at_bound == ["T2"]
     assert workflow._dd_reasons(runner.QubitReport(qubit=0, result=result, profile=prof,
                                                    health="GREEN")) == []
+
+
+def test_raw_counts_saved_and_loaded(tmp_path):
+    raw = canary.runner.run_simulation(n_qubits=1, regime="ideal", seed=3)
+    raw.block_counts = {0: [{"circuit": 0, "block": 0, "counts": {"0": 12, "1": 18}}]}
+    path = tmp_path / "check.json"
+    canary.Report(raw).save(path)
+    loaded = canary.load(path)
+    assert loaded.raw.block_counts == raw.block_counts
+    loaded.save(tmp_path / "again.json")
+    assert canary.load(tmp_path / "again.json").raw.block_counts == raw.block_counts

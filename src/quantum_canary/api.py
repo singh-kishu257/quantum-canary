@@ -285,7 +285,9 @@ def load(path) -> Report:
                               shots=rep.get("shots", {}), probe_blocks=rep.get("probe_blocks", 1),
                               circuits_per_qubit=rep.get("circuits_per_qubit", 0), qubits=qubits,
                               timestamp=rep.get("timestamp", ""), job_id=rep.get("job_id"),
-                              groups=rep.get("groups"))
+                              groups=rep.get("groups"),
+                              block_counts=({int(q): e for q, e in rep["block_counts"].items()}
+                                            if rep.get("block_counts") else None))
     return Report(raw, ibm_usage_s=data.get("ibm_usage_s"))
 
 

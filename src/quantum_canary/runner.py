@@ -109,8 +109,8 @@ class CanaryReport:
     regime: Optional[str] = None  # simulation only: "ideal" | "nisq"
     job_id: Optional[str] = None  # hardware only
     groups: Optional[List[List[int]]] = None  # hardware only: qubits probed together
-    # hardware only: per qubit, every shot block's counts as
-    # {"circuit": k, "block": b, "counts": {...}} (not in to_dict())
+    # hardware only: per qubit, every shot block's raw counts as
+    # {"circuit": k, "block": b, "counts": {...}}
     block_counts: Optional[Dict[int, List[Dict[str, Any]]]] = field(default=None, repr=False)
 
     @property
@@ -128,7 +128,9 @@ class CanaryReport:
                 "circuits_per_qubit": self.circuits_per_qubit,
                 "groups": self.groups,
                 "timestamp": self.timestamp,
-                "qubits": [q.to_dict() for q in self.qubits]}
+                "qubits": [q.to_dict() for q in self.qubits],
+                "block_counts": ({str(q): entries for q, entries in self.block_counts.items()}
+                                 if self.block_counts else None)}
 
     def render(self, color: Optional[bool] = None) -> str:
         from .display import render_report

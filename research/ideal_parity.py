@@ -31,6 +31,7 @@ if REPO_SRC.is_dir():
 
 from quantum_canary import inversion as inv
 from quantum_canary import simulation as sim
+from quantum_canary import api, runner
 
 SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 600, 500, 500
 ARCHITECTURES = ("superconducting", "trapped_ion")
@@ -42,6 +43,7 @@ CSV_COLUMNS = [
     "architecture", "instance_id", "seed", "parameter",
     "true_value", "canary_value", "absolute_error", "relative_error",
     "success", "fit_status", "sigma_canary", "chi2_dof", "chi2_dof_secondary",
+    "health", "health_reason",
     "shots_total", "prior_value", "prior_absolute_error", "prior_relative_error",
     "timestamp_utc",
     "perturbation_frac", "spam_scale", "spam_swap", "spam_spread", "cold_start",
@@ -211,6 +213,8 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
         dw_aliased = {"delta_omega": bool(abs(true_values["delta_omega"])
                                           * meta["ramsey_delays_s"][0] > np.pi)}
 
+        health = runner._health(0, result)
+        health_reason = ", ".join(api.health_reasons(health, result))
         rows = []
         for param in PARAMETERS:
             tv, cv, sg, pv = true_values[param], canary[param], sigmas[param], priors[param]
@@ -223,6 +227,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                 fit_status="ok" if converged else "non_convergent_infinite_sigma",
                 sigma_canary=sg, chi2_dof=chi2[param],
                 chi2_dof_secondary=chi2_secondary.get(param, NAN),
+                health=health, health_reason=health_reason,
                 shots_total=sum(shots_list), prior_value=pv,
                 prior_absolute_error=_abs_error(pv, tv),
                 prior_relative_error=_rel_error(pv, tv),
