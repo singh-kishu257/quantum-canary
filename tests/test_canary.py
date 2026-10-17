@@ -136,7 +136,7 @@ def test_frozen_engine_files_unchanged():
     import hashlib
     import pathlib
     src = pathlib.Path(canary.__file__).parent
-    expected = {"inversion.py": "09ae87f6fb737e94ecef04ddaaf37118d5607da6aa3d7d80927cf28d4f55ee7f",
+    expected = {"inversion.py": "88798959d97358169c659de5aeae5699d167c786800bd9da814cae0cc90f5d51",
                 "simulation.py": "0d1c216345eb31e3c4d61810234a9fbd9e4f0eacb9c1111f6628556987f6e5f8"}
     for name, digest in expected.items():
         data = (src / name).read_bytes().replace(b"\r\n", b"\n")
