@@ -46,7 +46,8 @@ Health  GREEN   every fit converged and passed, and T2* is within 20% of T2
                 (slow frequency noise, which dynamical decoupling refocuses)
         RED     a fit did not converge; re-run the check
         Health describes the measurement, not how good the qubit is: read the
-        numbers for that.
+        numbers for that."""
+AT_BOUND_NOTE = """\
         "at bound": a fit stopped at its allowed limit (e.g. T2 = 2*T1), so that
         value's error bar is not reliable."""
 
@@ -202,7 +203,7 @@ class Report:
         lines += [f"frequency offset on qubit {q.qubit}: {'; '.join(q.frame_advice)}; correct it "
                   "with a virtual-Z frame update or frequency recalibration (DD only if it drifts)"
                   for q in self.qubits if q.frame_advice]
-        lines += ["", EXPLAIN, ""]
+        lines += ["", EXPLAIN] + ([AT_BOUND_NOTE] if any(q.at_bound for q in self.qubits) else []) + [""]
         usage = (f", IBM measured usage {self.ibm_usage_s:.1f} s" if self.ibm_usage_s is not None
                  else "")
         try:
