@@ -1195,7 +1195,7 @@ def _invert_ramsey(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
     dw = float(np.clip(dw, -dw_max, dw_max))
     # Capped at dw_max: a 1-sigma uncertainty wider than the enforced bound
     # itself would misrepresent this as an unconstrained ML estimate.
-    sdw = float(np.clip(sdw, 0, dw_max))
+    sdw = float(np.clip(sdw, 0, dw_max)) if np.isfinite(sdw) else float("inf")
 
     xy_meas = np.concatenate([p1_x_arr, p1_y_arr])
     def xy_model(_, T2_s):

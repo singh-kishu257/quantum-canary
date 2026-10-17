@@ -88,7 +88,13 @@ def bound_hits(q) -> List[str]:
 def health_reasons(health: str, result) -> List[str]:
     """Why a qubit is YELLOW or RED (empty for GREEN)."""
     if health == "RED":
-        return ["fit did not converge"]
+        failed = [label for sigma, label in (
+            (result.T1_sigma_s, "T1 fit failed"),
+            (result.T2_echo_sigma_s, "echo fit failed"),
+            (result.T2_ramsey_sigma_s, "Ramsey fit failed"),
+            (result.delta_omega_sigma, "Δω not measurable (no Ramsey contrast)"),
+            (result.epsilon_sx_sigma, "gate fit failed")) if not np.isfinite(sigma)]
+        return failed or ["fit did not converge"]
     reasons = ["fit"] if fit_over_limit(result) else []
     if result.T2_s > 0 and np.isfinite(result.T2_ramsey_s) and np.isfinite(result.T2_echo_s):
         if abs(result.T2_ramsey_s - result.T2_echo_s) / result.T2_s > T2_DISAGREE:
