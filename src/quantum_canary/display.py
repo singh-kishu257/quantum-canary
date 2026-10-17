@@ -285,8 +285,10 @@ def render_report(report, color: Optional[bool] = None) -> str:
                               f"gate-rep {shots['gate']} · echo {shots['echo']} shots", "dim")))
     lines.append(_kv(s, "Time", when))
     if report.mode == "simulation":
+        eps_truth = ("ε = the engine's own ε" if report.regime == "ideal"
+                     else "ε = sx average gate infidelity")
         lines.append(_kv(s, "", s("True values are the simulator's hidden parameters "
-                                  "(T2 = echo T2; ε excludes detuning).", "dim")))
+                                  f"(T2 = echo T2; {eps_truth}).", "dim")))
     lines.append("")
     for q in report.qubits:
         lines.extend(_qubit_block(s, q, report.mode, report.regime))

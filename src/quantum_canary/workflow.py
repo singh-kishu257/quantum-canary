@@ -29,17 +29,18 @@ from .runner import (DEFAULT_SHOTS, CanaryReport, QubitReport, _captured,
 
 __all__ = ["CheckReport", "MonitoredRun", "DriftReport",
            "check", "run_monitored", "compare",
-           "DD_T2_RATIO", "DD_PHASE_RAD", "DD_SEQUENCE"]
+           "DD_T2_RATIO", "FRAME_PHASE_RAD", "DD_SEQUENCE"]
 
-# Dynamical-decoupling heuristics, applied per qubit (both are simple, stated
-# rules of thumb, not fitted thresholds):
+# Per-qubit advice (simple, stated rules of thumb, not fitted thresholds):
 #   T2*/T2 < DD_T2_RATIO: Ramsey loses coherence that the echo recovers, i.e.
-#       slow frequency noise that a decoupling sequence refocuses.
-#   |delta_omega| * T2* > DD_PHASE_RAD: the qubit's frequency offset turns
-#       more than this many radians of phase in one coherence time while
-#       idle, a coherent error decoupling cancels.
+#       slow frequency noise that a decoupling sequence refocuses -> DD.
+#   |delta_omega| * T2* > FRAME_PHASE_RAD: the qubit's measured frequency
+#       offset turns more than this many radians of phase in one coherence
+#       time while idle. A known, steady offset is removed by a virtual-Z
+#       frame update (or a frequency recalibration); DD is the remedy only if
+#       it drifts. Reported separately and never turns DD on.
 DD_T2_RATIO = 0.8
-DD_PHASE_RAD = 1.0
+FRAME_PHASE_RAD = 1.0
 # Sequence suggested when DD is recommended (a Qiskit Runtime option value;
 # XY4 tolerates pulse imperfections better than XX).
 DD_SEQUENCE = "XY4"
@@ -52,11 +53,16 @@ def _dd_reasons(q: QubitReport) -> List[str]:
     if (np.isfinite(r.T2_ramsey_s) and np.isfinite(r.T2_s) and r.T2_s > 0
             and r.T2_ramsey_s / r.T2_s < DD_T2_RATIO):
         reasons.append(f"T2*/T2 = {r.T2_ramsey_s / r.T2_s:.2f} < {DD_T2_RATIO}")
+    return reasons
+
+
+def _frame_reasons(q: QubitReport) -> List[str]:
+    r = q.result
     if np.isfinite(r.delta_omega) and np.isfinite(r.T2_ramsey_s):
         phase = abs(r.delta_omega) * r.T2_ramsey_s
-        if phase > DD_PHASE_RAD:
-            reasons.append(f"|Δω|·T2* = {phase:.1f} rad > {DD_PHASE_RAD:g}")
-    return reasons
+        if phase > FRAME_PHASE_RAD:
+            return [f"|Δω|·T2* = {phase:.1f} rad > {FRAME_PHASE_RAD:g}"]
+    return []
 
 
 @dataclass

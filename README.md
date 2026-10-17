@@ -108,9 +108,14 @@ To use IBM hardware, save your account once:
 - The verdict describes the measurement, not how good the qubit is: a qubit
   with a short T1 that is measured cleanly is GREEN. Read the numbers for that.
 - **Dynamical decoupling** is recommended for a qubit when T2\*/T2 < 0.8
-  (slow frequency noise that decoupling refocuses) or |Δω|·T2\* > 1 rad (its
-  frequency offset turns a large phase while it sits idle). Turn it on in
-  your sampler with `dynamical_decoupling.enable = True`.
+  (slow frequency noise that decoupling refocuses). Turn it on in your
+  sampler with `dynamical_decoupling.enable = True`.
+- **Frequency offset**: when |Δω|·T2\* > 1 rad the qubit's offset turns a
+  large phase while it sits idle. A steady offset is best removed with a
+  virtual-Z frame update or a frequency recalibration; DD helps only if it
+  drifts.
+- **at bound** in the fit column means a fit stopped at its allowed limit
+  (for example T2 = 2·T1), so that value's error bar is not reliable.
 - **Drift** is a two-sample z-test on each parameter, Holm-corrected across
   the qubit's four parameters, at |z| > 2 (raised for repeated checks).
 - Canary measures each qubit with its neighbours idle in |0⟩, the usual

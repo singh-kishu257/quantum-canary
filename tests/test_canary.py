@@ -20,6 +20,19 @@ def test_exact_data_inverts_exactly(arch, truth):
     prof = inv.BackendProfile(architecture=arch, T1_prior_s=truth["T1"] * 1.2,
                               T2_prior_s=truth["T2"] * 0.85, dt_ns=base.dt_ns,
                               custom_arch=constants, prior_confidence="prior_informed")
+    _assert_exact_inversion(prof, truth)
+
+
+@pytest.mark.parametrize("arch, truth", [
+    ("superconducting", {"T1": 180e-6, "T2": 140e-6, "T2s": 90e-6, "dw": 2 * np.pi * 6e3, "eps": 3e-4}),
+    ("trapped_ion", {"T1": 50.0, "T2": 1.0, "T2s": 0.6, "dw": 2 * np.pi * 0.3, "eps": 2e-4}),
+])
+def test_exact_data_inverts_exactly_on_log_spaced_grid(arch, truth):
+    _assert_exact_inversion(inv.BackendProfile.from_architecture(arch), truth)
+
+
+def _assert_exact_inversion(prof, truth):
+    constants = prof.constants
     _, meta = inv.build_probe_circuits(prof)
     a, b, shots = constants["p0_given_1"], constants["p1_given_0"], 10 ** 8
     z = inv._gate_z_star(truth["eps"], truth["T1"], truth["T2"], constants["gate_time_ns"] * 1e-9)
@@ -117,3 +130,32 @@ def test_run_monitored_end_to_end():
     run = workflow.run_monitored(fez, circuits, cr, interval=2, shots=100)
     assert len(run.results) == 2 and len(run.rounds) == 1
     assert set(run.rounds[0].health_summary()) == {0}
+
+
+def test_frozen_engine_files_unchanged():
+    import hashlib
+    import pathlib
+    src = pathlib.Path(canary.__file__).parent
+    expected = {"inversion.py": "09ae87f6fb737e94ecef04ddaaf37118d5607da6aa3d7d80927cf28d4f55ee7f",
+                "simulation.py": "0d1c216345eb31e3c4d61810234a9fbd9e4f0eacb9c1111f6628556987f6e5f8"}
+    for name, digest in expected.items():
+        data = (src / name).read_bytes().replace(b"\r\n", b"\n")
+        assert hashlib.sha256(data).hexdigest() == digest, \
+            f"{name} changed: it is frozen; update this hash only for a deliberate change"
+
+
+def test_frequency_advice_and_bound_hits():
+    from quantum_canary import workflow
+    prof = inv.BackendProfile.from_architecture("superconducting", T1_prior_s=100e-6, T2_prior_s=80e-6)
+    result = inv.InversionResult(backend_name="x", qubit_id=0, timestamp="", architecture="superconducting",
+                                 T1_s=100e-6, T1_sigma_s=5e-6, T2_s=200e-6, T2_sigma_s=10e-6,
+                                 delta_omega=2 * np.pi * 20e3, delta_omega_sigma=100.0,
+                                 epsilon_sx=3e-4, epsilon_sx_sigma=2e-5,
+                                 T2_ramsey_s=190e-6, T2_ramsey_sigma_s=9e-6,
+                                 T2_echo_s=200e-6, T2_echo_sigma_s=10e-6)
+    q = api.QubitResult.from_qubit_report(runner.QubitReport(qubit=0, result=result, profile=prof,
+                                                             health="GREEN"))
+    assert q.dd_advice == [] and len(q.frame_advice) == 1
+    assert q.at_bound == ["T2"]
+    assert workflow._dd_reasons(runner.QubitReport(qubit=0, result=result, profile=prof,
+                                                   health="GREEN")) == []

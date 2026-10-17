@@ -46,7 +46,9 @@ Health  GREEN   every fit converged and passed, and T2* is within 20% of T2
                 (slow frequency noise, which dynamical decoupling refocuses)
         RED     a fit did not converge; re-run the check
         Health describes the measurement, not how good the qubit is: read the
-        numbers for that."""
+        numbers for that.
+        "at bound": a fit stopped at its allowed limit (e.g. T2 = 2*T1), so that
+        value's error bar is not reliable."""
 
 
 def fit_over_limit(result) -> List[str]:
@@ -56,6 +58,30 @@ def fit_over_limit(result) -> List[str]:
         value, limit = getattr(result, f"{key}_chi2_dof"), _green_chi2_threshold(key)
         if np.isfinite(value) and value > limit:
             out.append(f"{label} {value:.1f} > {limit:.1f}")
+    return out
+
+
+def bound_hits(q) -> List[str]:
+    """Parameters whose fit stopped at a bound of the engine's fit (the
+    covariance, and so the error bar, is not valid there): T1 in
+    [T1_min_s, T1_max_s], T2 (echo) in [T2_min_s, 2*T1], T2* in
+    [T2_min_s, min(20*T2_prior, 2*T1)], eps in [0, eps_max]."""
+    r, c = q.result, q.profile.constants
+
+    def hit(value, bound):
+        return bool(np.isfinite(value) and abs(value - bound) <= 1e-6 * abs(bound))
+
+    out = []
+    if hit(r.T1_s, c["T1_min_s"]) or hit(r.T1_s, c["T1_max_s"]):
+        out.append("T1")
+    if np.isfinite(r.T1_s):
+        if hit(r.T2_echo_s, c["T2_min_s"]) or hit(r.T2_echo_s, 2.0 * r.T1_s):
+            out.append("T2")
+        if hit(r.T2_ramsey_s, c["T2_min_s"]) or hit(
+                r.T2_ramsey_s, min(20.0 * q.profile.T2_prior_s, 2.0 * r.T1_s)):
+            out.append("T2*")
+    if np.isfinite(r.epsilon_sx) and (r.epsilon_sx <= 1e-9 or hit(r.epsilon_sx, c["eps_max"])):
+        out.append("eps")
     return out
 
 
@@ -90,6 +116,8 @@ class QubitResult:
     health_reason: str
     dd_advice: List[str]
     truth: Optional[Dict[str, float]] = None
+    frame_advice: List[str] = field(default_factory=list)
+    at_bound: List[str] = field(default_factory=list)
 
     @classmethod
     def from_qubit_report(cls, q) -> "QubitResult":
@@ -102,7 +130,8 @@ class QubitResult:
                    chi2={key: getattr(r, f"{key}_chi2_dof") for key, _ in PROBES},
                    fit=fit_over_limit(r), health=q.health,
                    health_reason=", ".join(health_reasons(q.health, r)),
-                   dd_advice=workflow._dd_reasons(q), truth=q.truth)
+                   dd_advice=workflow._dd_reasons(q), truth=q.truth,
+                   frame_advice=workflow._frame_reasons(q), at_bound=bound_hits(q))
 
 
 class Report:
@@ -158,11 +187,15 @@ class Report:
             health = q.health + (f" ({q.health_reason})" if q.health_reason else "")
             lines.append(f"{q.qubit:<6}{t(q.t1, q.t1_sigma):<17}{t(q.t2, q.t2_sigma):<17}"
                          f"{t(q.t2_star, q.t2_star_sigma):<17}{dw:<17}{eps:<20}"
-                         f"{'; '.join(q.fit) or 'ok':<26}{health}")
+                         f"{'; '.join(q.fit + [p + ' at bound' for p in q.at_bound]) or 'ok':<26}"
+                         f"{health}")
         lines.append("")
         advised = [q for q in self.qubits if q.dd_advice]
         lines += ([f"dynamical decoupling advised on qubit {q.qubit}: {'; '.join(q.dd_advice)}"
                    for q in advised] or ["dynamical decoupling: not needed on these qubits"])
+        lines += [f"frequency offset on qubit {q.qubit}: {'; '.join(q.frame_advice)}; correct it "
+                  "with a virtual-Z frame update or frequency recalibration (DD only if it drifts)"
+                  for q in self.qubits if q.frame_advice]
         lines += ["", EXPLAIN, ""]
         usage = (f", IBM measured usage {self.ibm_usage_s:.1f} s" if self.ibm_usage_s is not None
                  else "")
@@ -183,6 +216,8 @@ class Report:
                 "health_reason": {q.qubit: q.health_reason for q in self.qubits},
                 "fit_over_limit": {q.qubit: q.fit for q in self.qubits},
                 "dynamical_decoupling": {q.qubit: q.dd_advice for q in self.qubits},
+                "frequency_offset": {q.qubit: q.frame_advice for q in self.qubits},
+                "at_bound": {q.qubit: q.at_bound for q in self.qubits},
                 "report": self.raw.to_dict()}
 
     def save(self, path) -> None:

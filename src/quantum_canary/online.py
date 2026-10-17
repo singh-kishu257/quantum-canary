@@ -97,7 +97,8 @@ def _green_chi2_threshold(probe: str, override: Optional[float] = None) -> float
     """chi2/dof GREEN limit for one probe: `override` if given (legacy
     single threshold for every probe), else the (1 - alpha/4) quantile of
     chi2(dof)/dof with alpha = _HEALTH_FAMILY_ALPHA over the 4 probes
-    (a nominal quantile; see _HEALTH_FAMILY_ALPHA for the Ramsey caveat)."""
+    (a nominal quantile; measured false rates are in the comment above
+    _HEALTH_FAMILY_ALPHA)."""
     if override is not None:
         return float(override)
     dof = _PROBE_DOF[probe]

@@ -34,8 +34,8 @@ and with an XX echo during the wait. Both predictions use
 
 with the backend's CZ, sx and readout errors. "Before" uses the reported T1
 and T2 and phi = 0, which is all the calibration has. "After" uses Canary's
-live T1, T2* (T2 with the echo) and phi = sum delta_omega t (0 when
-corrected). Before picks the chain the calibration ranks first, run plain;
+live T1, T2* for the plain wait (echo T2 for the echoed wait) and
+phi = sum delta_omega t (0 when corrected). Before picks the chain the calibration ranks first, run plain;
 after picks the chain and treatment Canary ranks first. All twelve
 configurations are measured, so both picks are scored against the best one.
 The predictions are saved before the job is sent.
@@ -145,6 +145,8 @@ def load(path: pathlib.Path) -> Optional[Dict[str, Any]]:
 
 def save(path: pathlib.Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=1, default=_jsonable))
+    from provenance import write_meta
+    write_meta(path)
     print(f"saved {path}")
 
 

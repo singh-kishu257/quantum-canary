@@ -197,6 +197,8 @@ def cmd_run(args, d):
                          "results": [r["results"][0] for r in reports],
                          "per_ion": reports}
     path.write_text(json.dumps(payload, indent=1, default=str))
+    from provenance import write_meta
+    write_meta(path)
     partial.unlink()
     print(f"saved {path}")
 
