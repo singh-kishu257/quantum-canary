@@ -190,3 +190,57 @@ def test_ionq_backend_detection():
     from qiskit_ibm_runtime.fake_provider import FakeProviderForBackendV2
     assert ionq.is_ionq(IonQProvider("offline-test").get_backend("simulator", gateset="native"))
     assert not ionq.is_ionq(FakeProviderForBackendV2().backend("fake_fez"))
+
+
+def test_credentials_read_files_safely(tmp_path):
+    from quantum_canary import credentials
+    good = tmp_path / "token.txt"
+    good.write_bytes(b"\xef\xbb\xbfABC-123-SECRET \r\n")          # BOM and trailing whitespace
+    assert credentials.read_secret(good) == "ABC-123-SECRET"
+    for name, content in (("empty.txt", " \n"), ("two.txt", "AAA-SECRET BBB-SECRET")):
+        bad = tmp_path / name
+        bad.write_text(content)
+        with pytest.raises(ValueError) as err:
+            credentials.read_secret(bad)
+        assert "SECRET" not in str(err.value) and name in str(err.value)
+    with pytest.raises(ValueError) as err:
+        credentials.read_secret(tmp_path / "missing.txt")
+    assert "missing.txt" in str(err.value)
+
+
+def test_credentials_passed_explicitly_to_vendors(tmp_path, monkeypatch):
+    import qiskit_ibm_runtime
+    import qiskit_ionq.helpers
+    from quantum_canary import credentials
+    (tmp_path / "t.txt").write_text("IBM-TOKEN\n")
+    (tmp_path / "i.txt").write_text("crn:v1:bluemix:public:quantum-computing:us-east:a/x::\n")
+    (tmp_path / "ionq.txt").write_text("IONQ-TOKEN\n")
+    calls = []
+    monkeypatch.setattr(qiskit_ibm_runtime, "QiskitRuntimeService", lambda **kw: calls.append(kw) or "service")
+    assert credentials.ibm_service() == "service" and calls[-1] == {}
+    credentials.ibm_service(tmp_path / "t.txt", tmp_path / "i.txt")
+    assert calls[-1] == {"channel": "ibm_quantum_platform", "token": "IBM-TOKEN",
+                         "instance": "crn:v1:bluemix:public:quantum-computing:us-east:a/x::"}
+    credentials.ibm_service(instance="my-plan")
+    assert calls[-1] == {"instance": "my-plan"}
+
+    for var in ("QISKIT_IONQ_API_TOKEN", "IONQ_API_KEY", "IONQ_API_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(qiskit_ionq.helpers, "dotenv_values", lambda *a, **k: {})
+    assert credentials.ionq_provider(tmp_path / "ionq.txt").credentials["token"] == "IONQ-TOKEN"
+    with pytest.raises(ValueError, match="no IonQ API key"):
+        credentials.ionq_provider()
+    monkeypatch.setenv("IONQ_API_KEY", "FROM-ENV")
+    assert credentials.ionq_provider().credentials["token"] == "FROM-ENV"
+
+
+def test_cli_credential_options_and_no_secret_in_saved_files(tmp_path):
+    from quantum_canary.cli import build_parser
+    args = build_parser().parse_args(["check", "ibm_kingston", "13", "--ibm-token-file", "t.txt",
+                                      "--ibm-instance-file", "i.txt", "--ionq-token-file", "k.txt"])
+    assert (args.ibm_token_file, args.ibm_instance_file, args.ionq_token_file) == ("t.txt", "i.txt", "k.txt")
+    r = canary.simulate(1, regime="ideal", seed=2)
+    path = tmp_path / "saved.json"
+    r.save(path)
+    text = path.read_text(encoding="utf-8").lower()
+    assert "token" not in text and "api_key" not in text and "crn:" not in text

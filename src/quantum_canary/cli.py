@@ -2,7 +2,9 @@
 
   quantum-canary check ibm_kingston 13,14            check qubits on IBM hardware
   quantum-canary check fake_fez 13,14                the same, locally, no account
-  quantum-canary check qpu.forte-1 0,3               IonQ ions, gate error only (IONQ_API_KEY)
+  quantum-canary check qpu.forte-1 0,3               IonQ ions, gate error only
+  quantum-canary check ibm_kingston 13,14 --ibm-token-file T --ibm-instance-file I
+                                                     credentials from files you name
   quantum-canary check ibm_kingston 13,14 --json before.json
   quantum-canary compare before.json after.json      what changed between two checks
   quantum-canary compare c0.json c1.json c2.json     every later check against the first
@@ -31,27 +33,29 @@ def _say(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-def _backend(name: str, instance: Optional[str]):
-    """A fake backend for names starting with fake_, an IonQ backend for qpu.*
-    and simulator (key from the IONQ_API_KEY environment variable), otherwise
-    the IBM backend from the saved account."""
-    if name == "simulator" or name.startswith("qpu."):
-        import os
-        token = os.environ.get("IONQ_API_KEY")
-        if not token:
-            raise SystemExit(f"{name} is an IonQ backend: set IONQ_API_KEY first")
-        from qiskit_ionq import IonQProvider
-        return IonQProvider(token).get_backend(name, gateset="native")
-    if name.startswith("fake_"):
-        from qiskit_ibm_runtime.fake_provider import FakeProviderForBackendV2
-        return FakeProviderForBackendV2().backend(name)
-    from qiskit_ibm_runtime import QiskitRuntimeService
-    return QiskitRuntimeService(**({"instance": instance} if instance else {})).backend(name)
+def _backend(args):
+    """A fake backend for names starting with fake_, an IonQ backend for qpu.* and
+    simulator, otherwise the IBM backend. Credentials come from the files named on
+    the command line, else from where the vendor's library looks (see credentials)."""
+    from . import credentials
+    name = args.backend
+    try:
+        if name == "simulator" or name.startswith("qpu."):
+            provider = credentials.ionq_provider(args.ionq_token_file)
+            return provider.get_backend(name, gateset="native")
+        if name.startswith("fake_"):
+            from qiskit_ibm_runtime.fake_provider import FakeProviderForBackendV2
+            return FakeProviderForBackendV2().backend(name)
+        service = credentials.ibm_service(args.ibm_token_file, args.ibm_instance_file,
+                                          instance=args.instance)
+        return service.backend(name)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
 
 
 def _cmd_check(args) -> int:
     from .api import check
-    backend = _backend(args.backend, args.instance)
+    backend = _backend(args)
     _say(f"checking qubits {args.qubits} on {backend.name}"
          + (" (local fake backend)" if args.backend.startswith("fake_") else "") + " ...")
     report = check(backend, args.qubits)
@@ -81,10 +85,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True)
     p = sub.add_parser("check", help="measure T1, T2, T2*, frequency offset and gate error of qubits")
     p.add_argument("backend", help="IBM backend, e.g. ibm_kingston; a fake backend, e.g. fake_fez; "
-                                   "or IonQ, e.g. qpu.forte-1 (needs IONQ_API_KEY)")
+                                   "or IonQ, e.g. qpu.forte-1")
     p.add_argument("qubits", type=_qubits, help="comma-separated qubits, e.g. 13,14")
     p.add_argument("--json", metavar="FILE", help="also save the result, for compare")
     p.add_argument("--instance", default=None, help="IBM instance, if your account has several")
+    p.add_argument("--ibm-token-file", metavar="FILE", default=None,
+                   help="file holding your IBM API key (default: your saved account)")
+    p.add_argument("--ibm-instance-file", metavar="FILE", default=None,
+                   help="file holding your IBM instance name or CRN")
+    p.add_argument("--ionq-token-file", metavar="FILE", default=None,
+                   help="file holding your IonQ API key (default: IONQ_API_KEY)")
     p.set_defaults(func=_cmd_check)
     c = sub.add_parser("compare", help="what changed between saved checks; the first file is the "
                                        "baseline, every later one is compared with it")

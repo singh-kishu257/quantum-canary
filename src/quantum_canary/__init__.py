@@ -41,7 +41,7 @@ from .runner import (
 from .ionq import IonQReport, run_ionq
 from .display import banner, render_report
 from .api import Monitor, QubitResult, Report, check, compare, load, simulate
-from . import api
+from . import api, credentials
 from .inversion import (
     ARCH_DEFAULTS,
     NATIVE_INVERSE_PAIRS,

@@ -90,8 +90,23 @@ quantum-canary compare c0.json c1.json c2.json           # every check vs the fi
 error bars, a **fit** column (each probe's χ²/dof against its limit: whether
 the numbers can be trusted) and the health verdict with its reason.
 
-To use IBM hardware, save your account once:
-`QiskitRuntimeService.save_account(channel="ibm_quantum_platform", token="...")`.
+## Credentials
+
+Quantum Canary stores no secrets and searches for none. It uses the same lookup as
+the vendors' libraries:
+
+- **IBM:** the account saved once with
+  `QiskitRuntimeService.save_account(channel="ibm_quantum_platform", token="...", instance="...")`
+  (kept in `~/.qiskit/qiskit-ibm.json`, outside your project), or the
+  `QISKIT_IBM_TOKEN` and `QISKIT_IBM_INSTANCE` environment variables.
+- **IonQ** (an API key only; there is no instance or CRN): the `IONQ_API_KEY`
+  environment variable.
+- **A secret kept in a file** is used only when you name the file, in Python,
+  `canary.credentials.ibm_service("ibm_api_token.txt", "ibm_crn_instance.txt")` and
+  `canary.credentials.ionq_provider("ionq_api_token.txt")`, or on the command line,
+  `--ibm-token-file`, `--ibm-instance-file` and `--ionq-token-file`. The file is read
+  once and handed to the vendor's constructor; it is never printed, logged, exported
+  or saved in a Report. Keep such files out of version control (add them to `.gitignore`).
 
 ## What the answers mean
 
@@ -125,8 +140,8 @@ To use IBM hardware, save your account once:
 
 `canary.check` works on IonQ too: pass a qiskit-ionq backend
 (`IonQProvider(key).get_backend("qpu.forte-1", gateset="native")`) and a list of
-ions, or on the command line `quantum-canary check qpu.forte-1 0,3` with
-`IONQ_API_KEY` set. T1 and T2 of trapped ions are seconds long, so only the
+ions, or on the command line `quantum-canary check qpu.forte-1 0,3`
+(see Credentials above). T1 and T2 of trapped ions are seconds long, so only the
 gate error ε is measured, one ion per circuit, with IonQ's debiasing off. The
 Report, `save`/`load`, `compare`, `Monitor` and the CLI work as on IBM; health is
 RED if the gate fit failed and YELLOW if its χ²/dof is over the gate probe's
