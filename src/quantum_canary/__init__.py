@@ -1,4 +1,4 @@
-"""Quantum Canary: qubit health checks for IBM superconducting hardware.
+"""Quantum Canary: qubit health checks for IBM (superconducting) and IonQ (trapped-ion) hardware.
 
     import quantum_canary as canary
 
@@ -14,28 +14,22 @@
     mon.changed; mon.print()
 
     canary.simulate(3)                           # no backend needed
-    canary.run_ionq(backend, [3, 6], eps_prior=2e-4, spam=(0.006, 0.004))
+    canary.check(ionq_backend, [0, 3])           # IonQ ions: gate error only
 
-Each check runs 17 short probe circuits per qubit (8,700 shots) and recovers T1,
+On IBM each check runs 17 short probe circuits per qubit (8,700 shots) and recovers T1,
 T2 (echo), T2* (Ramsey), the frequency offset and the single-qubit gate error.
 Qubits are probed in at most two parallel groups, never two neighbours at once.
 
 Advanced, in submodules: runner (run_ibm, run_simulation, CanaryReport),
-workflow (experimental, not validated on hardware: the older check with spares,
-run_monitored for Canary rounds inside a job, compare), inversion (the Canary engine), simulation (the validation
-simulator), online, ionq, display, cli.
+inversion (the Canary engine), simulation (the validation simulator), workflow
+(the drift test behind compare), online, ionq, display, cli.
 """
 
 __version__ = "0.9.0"
 
 from . import inversion, online, simulation
 from . import workflow
-from .workflow import (
-    CheckReport,
-    DriftReport,
-    MonitoredRun,
-    run_monitored,
-)
+from .workflow import DriftReport
 from .runner import (
     DEFAULT_PROBE_BLOCKS,
     DEFAULT_SHOTS,

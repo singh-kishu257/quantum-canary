@@ -2,12 +2,13 @@
 
   quantum-canary check ibm_kingston 13,14            check qubits on IBM hardware
   quantum-canary check fake_fez 13,14                the same, locally, no account
+  quantum-canary check qpu.forte-1 0,3               IonQ ions, gate error only (IONQ_API_KEY)
   quantum-canary check ibm_kingston 13,14 --json before.json
   quantum-canary compare before.json after.json      what changed between two checks
   quantum-canary compare c0.json c1.json c2.json     every later check against the first
 
-Everything else (simulation, Canary rounds inside a job, IonQ) is in the Python
-API: import quantum_canary as canary.
+Everything else (simulation, repeated checks) is in the Python API:
+import quantum_canary as canary.
 """
 from __future__ import annotations
 
@@ -31,8 +32,16 @@ def _say(msg: str) -> None:
 
 
 def _backend(name: str, instance: Optional[str]):
-    """A fake backend for names starting with fake_, otherwise the IBM backend
-    from the saved account."""
+    """A fake backend for names starting with fake_, an IonQ backend for qpu.*
+    and simulator (key from the IONQ_API_KEY environment variable), otherwise
+    the IBM backend from the saved account."""
+    if name == "simulator" or name.startswith("qpu."):
+        import os
+        token = os.environ.get("IONQ_API_KEY")
+        if not token:
+            raise SystemExit(f"{name} is an IonQ backend: set IONQ_API_KEY first")
+        from qiskit_ionq import IonQProvider
+        return IonQProvider(token).get_backend(name, gateset="native")
     if name.startswith("fake_"):
         from qiskit_ibm_runtime.fake_provider import FakeProviderForBackendV2
         return FakeProviderForBackendV2().backend(name)
@@ -67,11 +76,12 @@ def _cmd_compare(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     from . import __version__
     ap = argparse.ArgumentParser(prog="quantum-canary",
-                                 description="Check the health of qubits on IBM hardware.")
+                                 description="Check the health of qubits on IBM or IonQ hardware.")
     ap.add_argument("--version", action="version", version=f"quantum-canary {__version__}")
     sub = ap.add_subparsers(dest="command", required=True)
     p = sub.add_parser("check", help="measure T1, T2, T2*, frequency offset and gate error of qubits")
-    p.add_argument("backend", help="IBM backend, e.g. ibm_kingston, or a fake backend, e.g. fake_fez")
+    p.add_argument("backend", help="IBM backend, e.g. ibm_kingston; a fake backend, e.g. fake_fez; "
+                                   "or IonQ, e.g. qpu.forte-1 (needs IONQ_API_KEY)")
     p.add_argument("qubits", type=_qubits, help="comma-separated qubits, e.g. 13,14")
     p.add_argument("--json", metavar="FILE", help="also save the result, for compare")
     p.add_argument("--instance", default=None, help="IBM instance, if your account has several")

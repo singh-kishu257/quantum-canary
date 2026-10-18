@@ -1,6 +1,6 @@
 # Quantum Canary
 
-Qubit health checks for IBM superconducting hardware.
+Qubit health checks for IBM superconducting hardware, and gate-error checks for IonQ trapped ions.
 
 1. **Before your job**: check the qubits you will use.
 2. **Your jobs**: run as normal. Canary never touches them.
@@ -123,28 +123,25 @@ To use IBM hardware, save your account once:
 
 ## IonQ
 
-`canary.run_ionq(backend, ions, eps_prior=..., spam=...)` measures the
-single-qubit gate error of chosen ions on IonQ hardware (T1 and T2 of trapped
-ions are seconds long, so only the gate probe runs), one ion per circuit, with
-IonQ's debiasing off. Pass `max_cost` to refuse a run whose IonQ estimate is
-higher; Quantum Canary never prices runs itself.
+`canary.check` works on IonQ too: pass a qiskit-ionq backend
+(`IonQProvider(key).get_backend("qpu.forte-1", gateset="native")`) and a list of
+ions, or on the command line `quantum-canary check qpu.forte-1 0,3` with
+`IONQ_API_KEY` set. T1 and T2 of trapped ions are seconds long, so only the
+gate error ε is measured, one ion per circuit, with IonQ's debiasing off. The
+Report, `save`/`load`, `compare`, `Monitor` and the CLI work as on IBM; health is
+RED if the gate fit failed and YELLOW if its χ²/dof is over the gate probe's
+limit (there is no T2\*/T2 rule).
+
+For a cost limit use `canary.run_ionq(backend, ions, max_cost=...)`, which
+refuses a run whose IonQ estimate is higher, and
+`canary.Report(canary.ionq.to_canary_report(...))` for the same Report.
+Quantum Canary never prices runs itself.
 
 ## Advanced
 
 - `canary.runner.run_ibm(backend, qubits)`: the full report behind `check`.
 - `canary.runner.run_simulation(...)` and `canary.simulation`: the device
   simulator Canary was validated on, with every noise model and its source.
-- `canary.workflow.check(backend, qubits, spares=...)` and
-  `canary.workflow.run_monitored(backend, circuits, check_report)`
-  (experimental, not validated on hardware): Canary rounds placed inside a
-  job, after every N of your circuits. Use it with care:
-  Qiskit Runtime does not guarantee that a job's circuits run in the order
-  submitted (`run.execution_order` reports **held**, **violated**,
-  **unresolved** or **unavailable** from IBM's timestamps, and a round shows
-  the qubits between the circuits around it only when it **held**); rounds
-  probe one qubit at a time, so they can cost as much as your own circuits;
-  and dynamical decoupling must stay off in that job, since it would act on
-  Canary's probe delays.
 
 ## License
 

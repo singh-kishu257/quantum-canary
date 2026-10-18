@@ -9,8 +9,10 @@ in the same job, on the same qubits the algorithm already uses,
 between batches of algorithm circuits. The algorithm's own circuits
 and results are never touched or reordered. The interleaving is in the
 submitted circuit list; whether the backend executes it in that order
-is up to the backend (Qiskit Runtime does not guarantee it), which
-workflow.run_monitored() checks from the job's execution spans.
+is up to the backend (Qiskit Runtime does not guarantee it). Not
+validated on hardware; the package's own API runs every check as its own job.
+The health rules (OnlineInversionResult.health_summary) and the helpers
+chi2_scaled_z / _holm_adjust used by quantum_canary.api live here too.
 
 health_summary() (per round, from InversionResult's own chi2/dof) and
 drift_report() (cross-round, comparing fitted parameters against a

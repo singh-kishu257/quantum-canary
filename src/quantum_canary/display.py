@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from typing import List, Optional
 
-__all__ = ["render_report", "render_check", "render_monitored", "render_drift", "banner"]
+__all__ = ["render_report", "render_drift", "banner"]
 
 _BANNER = r"""
 ║  ██████╗ ██╗   ██╗ █████╗ ███╗   ██╗████████╗██╗   ██╗███╗   ███╗  ║
@@ -300,97 +300,6 @@ def render_report(report, color: Optional[bool] = None) -> str:
 
 def _cell_health(s: _Style, health: str, width: int = 8) -> str:
     return s(f"{health:<{width}}", _HEALTH_COLOR.get(health, "bold"), "bold")
-
-
-def render_check(check, color: Optional[bool] = None) -> str:
-    """Render a CheckReport: one table, then the decisions."""
-    s = _Style(_use_color(color))
-    rep = check.report
-    dw_div, dw_unit = _dw_units(rep.architecture)
-    where = "fake backend, local" if rep.backend.startswith("fake_") else "IBM hardware"
-    priors = sorted({q.profile.prior_confidence for q in rep.qubits})
-    lines = [_rule(s, s("Pre-job check", "bold"), "━"),
-             _kv(s, "Backend", f"{s(rep.backend, 'bold')} ({where})"
-                 + (f" · job {rep.job_id}" if rep.job_id else "")),
-             _kv(s, "Priors", "live calibration" if priors == ["live"] else ", ".join(priors)),
-             "",
-             s(f"  {'Qubit':<7}{'Role':<8}{'Health':<8}{'T1':>11}{'T2':>11}{'T2*':>11}"
-               f"{'Δω/2π ' + dw_unit:>12}{'ε_sx':>11}  DD", "dim")]
-    for q in rep.qubits:
-        r = q.result
-        role = "layout" if q.qubit in check.requested else "spare"
-        dw = f"{r.delta_omega / (2 * math.pi * dw_div):+.3g}" if _finite(r.delta_omega) else "—"
-        eps = f"{r.epsilon_sx:.2e}" if _finite(r.epsilon_sx) else "—"
-        dd = "yes" if check.dd_reasons.get(q.qubit) else "—"
-        lines.append(f"  {q.qubit:<7}{role:<8}{_cell_health(s, q.health)}{_time(r.T1_s):>11}"
-                     f"{_time(r.T2_s):>11}{_time(r.T2_ramsey_s):>11}{dw:>12}{eps:>11}  {dd}")
-    lines.append("")
-    lines.append(_kv(s, "Use layout", s(str(check.layout), "bold")))
-    for old, new in check.swaps.items():
-        lines.append(_kv(s, "", s(f"qubit {old} is RED, swapped for spare {new}", "yellow")))
-    for q in check.unresolved:
-        lines.append(_kv(s, "", s(f"qubit {q} is RED and no healthy spare is left", "red")))
-    if check.dd_recommended:
-        lines.append(_kv(s, "Decoupling", s("recommended", "green")))
-        for q in check.layout:
-            for reason in check.dd_reasons.get(q, []):
-                lines.append(_kv(s, "", s(f"qubit {q}: {reason}", "dim")))
-        lines.append(_kv(s, "", "sampler.options.dynamical_decoupling.enable = True"))
-        lines.append(_kv(s, "", "sampler.options.dynamical_decoupling.sequence_type = "
-                                f"\"{check.dd_options['sequence_type']}\""))
-        lines.append(_kv(s, "", s("(for jobs without Canary rounds: it would also act on "
-                                  "Canary's probe delays)", "dim")))
-    else:
-        lines.append(_kv(s, "Decoupling", "not needed on these qubits"))
-    lines.append(_rule(s, char="━"))
-    return "\n".join(lines)
-
-
-def render_monitored(run, color: Optional[bool] = None) -> str:
-    """Render a MonitoredRun: qubit health in every round."""
-    s = _Style(_use_color(color))
-    qubits = list(run.layout)
-    lines = [_rule(s, s("Monitored run", "bold"), "━"),
-             _kv(s, "Circuits", f"{len(run.results)} of yours, a Canary round after every "
-                                f"{run.interval}" + (f" · job {run.job_id}" if run.job_id else "")),
-             "",
-             s(f"  {'Round':<7}{'Circuits':<12}" + "".join(f"{'q' + str(q):<9}" for q in qubits), "dim")]
-    for rnd in run.rounds:
-        health = rnd.health_summary()
-        idx = run.circuits_in_round(rnd.round_index)
-        span = f"{idx.start}-{idx.stop - 1}" if len(idx) else "—"
-        lines.append(f"  {rnd.round_index:<7}{span:<12}"
-                     + "".join(_cell_health(s, health.get(q, "—"), 9) for q in qubits))
-    lines.append("")
-    if len(run.rounds) > 1:
-        drifted = {q: [k for k, v in run.monitor.drift_report(q)["drifted"].items() if v]
-                   for q in qubits}
-        moved = {q: v for q, v in drifted.items() if v}
-        if moved:
-            for q, params in moved.items():
-                lines.append(_kv(s, "Drift", s(f"qubit {q}: {', '.join(params)} moved since round 0",
-                                               "yellow")))
-        else:
-            lines.append(_kv(s, "Drift", "none since round 0"))
-    order = run.execution_order
-    lines.append(_kv(s, "Run order", {
-        "held": s("held: execution timestamps confirm the submitted order", "green"),
-        "violated": s("violated: timestamps show circuits ran out of submitted order",
-                      "yellow"),
-        "unresolved": s("unresolved: timestamps overlap, order not confirmed", "dim"),
-        "unavailable": s("unavailable: no execution timestamps from this backend",
-                         "dim")}[order]))
-    flagged = run.flagged_rounds
-    if not flagged:
-        verdict = s("all rounds GREEN", "green")
-    elif order == "held":
-        verdict = s(f"check circuits before round(s) {flagged}", "yellow")
-    else:
-        verdict = s(f"round(s) {flagged} not GREEN; which circuits ran nearby is unknown",
-                    "yellow")
-    lines.append(_kv(s, "Verdict", verdict))
-    lines.append(_rule(s, char="━"))
-    return "\n".join(lines)
 
 
 def render_drift(drift, color: Optional[bool] = None) -> str:

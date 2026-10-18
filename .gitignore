@@ -33,8 +33,9 @@ logs/
 *.log
 
 # Credentials — 
-api_token.txt
-crn_instance.txt
+ionq_api_token.txt
+ibm_api_token.txt
+ibm_crn_instance.txt
 .env
 
 # Jupyter

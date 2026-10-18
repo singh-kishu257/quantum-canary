@@ -34,8 +34,10 @@ import numpy as np
 from scipy.stats import chi2 as _chi2
 
 from . import inversion as inv
+from . import online, runner
 
-__all__ = ["IonResult", "IonQReport", "ionq_circuits", "ionq_estimate", "ionq_priors", "run_ionq"]
+__all__ = ["IonResult", "IonQReport", "ionq_circuits", "ionq_estimate", "ionq_priors", "run_ionq",
+           "ion_health", "to_canary_report"]
 
 DEFAULT_SHOTS = 500
 DEFAULT_MAX_OPS = 24_000
@@ -304,3 +306,61 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
                       spam=(float(arch["p0_given_1"]), float(arch["p1_given_0"])),
                       batches=[list(b) for b in batches], job_ids=job_ids, ionq_estimates=estimates,
                       results=results, raw=raw)
+
+
+def is_ionq(backend) -> bool:
+    """True for a qiskit-ionq backend (QPU or cloud simulator)."""
+    try:
+        from qiskit_ionq.ionq_backend import IonQBackend
+    except ImportError:
+        return False
+    return isinstance(backend, IonQBackend)
+
+
+def ion_health(epsilon_sx_sigma: float, chi2_dof: float) -> str:
+    """The IBM health rule restricted to the one probe run on ions: RED if the
+    gate fit failed (inversion._fit_failed), YELLOW if its chi2/dof is over the
+    gate probe's limit (online._green_chi2_threshold("gate"), the same limit as
+    on IBM), otherwise GREEN. There is no T2*/T2 rule: T2 is not measured."""
+    if inv._fit_failed(epsilon_sx_sigma):
+        return "RED"
+    if np.isfinite(chi2_dof) and chi2_dof > online._green_chi2_threshold("gate"):
+        return "YELLOW"
+    return "GREEN"
+
+
+def to_canary_report(report: IonQReport) -> "runner.CanaryReport":
+    """The same report type run_ibm returns, so Report, save/load, compare and
+    Monitor work unchanged. Only epsilon_sx is measured: T1, T2, T2*, delta_omega
+    and the other probes' chi2/dof are NaN (not measured). A failed gate fit is
+    reported as NaN +/- inf, as on IBM. block_counts holds each ion's raw counts
+    per repetition count."""
+    nan, arch = float("nan"), _arch(report.eps_prior, report.spam)
+    profile = _profile(arch)
+    raw_by_ion: Dict[int, List[Dict[str, Any]]] = {q: [] for q in report.ions}
+    for entry in report.raw:
+        for bit, ion in enumerate(entry["batch"]):
+            raw_by_ion[int(ion)].append({"circuit": report.gate_rep_n.index(entry["N"]), "block": 0,
+                                         "N": entry["N"], "bit": bit, "counts": entry["counts"],
+                                         "probabilities": entry["probabilities"]})
+    qubits = []
+    for r in report.results:
+        failed = inv._fit_failed(r.epsilon_sx_sigma)
+        result = inv.InversionResult(
+            backend_name=report.backend, qubit_id=r.ion, timestamp=report.timestamp,
+            architecture="trapped_ion", T1_s=nan, T1_sigma_s=nan, T2_s=nan, T2_sigma_s=nan,
+            delta_omega=nan, delta_omega_sigma=nan,
+            epsilon_sx=nan if failed else r.epsilon_sx,
+            epsilon_sx_sigma=float("inf") if failed else r.epsilon_sx_sigma,
+            t1_residual=nan, ramsey_residual=nan, gate_residual=nan,
+            t1_chi2_dof=nan, ramsey_chi2_dof=nan, gate_chi2_dof=r.chi2_dof,
+            T2_ramsey_s=nan, T2_ramsey_sigma_s=nan, T2_echo_s=nan, T2_echo_sigma_s=nan,
+            echo_residual=nan, echo_chi2_dof=nan)
+        qubits.append(runner.QubitReport(qubit=r.ion, result=result, profile=profile,
+                                         health=ion_health(r.epsilon_sx_sigma, r.chi2_dof)))
+    return runner.CanaryReport(
+        mode="hardware", backend=report.backend, architecture="trapped_ion",
+        shots={"t1": 0, "ramsey": 0, "gate": report.shots, "echo": 0}, probe_blocks=1,
+        circuits_per_qubit=len(report.gate_rep_n), qubits=qubits, timestamp=report.timestamp,
+        job_id=",".join(str(j) for j in report.job_ids if j) or None,
+        groups=[list(b) for b in report.batches], block_counts=raw_by_ion)

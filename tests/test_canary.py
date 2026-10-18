@@ -114,24 +114,6 @@ def test_ionq_priors_from_characterization():
     assert ionq.ionq_priors(object()) is None
 
 
-def test_run_monitored_end_to_end():
-    from qiskit import QuantumCircuit, transpile
-    from qiskit_ibm_runtime.fake_provider import FakeProviderForBackendV2
-    from quantum_canary import workflow
-    fez = FakeProviderForBackendV2().backend("fake_fez")
-    raw = canary.runner.run_simulation(n_qubits=1, regime="ideal", seed=3)
-    cr = workflow.CheckReport(report=raw, requested=[0], layout=[0], swaps={}, unresolved=[],
-                              dd_reasons={0: []})
-    assert cr.monitor().shots_ramsey == runner.DEFAULT_SHOTS["ramsey"]
-    qc = QuantumCircuit(1, 1)
-    qc.x(0)
-    qc.measure(0, 0)
-    circuits = [transpile(qc, fez, initial_layout=[0], optimization_level=0)] * 2
-    run = workflow.run_monitored(fez, circuits, cr, interval=2, shots=100)
-    assert len(run.results) == 2 and len(run.rounds) == 1
-    assert set(run.rounds[0].health_summary()) == {0}
-
-
 def test_frozen_engine_files_unchanged():
     import hashlib
     import pathlib
@@ -170,3 +152,41 @@ def test_raw_counts_saved_and_loaded(tmp_path):
     assert loaded.raw.block_counts == raw.block_counts
     loaded.save(tmp_path / "again.json")
     assert canary.load(tmp_path / "again.json").raw.block_counts == raw.block_counts
+
+
+def _ion_report(eps, sigmas, chi2s):
+    results = [ionq.IonResult(ion=q, epsilon_sx=e, epsilon_sx_sigma=s, chi2_dof=c, chi2_p=0.5,
+                              gate_rep_n=[312, 625, 1250], p0=[0.9, 0.8, 0.7], shots=[500] * 3)
+               for q, e, s, c in zip([0, 3, 6], eps, sigmas, chi2s)]
+    raw = [{"job_id": f"j{q}", "batch": [q], "N": n, "counts": {"0": 400, "1": 100}, "probabilities": None}
+           for q in (0, 3, 6) for n in (312, 625, 1250)]
+    return ionq.IonQReport(backend="ionq_qpu.forte-1", ions=[0, 3, 6], shots=500,
+                           gate_rep_n=[312, 625, 1250], eps_prior=2e-4, spam=(0.006, 0.004),
+                           batches=[[0], [3], [6]], job_ids=["j0", "j3", "j6"],
+                           ionq_estimates=[None] * 3, results=results, raw=raw)
+
+
+def test_ionq_works_like_ibm(tmp_path):
+    before = canary.Report(ionq.to_canary_report(
+        _ion_report([2e-4, 3e-4, 2e-4], [1e-5, 1e-5, float("inf")], [1.0, 6.0, 1.0])))
+    assert [q.health for q in before] == ["GREEN", "YELLOW", "RED"]
+    assert before[6].health_reason == "gate fit failed" and np.isnan(before[6].eps)
+    assert before[3].fit and np.isnan(before[0].t1) and before[0].dd_advice == []
+    assert before.raw.shots_per_qubit == 1500 and len(before.raw.block_counts[0]) == 3
+    assert "trapped ions" in before.render() and "n/a" in before.render()
+    path = tmp_path / "ions.json"
+    before.save(path)
+    loaded = canary.load(path)
+    assert [(q.eps, q.health) for q in loaded][:2] == [(q.eps, q.health) for q in before][:2]
+    after = canary.Report(ionq.to_canary_report(
+        _ion_report([4e-4, 3e-4, 2e-4], [1e-5, 1e-5, 1e-5], [1.0, 1.0, 1.0])))
+    drift = canary.compare(loaded, after)
+    assert drift.changed == [0] and np.isnan(drift.z_scores[6]["epsilon_sx"])
+    assert np.isnan(drift.z_scores[0]["T1_s"]) and drift.z_scores[0]["epsilon_sx"] > 10
+
+
+def test_ionq_backend_detection():
+    from qiskit_ionq import IonQProvider
+    from qiskit_ibm_runtime.fake_provider import FakeProviderForBackendV2
+    assert ionq.is_ionq(IonQProvider("offline-test").get_backend("simulator", gateset="native"))
+    assert not ionq.is_ionq(FakeProviderForBackendV2().backend("fake_fez"))

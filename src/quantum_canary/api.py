@@ -28,7 +28,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence
 import numpy as np
 from scipy.stats import norm
 
-from . import runner, workflow
+from . import ionq, runner, workflow
 from .online import OnlineInversionResult, _green_chi2_threshold
 
 __all__ = ["QubitResult", "Report", "check", "compare", "load", "simulate", "Monitor"]
@@ -94,7 +94,7 @@ def health_reasons(health: str, result) -> List[str]:
             (result.T2_echo_sigma_s, "echo fit failed"),
             (result.T2_ramsey_sigma_s, "Ramsey fit failed"),
             (result.delta_omega_sigma, "Δω not measurable (no Ramsey contrast)"),
-            (result.epsilon_sx_sigma, "gate fit failed")) if not np.isfinite(sigma)]
+            (result.epsilon_sx_sigma, "gate fit failed")) if np.isinf(sigma)]
         return failed or ["fit did not converge"]
     reasons = ["fit"] if fit_over_limit(result) else []
     if result.T2_s > 0 and np.isfinite(result.T2_ramsey_s) and np.isfinite(result.T2_echo_s):
@@ -197,9 +197,13 @@ class Report:
                          f"{'; '.join(q.fit + [p + ' at bound' for p in q.at_bound]) or 'ok':<26}"
                          f"{health}")
         lines.append("")
-        advised = [q for q in self.qubits if q.dd_advice]
-        lines += ([f"dynamical decoupling advised on qubit {q.qubit}: {'; '.join(q.dd_advice)}"
-                   for q in advised] or ["dynamical decoupling: not needed on these qubits"])
+        if any(np.isfinite(q.t2_star) for q in self.qubits):
+            advised = [q for q in self.qubits if q.dd_advice]
+            lines += ([f"dynamical decoupling advised on qubit {q.qubit}: {'; '.join(q.dd_advice)}"
+                       for q in advised] or ["dynamical decoupling: not needed on these qubits"])
+        else:
+            lines.append("trapped ions: only the gate error eps is measured (T1 and T2 are far "
+                         "longer than any circuit); health uses the gate fit alone")
         lines += [f"frequency offset on qubit {q.qubit}: {'; '.join(q.frame_advice)}; correct it "
                   "with a virtual-Z frame update or frequency recalibration (DD only if it drifts)"
                   for q in self.qubits if q.frame_advice]
@@ -251,7 +255,11 @@ def _ibm_usage(backend, job_id: Optional[str]) -> Optional[float]:
 
 def check(backend, qubits: Sequence[int]) -> Report:
     """Check `qubits` of an IBM backend (or a qiskit-ibm-runtime fake backend) in
-    one short job and return the Report."""
+    one short job and return the Report. On a qiskit-ionq backend the qubits are
+    ions and only the gate error is measured (ionq.run_ionq, one job per ion, no
+    cost limit: use run_ionq(..., max_cost=...) for one)."""
+    if ionq.is_ionq(backend):
+        return Report(ionq.to_canary_report(ionq.run_ionq(backend, qubits)))
     raw = runner.run_ibm(backend, qubits)
     return Report(raw, ibm_usage_s=_ibm_usage(backend, raw.job_id))
 
@@ -303,8 +311,8 @@ def _raw(x):
 
 
 def compare(before, after, z_threshold: float = DRIFT_Z):
-    """What changed between two checks (Reports, or the advanced CanaryReport and
-    CheckReport): a two-sample z-test per parameter with a Holm correction over each
+    """What changed between two checks (Reports, or the advanced CanaryReport):
+    a two-sample z-test per parameter with a Holm correction over each
     qubit's four parameters. Returns a DriftReport (.changed, .print())."""
     return workflow.compare(_raw(before), _raw(after), z_threshold=z_threshold)
 
