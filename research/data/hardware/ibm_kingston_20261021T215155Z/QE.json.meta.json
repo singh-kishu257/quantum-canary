@@ -1,0 +1,22 @@
+{
+  "written_utc": "2026-10-21T22:29:30.895026+00:00",
+  "git_commit": "35b82de9da9e36f62a6dac9e848c7625e2cd64af",
+  "uncommitted_code_changes": false,
+  "quantum_canary_imported": "0.9.0",
+  "python": "3.14.2",
+  "packages": {
+    "quantum-canary": "0.9.0",
+    "qiskit": "2.5.2",
+    "qiskit-aer": "0.17.2",
+    "qiskit-ibm-runtime": "0.50.0",
+    "qiskit-experiments": "0.14.2",
+    "qiskit-ionq": "1.1.1",
+    "numpy": "2.5.3",
+    "scipy": "1.18.1"
+  },
+  "command": [
+    "research/ibm_hardware.py",
+    "sandwich",
+    "ibm_kingston"
+  ]
+}
