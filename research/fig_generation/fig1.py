@@ -34,6 +34,19 @@ C_T1, C_RAM, C_ECHO, C_GATE = "#0072B2", "#E69F00", "#009E73", "#CC79A7"
 STAR = "#F2B705"
 H_GREEN, H_YELLOW, H_RED = "#2CA02C", "#F2C14E", "#D62728"
 
+
+def _soften(c, s=0.78):
+    """The colour with its saturation scaled by s (hue and lightness kept)."""
+    import colorsys
+    h, l, sat = colorsys.rgb_to_hls(*mpl.colors.to_rgb(c))
+    return mpl.colors.to_hex(colorsys.hls_to_rgb(h, l, sat * s))
+
+
+(QPU_H, QPU_B, QC_H, QC_B, DES_H, DES_B, EXE_H, EXE_B, INV_H, INV_B, OUT_H, OUT_B, F_QPU, F_YEL, F_LAV, F_PINK,
+ F_ORG, F_GRN, F_TILE, C_T1, C_RAM, C_ECHO, C_GATE, H_GREEN, H_YELLOW, H_RED) = map(_soften, (
+    QPU_H, QPU_B, QC_H, QC_B, DES_H, DES_B, EXE_H, EXE_B, INV_H, INV_B, OUT_H, OUT_B, F_QPU, F_YEL, F_LAV, F_PINK,
+    F_ORG, F_GRN, F_TILE, C_T1, C_RAM, C_ECHO, C_GATE, H_GREEN, H_YELLOW, H_RED))
+
 fig = plt.figure(figsize=(W / 25.4, H / 25.4))
 ax = fig.add_axes([0, 0, 1, 1]); ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
 OVERFLOW = []
@@ -159,15 +172,11 @@ A = (1.0, 25.0); B = (27.0, 134.0); C = (136.0, 180.0)
 section(A[0], 1.0, A[1], TOPY, HDR, "Cloud QPU", QPU_H, QPU_B)
 section(B[0], 1.0, B[1], TOPY, HDR, "Quantum Canary", QC_H, QC_B)
 section(C[0], 1.0, C[1], TOPY, HDR, "To the user", OUT_H, OUT_B)
-# key-feature legend inside the Quantum Canary header bar
-lx = B[1] - 1.6 - wmm("Key feature")
-star(lx - 1.9, TOPY - HDR / 2 + 0.05)
-text(lx, TOPY - HDR / 2, "Key feature", va="center_baseline", z=2)
 
 BX0, BX1 = B[0] + 1.5, B[1] - 1.5                  # sub-panel extent
 P1 = (55.9, 83.1); P2 = (32.0, 50.2); P3 = (2.2, 30.6)  # (bottom, top) of the three sub-panels
 section(BX0, P1[0], BX1, P1[1], SUBH, "Probe design and submission", DES_H, DES_B, z=1, size=BODY)
-section(BX0, P2[0], BX1, P2[1], SUBH, "Execution paths", EXE_H, EXE_B, z=1, size=BODY)
+section(BX0, P2[0], BX1, P2[1], SUBH, "Probe sequences", EXE_H, EXE_B, z=1, size=BODY)
 section(BX0, P3[0], BX1, P3[1], SUBH, "Inversion and validation", INV_H, INV_B, z=1, size=BODY)
 IX0, IX1 = BX0 + 1.5, BX1 - 1.5
 G = 3.6
@@ -198,6 +207,7 @@ yy = 46.0
 for name, kind in [("IBM", "superconducting"), ("IonQ", "trapped ion")]:
     text(qc, yy, name, weight="bold", ha="center"); yy -= PITCH
     text(qc, yy, kind, ha="center", color=GREY); yy -= PITCH + 0.5
+text(qc, yy + 0.5, "(gate error only)", ha="center", color=GREY, size=SEQ_SIZE if "SEQ_SIZE" in dir() else 7.5)
 
 # ----------------------------------------------------------------- row 1: design + submission
 r0, r1 = row(P1)
@@ -205,26 +215,75 @@ w1 = [31.0, 31.5]; w1.append(IX1 - IX0 - sum(w1) - 2 * G)
 X1 = [IX0, IX0 + w1[0] + G, IX0 + w1[0] + w1[1] + 2 * G]
 step_box(X1[0], r0, X1[0] + w1[0], r1, 1, "Priors and design", F_YEL, [
     (None, r"Live $T_1$, $T_2$, $\varepsilon$, readout error (else defaults)"),
-    ("star", "Delays where data are most informative"),
+    ("dot", "Delays where data are most informative"),
 ])
 step_box(X1[1], r0, X1[1] + w1[1], r1, 2, "74 probe circuits", F_LAV, [
     (("sw", C_T1), "Relaxation \u00d73"), (("sw", C_RAM), "Ramsey X/Y \u00d78"),
     (("sw", C_ECHO), "Hahn echo \u00d73"), (("sw", C_GATE), "Clifford RB \u00d760"),
 ])
-step_box(X1[2], r0, X1[2] + w1[2], r1, 3, "One short job", F_YEL, [
-    ("star", "Parallel groups: shots scale with groups, not qubits"),
+step_box(X1[2], r0, X1[2] + w1[2], r1, 3, "Execution plan", F_YEL, [
+    ("dot", "Parallel groups: shots scale with groups, not qubits"),
     ("dot", "10 interleaved blocks"),
 ])
 
-# ----------------------------------------------------------------- row 2: execution paths (options)
+# ----------------------------------------------------------------- row 2: probe sequences
 r0, r1 = row(P2)
-w2 = (IX1 - IX0 - G) / 2
-step_box(IX0, r0, IX0 + w2, r1, None, "IonQ trapped ions", F_WHT, [
-    ("dot", "Gate-error probe only, with an optional cost cap"),
-], ls=(0, (3, 1.6)))
-step_box(IX0 + w2 + G, r0, IX1, r1, None, "In-job monitoring", F_WHT, [
-    ("star", "Experimental: probes woven into your job; results untouched"),
-], ls=(0, (3, 1.6)))
+SEQ_SIZE, PH = 7.5, 3.0
+
+
+def sequence(px0, px1, y, tokens, col, name):
+    """Pulses ('p', label), waits ('d', label), gaps ('t', label) and a measurement ('m', '') on a time line."""
+    widths = []
+    for kind, s in tokens:
+        if kind == "p":
+            widths.append(max(wmm(s, SEQ_SIZE) + 1.2, 3.2))
+        elif kind == "m":
+            widths.append(3.6)
+        else:
+            widths.append(max(wmm(s, SEQ_SIZE) + 1.4, 2.6))
+    total = sum(widths) + 0.5 * (len(widths) - 1)
+    if total > px1 - px0 - 1.6:
+        OVERFLOW.append((name, round(total - (px1 - px0 - 1.6), 2)))
+    x = (px0 + px1 - total) / 2
+    ax.plot([x - 0.6, x + total], [y, y], color=GREY, lw=0.6, zorder=9, solid_capstyle="butt")
+    for (kind, s), w in zip(tokens, widths):
+        if kind == "p":
+            ax.add_patch(Rectangle((x, y - PH / 2), w, PH, fc=col, ec=OUTLINE, lw=0.5, alpha=1.0, zorder=10))
+            text(x + w / 2, y - 0.05, s, size=SEQ_SIZE, ha="center", va="center", color="white", z=11)
+        elif kind == "m":
+            ax.add_patch(Rectangle((x, y - PH / 2), w, PH, fc="white", ec=OUTLINE, lw=0.5, zorder=10))
+            ax.add_patch(mpl.patches.Arc((x + w / 2, y - 0.9), 2.6, 2.6, theta1=20, theta2=160, ec=INK, lw=0.5, zorder=11))
+            ax.plot([x + w / 2, x + w / 2 + 0.85], [y - 0.9, y + 0.7], color=INK, lw=0.5, zorder=11)
+        else:
+            text(x + w / 2, y, s, size=SEQ_SIZE, ha="center", va="center", color=INK, z=11,
+                 bbox=dict(fc="white", ec="none", pad=0.4))
+        x += w + 0.5
+
+
+seqs = [
+    ("Relaxation", C_T1, [("p", "X"), ("d", r"$\tau$"), ("m", "")], r"$\times$3 $\rightarrow$ $T_1$"),
+    ("Ramsey X / Y", C_RAM, [("p", "H"), ("d", r"$\tau$"), ("p", "H | S†H"), ("m", "")],
+     r"$\times$8 $\rightarrow$ $T_2^*$, $\Delta\omega$"),
+    ("Hahn echo", C_ECHO, [("p", "H"), ("d", r"$\tau/2$"), ("p", "X"), ("d", r"$\tau/2$"),
+                           ("p", "H"), ("m", "")], r"$\times$3 $\rightarrow$ $T_2$"),
+    ("Clifford RB", C_GATE, [("p", r"$C_1$"), ("t", r"$\cdots$"), ("p", r"$C_m$"), ("p", r"$C^{-1}$"), ("m", "")],
+     r"3 lengths, $\times$60 $\rightarrow$ $\varepsilon$"),
+]
+GS = 2.0
+ws = [19.5, 23.0, 29.7]; ws.append(IX1 - IX0 - sum(ws) - 3 * GS)
+px = IX0
+for (title, col, tokens, caption), w in zip(seqs, ws):
+    rbox(px, r0, px + w, r1, fc=F_WHT)
+    tw_ = wmm(title, BODY, "bold")
+    if tw_ + 2.6 > w - 1.6:
+        OVERFLOW.append((title + " title", round(tw_ + 2.6 - (w - 1.6), 2)))
+    ax.add_patch(Rectangle(((2 * px + w - tw_) / 2 - 1.9, r1 - 2.85), 1.2, 2.5, fc=col, ec="none", zorder=11))
+    text((2 * px + w) / 2 + 0.7, r1 - 1.85, title, weight="bold", ha="center", va="center_baseline")
+    sequence(px, px + w, (r0 + r1) / 2 - 0.4, tokens, col, title)
+    if wmm(caption, SEQ_SIZE) > w - 1.6:
+        OVERFLOW.append((title + " caption", round(wmm(caption, SEQ_SIZE) - (w - 1.6), 2)))
+    text(px + w / 2, r0 + 1.0, caption, size=SEQ_SIZE, ha="center", color=GREY)
+    px += w + GS
 
 # ----------------------------------------------------------------- row 3: inversion + health
 r0, r1 = row(P3)
@@ -252,13 +311,13 @@ for c in (0, 1):
     col_x.append(end + 1.8)
 assert col_x[-1] - 1.8 <= x1 - 1.4, col_x
 items(x0 + 1.6, x1 - 1.6, yb0 - 2 * (PITCH + 0.3) + 0.70 * BODY * PT - 0.3, [
-    ("star", r"Readout error in the $T_1$, Ramsey and echo models (RB cancels it); $T_2 \leq 2T_1$; $\sigma$ for each"),
+    ("dot", r"Readout error in the $T_1$, Ramsey and echo models (RB cancels it); $T_2 \leq 2T_1$; $\sigma$ for each"),
 ], r0 + 0.4, "fit")
 step_box(X3[1], r0, IX1, r1, 5, "Health", F_ORG, [
     (("hl", H_GREEN), "GREEN: all fits pass"),
     (("hl", H_YELLOW), r"YELLOW: fit over limit, or $T_2^*$, $T_2$ differ > 20%"),
     (("hl", H_RED), "RED: a fit failed"),
-    ("star", r"$\chi^2$ limits: 5% false alarms"),
+    ("dot", r"$\chi^2$ limits: 5% false alarms"),
 ])
 
 # ----------------------------------------------------------------- To the user
@@ -272,7 +331,7 @@ step_box(CX0, IF[0], CX1, IF[1], None, "Interfaces", F_LAV, [
     ("dot", "CLI: quantum-canary"),
 ])
 step_box(CX0, DE[0], CX1, DE[1], None, "Decisions", F_WHT, pad=1.1, entries=[
-    ("star", "RED qubit \u2192 re-run the check"),
+    ("dot", "RED qubit \u2192 re-run the check"),
     ("dot", r"Decoupling if $T_2^*/T_2 < 0.8$"),
     ("dot", r"Frame update if $|\Delta\omega|\,T_2^* > 1\,\mathrm{rad}$"),
 ])
@@ -317,16 +376,16 @@ block_arrow([(CX0, IF[0] + 4.0), (X1[2] + w1[2], IF[0] + 4.0)])  # request
 BUS = (P2[1] + P1[0]) / 2
 bx = X1[2] + w1[2] / 2
 block_arrow([(bx, r1lo), (bx, BUS), (QB[2], BUS)], shaft=3.4, head_w=5.6, head_l=2.8)  # probe job
-text((QB[2] + bx) / 2 + 2.0, BUS, "Probe job", ha="center", va="center_baseline", z=11)
+text((QB[2] + bx) / 2 + 2.0, BUS, "Probe job (default 8,640 shots per qubit)", ha="center", va="center_baseline", z=11)
 r3lo, r3hi = row(P3); ymid3 = (r3lo + r3hi) / 2
 block_arrow([(QB[2], ymid3), (X3[0], ymid3)])                                  # counts
 block_arrow([(X3[0] + w3[0], ymid3), (X3[1], ymid3)])
 block_arrow([(IX1, ymid3), (CX0, ymid3)])
 # QPU port labels
 QR = QB[2] - 0.9
-text(QR, ymid1 + 2.0, "Calibration data", ha="right")
-text(QR, BUS + 2.6, "Runs probes", ha="right")
-text(QR, ymid3 + 2.0, "Counts", ha="right")
+text(QR, ymid1, "Calibration data", ha="right", va="center_baseline")
+text(QR, BUS, "Runs probes", ha="right", va="center_baseline")
+text(QR, ymid3, "Counts", ha="right", va="center_baseline")
 print("overflow:", OVERFLOW)
 
 OUT_DIR = __import__("pathlib").Path(__file__).resolve().parents[1] / "figures"

@@ -1,0 +1,34 @@
+{
+  "written_utc": "2026-10-25T22:23:42.016579+00:00",
+  "git_commit": "cfd04981ad57fc56f6df2186df7a60af0382ecfa",
+  "uncommitted_code_changes": false,
+  "quantum_canary_imported": "0.9.0",
+  "python": "3.12.15",
+  "packages": {
+    "quantum-canary": null,
+    "qiskit": "2.4.2",
+    "qiskit-aer": "0.17.2",
+    "qiskit-ibm-runtime": "0.51.0",
+    "qiskit-experiments": "0.14.2",
+    "qiskit-ionq": "1.1.1",
+    "numpy": "2.5.4",
+    "scipy": "1.18.1"
+  },
+  "command": [
+    "research/nisq_benchmark.py",
+    "--architecture",
+    "trapped_ion",
+    "--n-instances",
+    "500",
+    "--n-sweep",
+    "200",
+    "--shard",
+    "8",
+    "--n-shards",
+    "10",
+    "--workers",
+    "4",
+    "--out",
+    "nisq_benchmark_trapped_ion_shard8.csv"
+  ]
+}
