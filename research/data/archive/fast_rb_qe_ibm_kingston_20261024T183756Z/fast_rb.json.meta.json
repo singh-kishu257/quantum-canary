@@ -1,0 +1,21 @@
+{
+  "written_utc": "2026-10-24T18:37:56.805457+00:00",
+  "git_commit": "b8433abfbc61a3d6961f141c103b17254237e0db",
+  "uncommitted_code_changes": true,
+  "quantum_canary_imported": "0.9.0",
+  "python": "3.14.2",
+  "packages": {
+    "quantum-canary": "0.9.0",
+    "qiskit": "2.5.2",
+    "qiskit-aer": "0.17.2",
+    "qiskit-ibm-runtime": "0.50.0",
+    "qiskit-experiments": "0.14.2",
+    "qiskit-ionq": "1.1.1",
+    "numpy": "2.5.3",
+    "scipy": "1.18.1"
+  },
+  "command": [
+    "research/fast_rb_test.py",
+    "ibm_kingston"
+  ]
+}

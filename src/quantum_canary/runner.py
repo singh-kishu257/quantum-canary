@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import io
 import math
 import warnings
@@ -40,7 +41,7 @@ __all__ = [
 
 # Shots per circuit of each probe family: the values every research benchmark
 # (ideal_parity.py, benchmark.py) uses.
-DEFAULT_SHOTS: Dict[str, int] = {"t1": 300, "ramsey": 600, "gate": 500, "echo": 500}
+DEFAULT_SHOTS: Dict[str, int] = {"t1": 300, "ramsey": 600, "gate": 24, "echo": 500}
 # Block-interleaved execution: benchmark.py's default (probe_blocks = 10).
 DEFAULT_PROBE_BLOCKS = 10
 
@@ -53,7 +54,7 @@ _SPAM_CLIP_MAX = 0.499
 # a time-resolved run (benchmark.TRUTH_FAMILIES).
 _TRUTH_FAMILIES = {"T1_s": ("t1_",), "T2_s": ("ramsey_X_", "ramsey_Y_", "echo_"),
                    "delta_omega": ("ramsey_X_", "ramsey_Y_"),
-                   "epsilon_sx": ("gate_rep_N",)}
+                   "epsilon_sx": ("rb_",)}
 # research/ideal_parity.py and benchmark.py seed offsets per architecture.
 _ARCH_SEED_OFFSET = {"superconducting": 0, "trapped_ion": 100_000}
 
@@ -440,7 +441,7 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
     parallel:     probe several qubits in the same circuits (default). Qubits
                   are split by probe_groups() so that no two neighbours on
                   the coupling map are probed together; each group runs the
-                  17 probe circuits once, so the shots executed scale with
+                  probe circuits once, so the shots executed scale with
                   the number of groups rather than qubits. False probes one
                   qubit at a time, in separate circuits.
 
@@ -539,7 +540,7 @@ def _time_resolved_truth(truth, sim_result) -> Dict[str, float]:
                 continue
             for rec in recs:
                 if param == "epsilon_sx":
-                    vals.append(average_gate_infidelity(truth, rec["t_mid_s"]))
+                    vals.append(rb_gate_error(truth, rec["t_mid_s"]))
                 else:
                     key = {"T1_s": "T1_s", "T2_s": "T2_s",
                            "delta_omega": "delta_omega_rad_s"}[param]
@@ -550,30 +551,45 @@ def _time_resolved_truth(truth, sim_result) -> Dict[str, float]:
     return out
 
 
-def average_gate_infidelity(truth: Any, t_s: float) -> float:
-    """1 - F_avg of qubit 0's sx as the simulator plays it at t_s: relaxation and
-    depolarizing after the pulse, the amplitude over-rotation, and the detuning
-    during the pulse averaged over the quasi-static offset."""
-    from qiskit.circuit.library import SXGate
-    from qiskit.quantum_info import Operator, SuperOp, average_gate_fidelity
+@functools.lru_cache(maxsize=1)
+def _rb_frames() -> List[Any]:
+    """Pauli transfer matrices of the two rz of every compiled Clifford
+    (inversion._rb_clifford_table), as (rz(a), rz(c))."""
+    from qiskit.circuit.library import RZGate
+    from qiskit.quantum_info import PTM, Operator
+    ptm = lambda angle: np.real(PTM(Operator(RZGate(angle))).data)
+    return [(ptm(a), ptm(c)) for a, _, c in inv._rb_clifford_table()[0]]
+
+
+def rb_gate_error(truth: Any, t_s: float) -> float:
+    """The error per pulse Canary's gate probe measures on qubit 0 at t_s:
+    randomized benchmarking's exact decay p for the 24 compiled Cliffords
+    (inversion._rb_clifford_table), the second eigenvalue of the mean of
+    noisy (x) ideal Pauli transfer matrices, with each sx or x pulse played as
+    the simulator plays it: relaxation and depolarizing after the pulse, the
+    amplitude over-rotation, and the detuning during the pulse (the simulator
+    adds no quasi-static offset in delay-free circuits, see
+    simulation.simulate_circuit). Returns (1 - p)/2 / inversion.RB_PULSES_PER_CLIFFORD."""
+    from qiskit.circuit.library import SXGate, XGate
+    from qiskit.quantum_info import PTM, Operator, SuperOp
     err, f = sim._gate_noise_channel(truth, 0, t_s)
-    g = Operator(SXGate())
-    core = SuperOp(g).compose(SuperOp(err))
-    if f > 0.0:
-        core = core.compose(SuperOp(g.power(f)))
     during = bool(truth.architecture_specific.get("detuning_during_gates", False))
     dw = sim.evaluate_truth_at(truth, 0, t_s)["delta_omega_rad_s"] if during else 0.0
-    qs = truth.architecture_specific.get("quasi_static_dw_std_rad_s")
-    std = float(np.asarray(qs, dtype=float)[0]) if (during and qs is not None) else 0.0
-    nodes, weights = np.polynomial.hermite_e.hermegauss(9)
-    t_g = float(truth.gate_duration_ns) * 1e-9
-    channel = None
-    for x, w in zip(nodes, weights / weights.sum()):
-        a = (dw + std * x) * t_g / 2.0
-        rz = SuperOp(Operator(np.diag([np.exp(-0.5j * a), np.exp(0.5j * a)])))
-        term = rz.compose(core).compose(rz) * w
-        channel = term if channel is None else channel + term
-    return 1.0 - float(average_gate_fidelity(channel, target=g))
+    a = dw * float(truth.gate_duration_ns) * 1e-9 / 2.0
+    rz = SuperOp(Operator(np.diag([np.exp(-0.5j * a), np.exp(0.5j * a)])))
+    noisy, ideal = {None: np.eye(4)}, {None: np.eye(4)}
+    for name, gate in (("sx", SXGate()), ("x", XGate())):
+        g = Operator(gate)
+        core = SuperOp(g).compose(SuperOp(err))
+        if f > 0.0:
+            core = core.compose(SuperOp(g.power(f)))
+        channel = rz.compose(core).compose(rz)
+        noisy[name], ideal[name] = np.real(PTM(channel).data), np.real(PTM(SuperOp(g)).data)
+    twirl = np.mean([np.kron(rc @ noisy[pulse] @ ra, rc @ ideal[pulse] @ ra)
+                     for (ra, rc), (_, pulse, _) in zip(_rb_frames(), inv._rb_clifford_table()[0])],
+                    axis=0)
+    p = np.sort(np.abs(np.linalg.eigvals(twirl)))[::-1][1]
+    return float((1.0 - p) / 2.0 / inv.RB_PULSES_PER_CLIFFORD)
 
 
 def _simulate_one(architecture: str, regime: str, seed: int, qubit: int,
@@ -619,7 +635,7 @@ def _simulate_one(architecture: str, regime: str, seed: int, qubit: int,
         backend_name=f"simulated::{architecture}::{regime}", custom_arch=constants,
         prior_confidence="prior_informed")
 
-    circuits, meta = inv.build_probe_circuits(profile)
+    circuits, meta = inv.build_probe_circuits(profile, seed=int(seed))
     shots_list = _shots_list(meta, shots)
     timestamp = datetime.now(timezone.utc).isoformat()
 
@@ -630,7 +646,7 @@ def _simulate_one(architecture: str, regime: str, seed: int, qubit: int,
         tv = sim.evaluate_truth_at(truth, 0, 0.0)
         true_values = {"T1_s": float(tv["T1_s"]), "T2_s": float(tv["T2_s"]),
                        "delta_omega": float(tv["delta_omega_rad_s"]),
-                       "epsilon_sx": sim.effective_gate_epsilon(truth, 0, 0.0)}
+                       "epsilon_sx": rb_gate_error(truth, 0.0)}
     else:
         block_circuits, block_shots, block_index = inv.interleave_probe_blocks(
             circuits, shots_list, int(probe_blocks))
@@ -673,9 +689,8 @@ def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
                      time-resolved block-interleaved execution.
       regime="ideal" research/ideal_parity.py: correctly specified,
                      stationary Markovian noise.
-    The true epsilon_sx is the engine's own epsilon (sim.effective_gate_epsilon)
-    for regime="ideal" and the sx average gate infidelity
-    (average_gate_infidelity) for regime="nisq", as in the two benchmarks.
+    The true epsilon_sx is the error per pulse randomized benchmarking
+    measures on the simulated qubit (rb_gate_error), in both regimes.
     Qubit i uses seed (seed + i); seed defaults to the benchmarks' offset for
     the architecture (0 superconducting, 100000 trapped ion), so with default
     settings qubit i reproduces benchmark instance i.

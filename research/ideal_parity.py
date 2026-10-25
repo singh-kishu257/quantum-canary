@@ -33,11 +33,11 @@ from quantum_canary import inversion as inv
 from quantum_canary import simulation as sim
 from quantum_canary import api, runner
 
-SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 600, 500, 500
+SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 600, 24, 500
 ARCHITECTURES = ("superconducting", "trapped_ion")
 ARCH_SEED_OFFSET = {"superconducting": 0, "trapped_ion": 100_000}
 PARAMETERS = ("T1_s", "T2_s", "delta_omega", "epsilon_sx")
-CIRCUIT_PREFIXES = ("t1_", "ramsey_X_", "ramsey_Y_", "gate_rep_N", "echo_")
+CIRCUIT_PREFIXES = ("t1_", "ramsey_X_", "ramsey_Y_", "rb_", "echo_")
 
 CSV_COLUMNS = [
     "architecture", "instance_id", "seed", "parameter",
@@ -170,7 +170,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                 custom_arch=constants,
                 prior_confidence="prior_informed")
 
-        circuits, meta = inv.build_probe_circuits(profile)
+        circuits, meta = inv.build_probe_circuits(profile, seed=int(seed))
         for qc in circuits:
             if not any(qc.name.startswith(p) for p in CIRCUIT_PREFIXES):
                 raise RuntimeError(f"unexpected circuit name {qc.name!r}")
@@ -192,7 +192,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
         true_values = {"T1_s": float(tv_now["T1_s"]),
                        "T2_s": float(tv_now["T2_s"]),
                        "delta_omega": float(tv_now["delta_omega_rad_s"]),
-                       "epsilon_sx": sim.effective_gate_epsilon(truth, 0, 0.0)}
+                       "epsilon_sx": runner.rb_gate_error(truth, 0.0)}
         canary = {"T1_s": float(result.T1_s),
                   "T2_s": float(result.T2_s),
                   "delta_omega": float(result.delta_omega),

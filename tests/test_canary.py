@@ -35,10 +35,15 @@ def _assert_exact_inversion(prof, truth):
     constants = prof.constants
     _, meta = inv.build_probe_circuits(prof)
     a, b, shots = constants["p0_given_1"], constants["p1_given_0"], 10 ** 8
-    z = inv._gate_z_star(truth["eps"], truth["T1"], truth["T2"], constants["gate_time_ns"] * 1e-9)
+    gate = []
+    for m, k in zip(meta["rb_lengths"], meta["rb_sequences"]):
+        keep = 0.5 + 0.5 * (1 - 2 * inv.RB_PULSES_PER_CLIFFORD * truth["eps"]) ** m
+        for j in range(k):
+            s0 = keep if j % 2 == 0 else 1 - keep
+            gate.append(1 - (s0 * (1 - b) + (1 - s0) * a))
     p1 = ([inv.forward_t1(d, truth["T1"], a, b) for d in meta["t1_delays_s"]]
           + [p for d in meta["ramsey_delays_s"] for p in inv.forward_ramsey_xy(d, truth["T2s"], truth["dw"], a, b)]
-          + [1 - inv.forward_gate_affine(np.array([n]), truth["eps"], z, a, b)[0] for n in meta["gate_rep_N"]]
+          + gate
           + [inv.forward_echo(d, truth["T2"], a, b) for d in meta["echo_delays_s"]])
     counts = [{"1": round(p * shots), "0": shots - round(p * shots)} for p in p1]
     with contextlib.redirect_stdout(io.StringIO()):
@@ -118,8 +123,8 @@ def test_frozen_engine_files_unchanged():
     import hashlib
     import pathlib
     src = pathlib.Path(canary.__file__).parent
-    expected = {"inversion.py": "88798959d97358169c659de5aeae5699d167c786800bd9da814cae0cc90f5d51",
-                "simulation.py": "0d1c216345eb31e3c4d61810234a9fbd9e4f0eacb9c1111f6628556987f6e5f8"}
+    expected = {"inversion.py": "202c814b2a000943904452a311147b675c95ecffce4f4600865c011bb9c207d1",
+                "simulation.py": "fb6b0588d1e5e980d0f5f83d9b55138ed562ec83462dca2d24c240c1f1cd89e2"}
     for name, digest in expected.items():
         data = (src / name).read_bytes().replace(b"\r\n", b"\n")
         assert hashlib.sha256(data).hexdigest() == digest, \
@@ -156,23 +161,23 @@ def test_raw_counts_saved_and_loaded(tmp_path):
 
 def _ion_report(eps, sigmas, chi2s):
     results = [ionq.IonResult(ion=q, epsilon_sx=e, epsilon_sx_sigma=s, chi2_dof=c, chi2_p=0.5,
-                              gate_rep_n=[312, 625, 1250], p0=[0.9, 0.8, 0.7], shots=[500] * 3)
+                              rb_lengths=[94, 750, 1500], p0=[0.9] * 60, shots=[24] * 60)
                for q, e, s, c in zip([0, 3, 6], eps, sigmas, chi2s)]
-    raw = [{"job_id": f"j{q}", "batch": [q], "N": n, "counts": {"0": 400, "1": 100}, "probabilities": None}
-           for q in (0, 3, 6) for n in (312, 625, 1250)]
-    return ionq.IonQReport(backend="ionq_qpu.forte-1", ions=[0, 3, 6], shots=500,
-                           gate_rep_n=[312, 625, 1250], eps_prior=2e-4, spam=(0.006, 0.004),
+    raw = [{"job_id": f"j{q}", "batch": [q], "circuit": k, "counts": {"0": 20, "1": 4}, "probabilities": None}
+           for q in (0, 3, 6) for k in range(60)]
+    return ionq.IonQReport(backend="ionq_qpu.forte-1", ions=[0, 3, 6], shots=24,
+                           rb_lengths=[94, 750, 1500], eps_prior=2e-4, spam=(0.006, 0.004),
                            batches=[[0], [3], [6]], job_ids=["j0", "j3", "j6"],
-                           ionq_estimates=[None] * 3, results=results, raw=raw)
+                           ionq_estimates=[None] * 3, results=results, raw=raw, rb_seed=1)
 
 
 def test_ionq_works_like_ibm(tmp_path):
     before = canary.Report(ionq.to_canary_report(
-        _ion_report([2e-4, 3e-4, 2e-4], [1e-5, 1e-5, float("inf")], [1.0, 6.0, 1.0])))
+        _ion_report([2e-4, 3e-4, 2e-4], [1e-5, 1e-5, float("inf")], [1.0, 8.0, 1.0])))
     assert [q.health for q in before] == ["GREEN", "YELLOW", "RED"]
     assert before[6].health_reason == "gate fit failed" and np.isnan(before[6].eps)
     assert before[3].fit and np.isnan(before[0].t1) and before[0].dd_advice == []
-    assert before.raw.shots_per_qubit == 1500 and len(before.raw.block_counts[0]) == 3
+    assert before.raw.shots_per_qubit == 1440 and len(before.raw.block_counts[0]) == 60
     assert "trapped ions" in before.render() and "n/a" in before.render()
     path = tmp_path / "ions.json"
     before.save(path)

@@ -9,9 +9,10 @@ Qubit health checks for IBM superconducting hardware, and gate-error checks for 
 4. **After**: check again and compare. If a qubit changed, results that
    depend on it may not hold.
 
-Each check is its own short job: 17 circuits per qubit (8,700 shots) that
+Each check is its own short job: 74 circuits per qubit (8,640 shots) that
 measure T1, T2 (echo), T2\* (Ramsey), the qubit's frequency offset Δω and
-its single-qubit gate error, with error bars and a check that the fits can be
+its single-qubit gate error (randomized benchmarking: 60 random Clifford
+sequences, error per pulse), with error bars and a check that the fits can be
 trusted. Qubits are probed in at most two parallel groups, never two
 neighbours in the same circuit, so checking more qubits costs little extra
 QPU time.

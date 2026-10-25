@@ -15,10 +15,10 @@ its settings picked from the same prior. Each tool is scored against the
 truth averaged over its own run.
 
 Truth definitions: T2 is the echo T2, delta_omega is signed, and epsilon is
-the average gate infidelity of the simulated sx, 1 - F_avg, the quantity
-randomized benchmarking estimates and IBM and IonQ report. Canary's
-inverse-pair probe does not see coherent errors, so its epsilon reads low by
-the coherent share. Read R2 next to R2_prior, beats_prior and the |z|
+the error per pulse that randomized benchmarking measures on the simulated
+qubit (runner.rb_gate_error: the exact decay of the 24 compiled Cliffords,
+with the sx and x pulses as simulated), the quantity both Canary's gate probe
+and StandardRB estimate. Read R2 next to R2_prior, beats_prior and the |z|
 coverage. Output is one CSV with both tools side by side.
 """
 
@@ -44,16 +44,16 @@ if REPO_SRC.is_dir():
 from quantum_canary import inversion as inv
 from quantum_canary import simulation as sim
 from quantum_canary import api, runner
-from quantum_canary.runner import average_gate_infidelity as _avg_gate_infidelity
+from quantum_canary.runner import rb_gate_error as _rb_gate_error
 
 REGIME = "nisq"
 T_CALIB_S = 0.0
 T_MEASURE_S = 3600.0
-SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 600, 500, 500
+SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 600, 24, 500
 ARCHITECTURES = ("superconducting", "trapped_ion")
 ARCH_SEED_OFFSET = {"superconducting": 0, "trapped_ion": 100_000}
 PARAMETERS = ("T1_s", "T2_s", "delta_omega", "epsilon_sx")
-CIRCUIT_PREFIXES = ("t1_", "ramsey_X_", "ramsey_Y_", "gate_rep_N", "echo_")
+CIRCUIT_PREFIXES = ("t1_", "ramsey_X_", "ramsey_Y_", "rb_", "echo_")
 
 CSV_COLUMNS = [
     "architecture", "instance_id", "seed", "parameter",
@@ -120,7 +120,7 @@ DEFAULT_CFG: Dict[str, Any] = {
 }
 TRUTH_FAMILIES = {"T1_s": ("t1_",), "T2_s": ("ramsey_X_", "ramsey_Y_", "echo_"),
                   "delta_omega": ("ramsey_X_", "ramsey_Y_"),
-                  "epsilon_sx": ("gate_rep_N",)}
+                  "epsilon_sx": ("rb_",)}
 SPAM_CLIP_MAX = 0.499
 
 
@@ -268,7 +268,7 @@ def _time_resolved_truth(truth: Any, sim_result: Any):
                 continue
             for rec in recs:
                 if param == "epsilon_sx":
-                    vals.append(_avg_gate_infidelity(truth, rec["t_mid_s"]))
+                    vals.append(_rb_gate_error(truth, rec["t_mid_s"]))
                 else:
                     key = {"T1_s": "T1_s", "T2_s": "T2_s",
                            "delta_omega": "delta_omega_rad_s"}[param]
@@ -349,14 +349,14 @@ def _run_qiskit_experiments(truth: Any, prior: Any, seed: int, t_measure_s: floa
         idx = [i for i, f in enumerate(family) if f == fam]
         if not time_resolved:
             if param == "epsilon_sx":
-                return float(_avg_gate_infidelity(truth, t_measure_s))
+                return float(_rb_gate_error(truth, t_measure_s))
             key = {"T1_s": "T1_s", "T2_s": "T2_s", "delta_omega": "delta_omega_rad_s"}[param]
             return float(sim.evaluate_truth_at(truth, 0, t_measure_s)[key])
         vals, weights = [], []
         for i in idx:
             for rec in res.chunk_records[i]:
                 if param == "epsilon_sx":
-                    vals.append(_avg_gate_infidelity(truth, rec["t_mid_s"]))
+                    vals.append(_rb_gate_error(truth, rec["t_mid_s"]))
                 else:
                     key = {"T1_s": "T1_s", "T2_s": "T2_s",
                            "delta_omega": "delta_omega_rad_s"}[param]
@@ -440,7 +440,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
                 custom_arch=constants,
                 prior_confidence="prior_informed")
 
-        circuits, meta = inv.build_probe_circuits(profile)
+        circuits, meta = inv.build_probe_circuits(profile, seed=int(seed))
         for qc in circuits:
             if not any(qc.name.startswith(p) for p in CIRCUIT_PREFIXES):
                 raise RuntimeError(f"unexpected circuit name {qc.name!r}")
@@ -473,7 +473,7 @@ def run_one_instance(architecture: str, instance_id: int, seed: int,
             true_values = {"T1_s": float(tv_now["T1_s"]),
                            "T2_s": float(tv_now["T2_s"]),
                            "delta_omega": float(tv_now["delta_omega_rad_s"]),
-                           "epsilon_sx": _avg_gate_infidelity(truth, t_measure_s)}
+                           "epsilon_sx": _rb_gate_error(truth, t_measure_s)}
             truth_spread = dict.fromkeys(PARAMETERS, 0.0)
             run_duration_s = sim.probe_run_duration_s(block_circuits, truth, block_shots,
                                                       t_s=t_measure_s, dt_ns=profile.dt_ns)

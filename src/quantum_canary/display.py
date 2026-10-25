@@ -282,13 +282,11 @@ def render_report(report, color: Optional[bool] = None) -> str:
     lines.append(_kv(s, "Probe", f"{report.circuits_per_qubit} circuits/qubit · "
                                  f"{report.shots_per_qubit:,} shots/qubit · {blocks}"))
     lines.append(_kv(s, "", s(f"per circuit: T1 {shots['t1']} · Ramsey {shots['ramsey']} · "
-                              f"gate-rep {shots['gate']} · echo {shots['echo']} shots", "dim")))
+                              f"gate (RB) {shots['gate']} · echo {shots['echo']} shots", "dim")))
     lines.append(_kv(s, "Time", when))
     if report.mode == "simulation":
-        eps_truth = ("ε = the engine's own ε" if report.regime == "ideal"
-                     else "ε = sx average gate infidelity")
         lines.append(_kv(s, "", s("True values are the simulator's hidden parameters "
-                                  f"(T2 = echo T2; {eps_truth}).", "dim")))
+                                  "(T2 = echo T2; ε = RB error per pulse).", "dim")))
     lines.append("")
     for q in report.qubits:
         lines.extend(_qubit_block(s, q, report.mode, report.regime))

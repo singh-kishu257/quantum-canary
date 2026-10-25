@@ -16,8 +16,9 @@
     canary.simulate(3)                           # no backend needed
     canary.check(ionq_backend, [0, 3])           # IonQ ions: gate error only
 
-On IBM each check runs 17 short probe circuits per qubit (8,700 shots) and recovers T1,
-T2 (echo), T2* (Ramsey), the frequency offset and the single-qubit gate error.
+On IBM each check runs 74 short probe circuits per qubit (8,640 shots) and recovers T1,
+T2 (echo), T2* (Ramsey), the frequency offset and the single-qubit gate error
+(randomized benchmarking, error per pulse).
 Qubits are probed in at most two parallel groups, never two neighbours at once.
 
 Advanced, in submodules: runner (run_ibm, run_simulation, CanaryReport),
@@ -44,22 +45,18 @@ from .api import Monitor, QubitResult, Report, check, compare, load, simulate
 from . import api, credentials
 from .inversion import (
     ARCH_DEFAULTS,
-    NATIVE_INVERSE_PAIRS,
     BackendProfile,
     CalibrationSource,
     InversionResult,
     build_probe_circuits,
     fetch_live_spam,
     forward_echo,
-    forward_gate,
-    forward_gate_affine,
     forward_ramsey_xy,
     forward_t1,
     get_live_profile,
     interleave_probe_blocks,
     lindblad_inversion,
     merge_block_counts,
-    register_native_pair,
     split_qubits_for_op_limit,
 )
 from .online import (

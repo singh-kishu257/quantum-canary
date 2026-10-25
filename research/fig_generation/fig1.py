@@ -207,9 +207,9 @@ step_box(X1[0], r0, X1[0] + w1[0], r1, 1, "Priors and design", F_YEL, [
     (None, r"Live $T_1$, $T_2$, $\varepsilon$, readout error (else defaults)"),
     ("star", "Delays where data are most informative"),
 ])
-step_box(X1[1], r0, X1[1] + w1[1], r1, 2, "17 probe circuits", F_LAV, [
+step_box(X1[1], r0, X1[1] + w1[1], r1, 2, "74 probe circuits", F_LAV, [
     (("sw", C_T1), "Relaxation \u00d73"), (("sw", C_RAM), "Ramsey X/Y \u00d78"),
-    (("sw", C_ECHO), "Hahn echo \u00d73"), (("sw", C_GATE), "Gate repetition \u00d73"),
+    (("sw", C_ECHO), "Hahn echo \u00d73"), (("sw", C_GATE), "Clifford RB \u00d760"),
 ])
 step_box(X1[2], r0, X1[2] + w1[2], r1, 3, "One short job", F_YEL, [
     ("star", "Parallel groups: shots scale with groups, not qubits"),
@@ -236,7 +236,7 @@ badge(x0 + 0.6, r1 - 0.6, 4)
 text((x0 + x1) / 2, r1 - 2.55, "Fit noise models", size=TITLE, weight="bold", ha="center", va="center_baseline")
 yb0 = r1 - 5.05 - 0.70 * BODY * PT
 fam = [("Relaxation", C_T1, "$T_1$"), ("Ramsey", C_RAM, r"$T_2^*,\ \Delta\omega$"),
-       ("Hahn echo", C_ECHO, "$T_2$"), ("Gate repetition", C_GATE, r"$\varepsilon$")]
+       ("Hahn echo", C_ECHO, "$T_2$"), ("Clifford RB", C_GATE, r"$\varepsilon$")]
 col_x = [x0 + 1.6]
 for c in (0, 1):
     names = [fam[2 * c][0], fam[2 * c + 1][0]]

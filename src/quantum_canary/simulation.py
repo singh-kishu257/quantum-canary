@@ -62,9 +62,8 @@ the MODEL_PROVENANCE keys named (see EVIDENCE CLASSES below).
           True); library default False, ON in 3_benchmark.py): the qubit's
           detuning keeps acting while a pulse is played, implemented as
           Rz(dw*t_g/2) G Rz(dw*t_g/2). No new parameter (dw and the gate
-          durations above). It does not cancel in the G*G^-1 pair of the
-          gate-repetition probe, so it tests that probe's claim to isolate
-          incoherent error.
+          durations above). Randomized benchmarking measures it as gate
+          error; the gate-error truth (runner.rb_gate_error) includes it.
     [ON]  literature detuning population (generate_device(dw_population=
           "literature"); library default "estimator_window", ON in
           3_benchmark.py): dw ~ U(-W, W) with W from measured frequency
@@ -137,7 +136,7 @@ truth would misrepresent a stress-test parameter as a measurement.
       "literature"), sc/ti.dw_population.literature_halfwidth_hz): Class C
       supports built on measured excursion bounds (Dhieb et al., Proctor et
       al.). Sweep it (overrides={"dw_halfwidth_hz": W}); detuning also
-      drives the gate-repetition bias when detuning_during_gates=True.
+      adds gate error when detuning_during_gates=True.
 
 -----------------------------------------------------------------------------
 EVIDENCE CLASSES (see MODEL_PROVENANCE)
@@ -445,19 +444,15 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
         "location": "n/a (engine-compatibility default)",
         "notes": ("Order-of-magnitude single-qubit (sx) duration for fixed-frequency "
                   "transmons, not a measured cloud-device value. Sets the "
-                  "gate-time decoherence that "
-                  "effective_gate_epsilon() folds into the epsilon truth. "
+                  "gate-time decoherence included in the gate-error truth "
+                  "(runner.rb_gate_error) and in sx_gate_infidelity(). "
                   "Intentionally equal to 1_inversion.py ARCH_DEFAULTS"
-                  "['superconducting']['gate_time_ns'] in simulation: the "
-                  "engine computes its gate-model z* from T1, T2 and "
-                  "gate_time_ns; on IBM hardware it reads the live sx "
-                  "gate_length instead. Live IBM snapshots show 24-32 ns sx "
+                  "['superconducting']['gate_time_ns'], which no engine fit "
+                  "uses (on IBM hardware the engine records the live sx "
+                  "gate_length instead). Live IBM snapshots show 24-32 ns sx "
                   "durations (qubit 0: ibm_fez 24 ns, ibm_torino 32 ns; "
                   "qiskit-ibm-runtime 0.50.0 fake-backend calibration "
-                  "snapshots), below this 50 ns. Sensitivity: a +/-30% error "
-                  "in the engine's gate time biases its eps by about +/-4% "
-                  "through z* (median over 50 simulated superconducting "
-                  "truths at infinite shots; worst +/-9.4%)."),
+                  "snapshots), below this 50 ns."),
         "class_c_rationale": ("Engine-compatibility default, not a measured "
                               "cloud-device sx duration (IBM snapshots show "
                               "24-32 ns), so 50 ns is an order-of-magnitude "
@@ -1250,12 +1245,10 @@ MODEL_PROVENANCE: Dict[str, Dict[str, Any]] = {
                    "110 us, which comprises nine pi/2 pulses according to the "
                    "SK1 dynamical correction sequence'",
         "notes": ("Replaces 135 us (engine default, uncited). Sets the gate-time "
-                  "decoherence folded into effective_gate_epsilon(). "
+                  "decoherence included in the gate-error truth "
+                  "(runner.rb_gate_error) and in sx_gate_infidelity(). "
                   "Intentionally equal to 1_inversion.py ARCH_DEFAULTS"
-                  "['trapped_ion']['gate_time_ns'] in simulation: the engine "
-                  "computes its gate-model z* from T1, T2 and gate_time_ns "
-                  "(on IBM hardware the engine reads the live sx gate_length "
-                  "instead; from_ionq_backend keeps this value)."),
+                  "['trapped_ion']['gate_time_ns'], which no engine fit uses."),
     },
     "ti.gate.error_range": {
         "value": (1e-4, 2e-3), "unit": "dimensionless (1_inversion epsilon convention)",
@@ -2013,9 +2006,9 @@ def generate_device(
         False. When True, the detuning (plus any quasi-static offset) also
         acts during every native pulse, as Rz(dw*t_g/2) G Rz(dw*t_g/2)
         (architecture_specific["detuning_during_gates"]). This is a
-        coherent error that does NOT cancel in the gate-repetition probe's
-        G*G^-1 pair; effective_gate_epsilon() deliberately excludes it, so a
-        benchmark measures how well the probe rejects it.
+        coherent error that randomized benchmarking measures as gate error:
+        the gate-error truth (runner.rb_gate_error) includes it, the
+        simulated calibration value (sx_gate_infidelity()) does not.
     """
     if architecture not in ARCHITECTURES:
         raise ValueError(f"Invalid architecture: {architecture!r}")
@@ -2420,7 +2413,7 @@ def generate_calibration_prior(
     # The prior must itself be physically admissible: a T2 prior above 2*T1
     # would seed 1_inversion.py with a delay grid its own hard bound rejects.
     T2_prior = float(min(tv["T2_s"] * rng.uniform(lo, hi), 2.0 * T1_prior))
-    eps_prior = float(np.clip(effective_gate_epsilon(truth, qubit, t0_s)
+    eps_prior = float(np.clip(sx_gate_infidelity(truth, qubit, t0_s)
                               * rng.uniform(lo, hi), 1e-9, 0.5))
 
     if not 0.0 <= spam_perturbation_frac < 1.0:
@@ -2538,16 +2531,17 @@ def build_noise_model(
 # charged s/sdg -- used by the Ramsey-Y probe -- a full gate of decoherence and
 # coherent kick). Injected Rz (detuning, crosstalk) and injected amplitude-error
 # unitaries are likewise noiseless: they represent physics already accounted
-# for, not additional gates. None of 1_inversion.py's probes contain an Rz.
+# for, not additional gates. 1_inversion.py's gate probe uses Rz only as
+# virtual frame changes.
 _NOISY_GATES: Tuple[str, ...] = ("sx", "sxdg", "x", "h", "id", "rx", "ry", "r",
                                  "u", "gpi", "gpi2")
 _AMPLITUDE_ERROR_GATES = frozenset(g for g in _NOISY_GATES if g != "id")
 
 
 def _depolarizing_from_eps(eps_value: float):
-    """Convert a gate error in 1_inversion.py's epsilon convention into
-    Qiskit's depolarizing-channel parameter. forward_gate() models per-gate
-    Bloch survival as (1 - 2*epsilon) while depolarizing_error(p, 1) gives
+    """Convert a gate error epsilon (per-gate Bloch survival 1 - 2*epsilon,
+    which for depolarizing noise is also its average gate infidelity) into
+    Qiskit's depolarizing-channel parameter. depolarizing_error(p, 1) gives
     survival (1 - p), so p = 2*epsilon, NOT epsilon."""
     from qiskit_aer.noise import depolarizing_error
     return depolarizing_error(float(np.clip(2.0 * eps_value, 0.0, 0.75)), 1)
@@ -2572,9 +2566,9 @@ def _gate_noise_channel(truth: DeviceTruth, qubit: int, t_s: float = 0.0):
     thermal relaxation over the gate duration composed with depolarizing
     error for the stochastic part of the sampled budget,
     eps*(1 - coherent_fraction) (+ opt-in trapped-ion heating term). Returns
-    (QuantumError, amplitude_error_frac). Shared by build_noise_model() and
-    effective_gate_epsilon(), so the truth is computed from exactly the
-    channel the simulator applies."""
+    (QuantumError, amplitude_error_frac). Shared by build_noise_model(),
+    sx_gate_infidelity() and runner.rb_gate_error(), so the truth is computed
+    from exactly the channel the simulator applies."""
     from qiskit_aer.noise import thermal_relaxation_error
     tv = evaluate_truth_at(truth, qubit, t_s)
     T1, T2_eff, eps = tv["T1_s"], min(tv["T2_s"], 2.0 * tv["T1_s"]), tv["epsilon_gate"]
@@ -2623,8 +2617,8 @@ def _inject_amplitude_errors(circuit, truth: DeviceTruth, t_s: float = 0.0):
     """Return a copy of `circuit` with G^f appended after every native
     single-qubit rotation G, f = _amplitude_error_frac(). Because the error
     follows the sign of the rotation (as a miscalibrated drive amplitude
-    does), G(theta)*G(-theta) cancels exactly, as the gate-repetition probe's
-    G*G^-1 design assumes; errors between non-inverse gates still accumulate.
+    does), G(theta)*G(-theta) cancels exactly; errors between non-inverse
+    gates accumulate.
     "h" is not a native pulse: it receives _h_amplitude_error(f), the error of
     its single pi/2 pulse, instead of H^f. ("x" keeps X^f: X^f*X equals the
     two-sx execution (SX^f*SX)^2 up to a global phase.)
@@ -2646,61 +2640,22 @@ def _inject_amplitude_errors(circuit, truth: DeviceTruth, t_s: float = 0.0):
     return new_qc
 
 
-def _native_inverse_pair(architecture: str):
-    """The native (G, G^-1) pair 1_inversion.py's gate-repetition probe uses."""
-    if architecture == "trapped_ion":
-        try:
-            from qiskit_ionq.ionq_gates import GPI2Gate
-            return GPI2Gate(0.0), GPI2Gate(0.5)
-        except ImportError:
-            from qiskit.circuit.library import RGate
-            return RGate(np.pi / 2, 0.0), RGate(np.pi / 2, np.pi)
-    from qiskit.circuit.library import SXGate, SXdgGate
-    return SXGate(), SXdgGate()
-
-
-def effective_gate_epsilon(truth: DeviceTruth, qubit: int = 0, t_s: float = 0.0) -> float:
-    """Per-gate error of qubit `qubit` in 1_inversion.py's epsilon convention,
-    computed exactly from the channel the simulator applies.
-
-    The native pair G, noise, G^f, G^-1, noise, (G^-1)^f is composed as a
-    superoperator; its Pauli-transfer-matrix element R_zz is the per-pair
-    survival of the Z Bloch component, and (1 - 2*eps)^2 = R_zz defines eps.
-    R_zz is exactly the rate parameter of the affine gate-repetition model
-    the engine fits (1_inversion.forward_gate_affine, z -> R_zz*z + R_z0);
-    the non-unital offset R_z0 (amplitude damping toward |0> during the
-    gates) enters through that model's asymptote z*, which the engine
-    computes from its T1/T2 estimates and the gate time (same channel
-    form: relaxation over t_g then depolarizing). This is the
-    quantity the gate-repetition probe measures: it INCLUDES decoherence
-    during the gate (the coherence-limited error of McKay et al.,
-    arXiv:2311.05933, Eq. B2) and any coherent residual that survives the
-    pair. It is not identical to a randomized-benchmarking average gate
-    infidelity, which differs from it by (t_g/12)*(1/T2 - 1/T1) (to first
-    order in t_g/T1, t_g/T2) plus any coherent residual. DeviceTruth.epsilon_gate is only the sampled
-    depolarizing budget; comparing a recovered epsilon against it omits the
-    gate-time T1/T2 contribution (~1e-4 for a 50 ns gate on a ~100 us
-    transmon) and biases every epsilon benchmark high.
-
-    Detuning (static dw, drift and the quasi-static offset) is EXCLUDED by
-    construction: it is a coherent frame error, not the incoherent per-gate
-    error the engine's epsilon claims to be. With
-    generate_device(detuning_during_gates=True) the simulated gate-repetition
-    probe therefore also carries a detuning-induced rotation that this truth
-    does not contain, and any resulting epsilon bias is scored as error."""
-    from qiskit.quantum_info import Operator, PTM, SuperOp
+def sx_gate_infidelity(truth: DeviceTruth, qubit: int = 0, t_s: float = 0.0) -> float:
+    """1 - F_avg of one sx pulse on `qubit` as the simulator plays it: the
+    pulse, the incoherent gate error after it and the amplitude over-rotation
+    (G^f), from exactly the channel the simulator applies. Detuning is
+    excluded: it is a frame error, not part of the gate error a provider
+    calibrates. This is the simulated calibration value
+    (generate_calibration_prior), which sets the gate probe's lengths; the
+    gate-error truth is runner.rb_gate_error()."""
+    from qiskit.circuit.library import SXGate
+    from qiskit.quantum_info import Operator, SuperOp, average_gate_fidelity
     err, f = _gate_noise_channel(truth, qubit, t_s)
-    noise = SuperOp(err)
-
-    def _step(op):
-        ch = SuperOp(Operator(op)).compose(noise)
-        if f > 0.0:
-            ch = ch.compose(SuperOp(Operator(op).power(f)))
-        return ch
-
-    g, g_inv = _native_inverse_pair(truth.architecture)
-    r_zz = float(np.real(PTM(_step(g).compose(_step(g_inv))).data[3, 3]))
-    return float(0.5 * (1.0 - np.sqrt(max(r_zz, 0.0))))
+    g = Operator(SXGate())
+    channel = SuperOp(g).compose(SuperOp(err))
+    if f > 0.0:
+        channel = channel.compose(SuperOp(g.power(f)))
+    return float(1.0 - average_gate_fidelity(channel, target=g))
 
 
 def _rotation_unitary(axis: str, angle_rad: float) -> np.ndarray:
@@ -2986,8 +2941,9 @@ def simulate_circuit(
         delay is followed by a pulse on that qubit (_phase_reaches_
         measurement: Ramsey, echo). In T1-type circuits the offset provably
         has no effect and is not sampled. LIMITATION: in delay-free gate
-        trains (the gate-repetition probe) only the static dw acts during
-        the pulses; per-shot sampling there costs ~60 ms per shot and a
+        trains (the gate probe's randomized-benchmarking sequences) only the
+        static dw acts during the pulses; per-shot sampling there costs
+        ~60 ms per shot and a
         fixed quadrature misrepresents the long-time average, so the
         offset's dephasing of the detuning-induced rotation is omitted.
     """
@@ -3303,7 +3259,7 @@ __all__ = [
     "ArchitectureProfile", "DriftProcess", "CrosstalkMechanism", "DeviceTruth",
     "CalibrationPrior", "SimulationResult", "SimulationManifest",
     "get_architecture_profile", "generate_device", "evaluate_truth_at",
-    "generate_calibration_prior", "effective_gate_epsilon",
+    "generate_calibration_prior", "sx_gate_infidelity",
     "build_noise_model",
     "simulate_circuit", "simulate_probe", "probe_run_duration_s", "make_manifest",
     "sample_trajectory", "evaluate_at", "evaluate_deviation_at",
@@ -3565,27 +3521,27 @@ def _run_validation_tests() -> None:
     except ImportError:
         print("[SKIP] detuning regression (qiskit-aer not installed)")
 
-    # F. Regression test: the trapped-ion gate-repetition probe built via the
-    # REAL GPI2 native pair (1_inversion.py's _default_trapped_ion_pair emits
-    # "gpi"/"gpi2" instructions whenever qiskit_ionq is installed) must show
-    # genuine epsilon-dependent decay. Before item E added "gpi"/"gpi2" to
-    # build_noise_model's default gate_names, these instructions carried zero
-    # simulated error and P(0) stayed flat regardless of N.
+    # F. Regression test: the trapped-ion gate probe (1_inversion.py's
+    # _build_rb_circuit emits "gpi"/"gpi2" instructions whenever qiskit_ionq
+    # is installed) must show genuine epsilon-dependent decay. Before item E
+    # added "gpi"/"gpi2" to build_noise_model's default gate_names, these
+    # instructions carried zero simulated error and P(0) stayed flat.
     try:
         from . import inversion as _inv  # package build: packaged 1_inversion.py
 
         truth_ti = generate_device("trapped_ion", 1, seed=11, regime="ideal",
                                    overrides={"eps_range": (0.01, 0.01)})
-        qc_lo = _inv._build_gate_rep_circuit(5, architecture="trapped_ion")
-        qc_hi = _inv._build_gate_rep_circuit(100, architecture="trapped_ion")
-        uses_gpi2 = any(inst.operation.name in ("gpi", "gpi2") for inst in qc_lo.data)
+        rng_f = np.random.default_rng(11)
+        qc_lo = _inv._build_rb_circuit(5, 0, "trapped_ion", rng_f, "rb_lo")
+        qc_hi = _inv._build_rb_circuit(100, 0, "trapped_ion", rng_f, "rb_hi")
+        uses_gpi2 = any(inst.operation.name in ("gpi", "gpi2") for inst in qc_lo.data + qc_hi.data)
         p0_lo = simulate_circuit(qc_lo, truth_ti, shots=4000, t_s=0.0).get("0", 0) / 4000
         p0_hi = simulate_circuit(qc_hi, truth_ti, shots=4000, t_s=0.0).get("0", 0) / 4000
-        check("F. trapped-ion gate-repetition (gpi2 native pair) shows real eps-dependent decay",
+        check("F. trapped-ion gate probe (gpi/gpi2 native) shows real eps-dependent decay",
               uses_gpi2 and p0_lo > 0.8 and p0_hi < 0.65,
-              f"uses_gpi2={uses_gpi2} p0(N=5)={p0_lo:.3f} p0(N=100)={p0_hi:.3f}")
+              f"uses_gpi2={uses_gpi2} p0(m=5)={p0_lo:.3f} p0(m=100)={p0_hi:.3f}")
     except ImportError:
-        print("[SKIP] F. trapped-ion gpi2 gate-repetition decay (qiskit-aer/qiskit_ionq not installed)")
+        print("[SKIP] F. trapped-ion gpi/gpi2 gate-probe decay (qiskit-aer/qiskit_ionq not installed)")
 
     # G. Crosstalk is a per-pair distribution, not one worst-case constant,
     # AND its magnitude agrees with an independent measurement of the same
@@ -3844,11 +3800,21 @@ def _run_validation_tests() -> None:
             t_.spam_p1_given_0[:] = 0.0
             return t_
 
+        def _pair(arch_):
+            """A native rotation G and its inverse G^-1 (sx/sxdg; GPI2(0)/GPI2(0.5))."""
+            if arch_ == "trapped_ion":
+                try:
+                    from qiskit_ionq.ionq_gates import GPI2Gate
+                    return GPI2Gate(0.0), GPI2Gate(0.5)
+                except ImportError:
+                    from qiskit.circuit.library import RGate
+                    return RGate(np.pi / 2, 0.0), RGate(np.pi / 2, np.pi)
+            from qiskit.circuit.library import SXGate, SXdgGate
+            return SXGate(), SXdgGate()
+
         # Q. The drive-amplitude error follows the rotation sign: it cancels in
-        # the G*G^-1 pair the gate-repetition probe is built from, but
-        # accumulates between two identical gates. The previous fixed-sign
-        # Rx(+theta) accumulated in both, driving the trapped-ion probe's
-        # chi2/dof to 100-250.
+        # a G*G^-1 pair but accumulates between two identical gates. The
+        # previous fixed-sign Rx(+theta) accumulated in both.
         q_ok, q_detail = True, []
         for arch_k in ARCHITECTURES:
             base = generate_device(arch_k, 1, seed=3, regime="nisq",
@@ -3858,7 +3824,7 @@ def _run_validation_tests() -> None:
             base.gate_duration_ns = 0.0
             base.architecture_specific["coherent_fraction"] = 0.5
             stoch_k = 2e-3 * 0.5
-            g, g_inv = _native_inverse_pair(arch_k)
+            g, g_inv = _pair(arch_k)
             n_rep = 60
             qc_pair = QuantumCircuit(1, 1)
             qc_same = QuantumCircuit(1, 1)
@@ -3873,50 +3839,63 @@ def _run_validation_tests() -> None:
             q_detail.append(f"{arch_k[:2]}: |P0 - depol-only| pair={d_pair:.3f} same-sign={d_same:.3f}")
         check("Q. amplitude error cancels in G*G^-1 and accumulates in G*G", q_ok, "  ".join(q_detail))
 
-        # R. effective_gate_epsilon() is computed from the same channel Aer
-        # applies. R1: the exact pair channel, iterated N times, reproduces the
-        # simulated gate-repetition P0 (this caught injected coherent-error
-        # unitaries being transpiled into noisy "u" gates). R2: in the
-        # trapped-ion case, where T1 recovery toward |0> is negligible, the
-        # engine's own forward_gate() with eps = effective_gate_epsilon
-        # matches the simulation, while the sampled depolarizing budget alone
-        # does not. (For transmons, amplitude damping toward |0> over ~50 us
-        # of gates adds an offset forward_gate() does not model; the engine's
-        # affine model forward_gate_affine() computes z* from T1, T2 and the
-        # gate time, so R2 is asserted only for the trapped ion, reported otherwise.)
+        # R. The gate-error truth (runner.rb_gate_error) is computed from the
+        # channel Aer applies. R1: that channel, applied gate by gate to one
+        # randomized-benchmarking circuit of the engine (_build_rb_circuit),
+        # reproduces the simulated P(0) of that circuit (this kind of check
+        # caught injected coherent-error unitaries being transpiled into noisy
+        # "u" gates). R2: the error per pulse from the exact survival averaged
+        # over 100 sequences per end state, at m/16 and m Cliffords, matches
+        # rb_gate_error.
         from qiskit.quantum_info import Operator, PTM, SuperOp
+        from . import inversion as _inv_r, runner as _runner_r
         r1_ok, r2_ok, r_detail = True, True, []
         for arch_k, t2_k in (("superconducting", 60e-6), ("trapped_ion", 0.2)):
             for regime_k in ("ideal", "nisq"):
                 t_k = _zero_spam(generate_device(
                     arch_k, 1, seed=8, regime=regime_k,
                     overrides={"eps_range": (2e-4, 2e-4), "T_phi_range_s": (t2_k, t2_k)}))
-                e_eff = effective_gate_epsilon(t_k, 0, 0.0)
-                g, g_inv = _native_inverse_pair(arch_k)
-                n_rep = int(round(0.25 / e_eff))
-                qc_r = QuantumCircuit(1, 1)
-                for _ in range(n_rep):
-                    qc_r.append(g, [0]); qc_r.append(g_inv, [0])
-                qc_r.measure(0, 0)
-                p_sim = _p0(qc_r, t_k, 40_000)
                 err_k, f_k = _gate_noise_channel(t_k, 0, 0.0)
+                e_rb = _runner_r.rb_gate_error(t_k, 0.0)
+                m_k = int(round(0.3 / e_rb))
+                cache_k = {}
 
-                def _stp(op):
-                    ch = SuperOp(Operator(op)).compose(SuperOp(err_k))
-                    return ch.compose(SuperOp(Operator(op).power(f_k))) if f_k > 0 else ch
-                ptm_pair = np.real(PTM(_stp(g).compose(_stp(g_inv))).data)
-                r_vec = np.linalg.matrix_power(ptm_pair, n_rep) @ np.array([1.0, 0.0, 0.0, 1.0])
-                p_chan = 0.5 * (1.0 + r_vec[3])
-                p_eff = 0.5 * (1 + (1 - 2 * e_eff) ** (2 * n_rep))
-                p_dep = 0.5 * (1 + (1 - 2 * float(t_k.epsilon_gate[0])) ** (2 * n_rep))
+                def _gate_ptm(op):
+                    key = (op.name, tuple(round(float(x) % (2 * np.pi), 9) for x in op.params))
+                    if key not in cache_k:
+                        ch = SuperOp(Operator(op))
+                        if op.name in _NOISY_GATES:
+                            ch = ch.compose(SuperOp(err_k))
+                            if f_k > 0:
+                                ch = ch.compose(SuperOp(Operator(op).power(f_k)))
+                        cache_k[key] = np.real(PTM(ch).data)
+                    return cache_k[key]
+
+                def _exact_p0(qc_):
+                    v = np.array([1.0, 0.0, 0.0, 1.0])
+                    for inst in qc_.data:
+                        if inst.operation.name != "measure":
+                            v = _gate_ptm(inst.operation) @ v
+                    return 0.5 * (1.0 + v[3])
+
+                rng_r = np.random.default_rng(8)
+                qc_r = _inv_r._build_rb_circuit(m_k, 0, arch_k, rng_r, "rb_r1")
+                p_sim = _p0(qc_r, t_k, 40_000)
+                p_chan = _exact_p0(qc_r)
                 r1_ok &= abs(p_sim - p_chan) < 0.012
-                if arch_k == "trapped_ion":
-                    r2_ok &= abs(p_sim - p_eff) < 0.012 and abs(p_sim - p_dep) > 0.03
+                d_k = []
+                for m_r in (max(1, m_k // 16), m_k):
+                    p_end = [[_exact_p0(_inv_r._build_rb_circuit(m_r, e, arch_k, rng_r, "rb_r2"))
+                              for _ in range(100)] for e in (0, 1)]
+                    d_k.append(np.mean(p_end[0]) - np.mean(p_end[1]))
+                m_lo = max(1, m_k // 16)
+                e_hat = (1 - (d_k[1] / d_k[0]) ** (1.0 / (m_k - m_lo))) / (2 * _inv_r.RB_PULSES_PER_CLIFFORD)
+                r2_ok &= abs(e_hat / e_rb - 1) < 0.05
                 r_detail.append(f"{arch_k[:2]}/{regime_k}: sim={p_sim:.3f} channel={p_chan:.3f} "
-                                f"fwd(eff)={p_eff:.3f} fwd(depol-only)={p_dep:.3f}")
-        check("R1. the exact gate channel reproduces the simulated gate-repetition decay",
+                                f"eps exact-average={e_hat:.3e} rb_gate_error={e_rb:.3e}")
+        check("R1. the exact gate channel reproduces the simulated gate-probe circuit",
               r1_ok, "  ".join(r_detail))
-        check("R2. forward_gate with effective_gate_epsilon matches simulation (trapped ion)",
+        check("R2. rb_gate_error matches the exact sequence-averaged decay",
               r2_ok, "  ".join(r_detail))
     except ImportError:
         print("[SKIP] Q/R gate-error physics (qiskit-aer not installed)")
@@ -3983,12 +3962,11 @@ def _run_validation_tests() -> None:
                        quasi_static_dephasing=True).architecture_specific),
               f"max|1/e condition - 1| = {np.max(np.abs(e_q2 - 1.0)):.2e}")
 
-        # U. Detuning during pulses: the gate-repetition circuit follows the
+        # U. Detuning during pulses: a train of G*G^-1 pairs follows the
         # exact product of Rz(a) G Rz(a) Rz(a) G^-1 Rz(a) (no other noise),
         # and is untouched with the option off.
-        from . import inversion as _inv3  # package build: packaged 1_inversion.py
         from qiskit.quantum_info import Operator as _Op
-        u_ok, tw_ok, u_detail = True, True, []
+        u_ok, u_detail = True, []
         for arch_k, dw_k in (("superconducting", 2 * np.pi * 5e3), ("trapped_ion", 2 * np.pi * 0.5)):
             t_u = generate_device(arch_k, 1, seed=4, regime="nisq", detuning_during_gates=True,
                                   overrides={"T1_range_s": (1e3, 1e3), "T_phi_range_s": (1e3, 1e3),
@@ -4000,29 +3978,22 @@ def _run_validation_tests() -> None:
             t_u.delta_omega_rad_s[:] = dw_k
             a_k = dw_k * t_u.gate_duration_ns * 1e-9 / 2
             rz_k = np.diag([np.exp(-1j * a_k / 2), np.exp(1j * a_k / 2)])
-            g_k, gi_k = _native_inverse_pair(arch_k)
+            g_k, gi_k = _pair(arch_k)
             u_pair = rz_k @ _Op(gi_k).data @ rz_k @ rz_k @ _Op(g_k).data @ rz_k
             n_u = 400
             psi = np.linalg.matrix_power(u_pair, n_u) @ np.array([1.0, 0.0])
-            # Untwirled train: this test checks the simulator's pulse physics
-            # against the exact product of identical pairs.
-            qc_u = _inv3._build_gate_rep_circuit(n_u, arch_k, twirl=False)
-            qc_tw = _inv3._build_gate_rep_circuit(n_u, arch_k, twirl=True)
+            qc_u = QuantumCircuit(1, 1)
+            for _ in range(n_u):
+                qc_u.append(g_k, [0]); qc_u.barrier(0); qc_u.append(gi_k, [0]); qc_u.barrier(0)
+            qc_u.measure(0, 0)
             p_on = simulate_circuit(qc_u, t_u, shots=20_000, seed=5).get("0", 0) / 20_000
-            p_tw = simulate_circuit(qc_tw, t_u, shots=20_000, seed=5).get("0", 0) / 20_000
             t_u.architecture_specific["detuning_during_gates"] = False
             p_off = simulate_circuit(qc_u, t_u, shots=20_000, seed=5).get("0", 0) / 20_000
             u_ok &= abs(p_on - abs(psi[0]) ** 2) < 0.012 and p_off > 0.99
-            # U2: the virtual-Z frame twirl of 1_inversion's gate probe turns
-            # the coherent detuning build-up into a random walk, so the
-            # twirled train stays within shot noise of the detuning-free one.
-            tw_ok &= abs(p_tw - p_off) < 0.01
             u_detail.append(f"{arch_k[:2]}: P0 on={p_on:.4f} exact={abs(psi[0]) ** 2:.4f} "
-                            f"off={p_off:.4f} twirled_on={p_tw:.4f}")
+                            f"off={p_off:.4f}")
         check("U. detuning during pulses matches the exact pair unitary; off changes nothing",
               u_ok, "  ".join(u_detail))
-        check("U2. frame-twirled gate train is insensitive to detuning during pulses",
-              tw_ok, "  ".join(u_detail))
     except ImportError:
         print("[SKIP] T/U quasi-static and gate-detuning physics (qiskit-aer not installed)")
 
@@ -4084,10 +4055,10 @@ def _run_validation_tests() -> None:
         profile = inv.BackendProfile.from_architecture("superconducting")
         circuits, meta = inv.build_probe_circuits(profile)
         result = simulate_probe(circuits, truth_e2e, shots=[300]*meta["n_t1"] + [600]*meta["n_ramsey"]
-                                + [500]*meta["n_gate"] + [500]*meta["n_echo"], t_s=0.0)
+                                + [24]*meta["n_gate"] + [500]*meta["n_echo"], t_s=0.0)
         inv_result = inv.lindblad_inversion(
             result.counts_list, meta, profile,
-            shots_t1=300, shots_ramsey=600, shots_gate=500, shots_echo=500)
+            shots_t1=300, shots_ramsey=600, shots_gate=24, shots_echo=500)
         rel_T1_err = abs(inv_result.T1_s - truth_e2e.T1_s[0]) / truth_e2e.T1_s[0]
         check("end-to-end: DeviceTruth -> simulate_probe -> frozen lindblad_inversion recovers T1",
               rel_T1_err < 0.5, f"true={truth_e2e.T1_s[0]*1e6:.1f}us recovered={inv_result.T1_s*1e6:.1f}us")

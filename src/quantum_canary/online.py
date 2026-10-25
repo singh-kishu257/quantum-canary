@@ -79,19 +79,19 @@ _PROBE_DOF = {
     # Ramsey: delta_omega is a weighted least-squares fit of the unwrapped
     # phases and T2 a fit with delta_omega held fixed, both on these points.
     "ramsey": 6,  # 4 delays (short + 3 T2-scale) x (X, Y) = 8 points, 2 params (T2, delta_omega)
-    # 3 repetition counts, 1 param (epsilon_sx); the asymptote z* is
-    # computed from T1, T2 and the gate time, not fitted.
-    "gate":   2,
+    # 3 RB lengths, 2 params (amplitude, epsilon_sx).
+    "gate":   1,
     "echo":   2,  # 3 delays, 1 param (T2_echo)
 }
 # Nominal family-wise false-YELLOW rate for one qubit-round, Bonferroni-split
 # over the len(_PROBE_DOF) probes. False rates measured on correctly
 # specified ideal data at 8,700 shots (2026-10-15, 300 qubits per
-# architecture): per probe over its limit, t1 1.0%/0.3%,
-# Ramsey 1.3%/1.0%, gate 2.3%/1.0%, echo 0.3%/0.7% (SC/TI), all within
-# their 95% intervals of 1.25%. A whole qubit is non-GREEN 9.0% SC / 7.3%
-# TI of the time: 5.0% / 3.0% from a fit over its limit and 4.3% / 4.3%
-# from the T2*/T2 rule, which estimation noise alone trips.
+# architecture, with the former gate-repetition gate probe): per probe over
+# its limit, t1 1.0%/0.3%, Ramsey 1.3%/1.0%, echo 0.3%/0.7% (SC/TI), all
+# within their 95% intervals of 1.25%. A whole qubit was non-GREEN 9.0% SC /
+# 7.3% TI of the time: 5.0% / 3.0% from a fit over its limit and 4.3% / 4.3%
+# from the T2*/T2 rule, which estimation noise alone trips. The
+# randomized-benchmarking gate probe's rate has not been measured this way.
 _HEALTH_FAMILY_ALPHA = 0.05
 
 
@@ -334,7 +334,7 @@ def parse_inline_results(job_results: list, round_map: list,
 def online_inversion(canary_counts: list, canary_metadata: dict,
                      profiles: dict, round_index: int = 0,
                      shots_t1: int = 300, shots_ramsey: int = 600,
-                     shots_gate: int = 500, shots_echo: int = 500
+                     shots_gate: int = 24, shots_echo: int = 500
                      ) -> OnlineInversionResult:
     """Run inversion.py's lindblad_inversion() for every monitored qubit
     from a single Canary round's flat counts list, producing one
@@ -389,7 +389,7 @@ class CanaryInterleaver:
 
     def __init__(self, qubit_ids: list, profiles: dict, interval_n: int = 10,
                  shots_t1: int = 300, shots_ramsey: int = 600,
-                 shots_gate: int = 500, shots_echo: int = 500,
+                 shots_gate: int = 24, shots_echo: int = 500,
                  # None: dof-specific per-probe chi2/dof thresholds at a
                  # nominal 5% family-wise level per qubit-round (see _PROBE_DOF and
                  # OnlineInversionResult.health_summary). A float applies
@@ -747,7 +747,7 @@ if __name__ == "__main__":
         return p*(1.0 - p0_given_1) + (1.0 - p)*p1_given_0
 
     def spam0(p0):
-        # P(read 0) from P(state 0) -- the mapping inv.forward_gate_affine uses.
+        # P(read 0) from P(state 0).
         return p0*(1.0 - p1_given_0) + (1.0 - p0)*p0_given_1
 
     def c1(rng_obj, p, sh):
@@ -758,7 +758,7 @@ if __name__ == "__main__":
         n0 = int(rng_obj.binomial(sh, float(np.clip(p, 0, 1))))
         return {"0": n0, "1": sh-n0}
 
-    SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 600, 500, 500
+    SHOTS_T1, SHOTS_RAMSEY, SHOTS_GATE, SHOTS_ECHO = 300, 600, 24, 500
 
     def simulate_qubit_counts(meta, rng_obj):
         return simulate_qubit_counts_with(meta, rng_obj, T1_TRUE, T2_TRUE, DW_TRUE, EPS_TRUE)
@@ -767,7 +767,6 @@ if __name__ == "__main__":
         t1_delays = meta["t1_delays_s"]
         ramsey_delays = meta["ramsey_delays_s"]
         echo_delays = meta["echo_delays_s"]
-        Nv = np.array(meta["gate_rep_N"], dtype=float)
 
         t1_counts = [c1(rng_obj, spam(float(inv.forward_t1(d, T1_true))), SHOTS_T1)
                      for d in t1_delays]
@@ -778,12 +777,14 @@ if __name__ == "__main__":
             ramsey_counts.append(c1(rng_obj, spam(px), SHOTS_RAMSEY))
             ramsey_counts.append(c1(rng_obj, spam(py), SHOTS_RAMSEY))
 
-        # Same gate model as the engine (_invert_gate): affine channel with
-        # z* from the true T1, T2 and the architecture gate time.
-        t_g = inv.ARCH_DEFAULTS["superconducting"]["gate_time_ns"] * 1e-9
-        z_star_true = inv._gate_z_star(eps_true, T1_true, T2_true, t_g)
-        p0_gate = inv.forward_gate_affine(Nv, eps_true, z_star_true)
-        gate_counts = [c0(rng_obj, spam0(p), SHOTS_GATE) for p in p0_gate]
+        # Same gate model as the engine (_invert_rb): every sequence of length
+        # m keeps 1/2 + 1/2*(1 - 2*RB_PULSES_PER_CLIFFORD*eps)**m of its end
+        # state (|0> for even-numbered sequences, |1> for odd ones).
+        gate_counts = []
+        for m, k in zip(meta["rb_lengths"], meta["rb_sequences"]):
+            keep = 0.5 + 0.5 * (1.0 - 2.0 * inv.RB_PULSES_PER_CLIFFORD * eps_true) ** m
+            gate_counts += [c0(rng_obj, spam0(keep if j % 2 == 0 else 1.0 - keep), SHOTS_GATE)
+                            for j in range(k)]
 
         T2_echo_true = min(T2_true, 2.0*T1_true)
         echo_counts = [c1(rng_obj, spam(float(inv.forward_echo(t, T2_echo_true))), SHOTS_ECHO)
@@ -837,7 +838,7 @@ if __name__ == "__main__":
             failures.append("export_csv() row count mismatch")
 
     # 9. health_summary() should be mostly GREEN on consistent synthetic data.
-    # Each probe fits only a few points (dof 2-4, see _PROBE_DOF), so
+    # Each probe fits only a few points (dof 1-6, see _PROBE_DOF), so
     # chi2/dof crossing its GREEN threshold (nominal 5% family-wise per qubit-round)
     # by pure sampling variance is still possible some of the time even
     # when the forward model matches the truth exactly — a single unlucky

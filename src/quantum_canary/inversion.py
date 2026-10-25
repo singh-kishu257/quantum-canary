@@ -1,6 +1,7 @@
 from __future__ import annotations
 import datetime
 import dataclasses
+import functools
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional
@@ -12,11 +13,10 @@ from scipy.optimize import curve_fit
 __all__ = [
     "ARCH_DEFAULTS", "BackendProfile",
     "CalibrationSource", "InversionResult", "forward_t1", "forward_ramsey_xy",
-    "forward_gate", "forward_gate_affine", "forward_echo",
+    "forward_echo",
     "build_probe_circuits", "lindblad_inversion",
     "get_live_profile", "fetch_live_spam",
-    "NATIVE_INVERSE_PAIRS", "register_native_pair",
-    "_sqrtx_native_inverse_pair", "_build_gate_rep_circuit",
+    "RB_PULSES_PER_CLIFFORD", "_build_rb_circuit",
     "split_qubits_for_op_limit",
     "interleave_probe_blocks", "merge_block_counts",
 ]
@@ -55,8 +55,8 @@ ARCH_DEFAULTS: dict[str, dict] = {
         # clipping biases a fit silently, so err wide). 
         "T1_min_s": 100e-9, "T1_max_s": 5e-3, "T2_min_s": 100e-9,              
         "eps_typical": 3.0e-4, "eps_max": 0.5,
-        # gate_time_ns is load-bearing: _invert_gate computes the gate model's z*
-        # from it and the fitted T1/T2 (from_ibm_backend uses the live sx duration).
+        # gate_time_ns is recorded with each report (from_ibm_backend uses the
+        # live sx duration); no fit uses it.
         "dt_ns": 0.2222, "gate_time_ns": 50.0,
         "p0_given_1": 0.030, "p1_given_0": 0.008,
         "display_unit": "µs", "time_scale": 1e6,
@@ -67,8 +67,7 @@ ARCH_DEFAULTS: dict[str, dict] = {
         # clipping biases a fit silently, so err wide). 
         "T1_min_s": 1e-3, "T1_max_s": 1e4, "T2_min_s": 1e-4,
         "eps_typical": 1.3e-4, "eps_max": 0.5,
-        # gate_time_ns is load-bearing: _invert_gate computes the gate model's z*
-        # from it and the fitted T1/T2.
+        # gate_time_ns is recorded with each report; no fit uses it.
         "dt_ns": None, "gate_time_ns": 110_000.0,
         # IonQ publishes ~0.5% combined SPAM [arXiv:2308.05071] for Forte,
         # split via _TI_SPAM_RATIO_P0_OVER_P1 (r = 1.453) at fixed 0.5% mean:
@@ -81,10 +80,10 @@ ARCH_DEFAULTS: dict[str, dict] = {
 ARCH_DEFAULTS["unknown"] = dict(ARCH_DEFAULTS["superconducting"])
 
 # Floor for a live provider eps reported as exactly 0 (IBM gate_error 0, IonQ
-# 1q fidelity 1.0), so gate_rep_n stays finite. Every eps <= 1.25e-4 gives the
-# same capped repetition grid N = [500, 1000, 2000], so the exact value does
-# not change the probe design; 1e-6 is below both ARCH_DEFAULTS eps_typical
-# values (1.3e-4, 3e-4). It also becomes the gate fit's fallback seed.
+# 1q fidelity 1.0), so rb_lengths stays finite. Every eps <= 6e-5 gives the
+# same capped lengths [312, 2500, 5000], so the exact value does not change
+# the probe design; 1e-6 is below both ARCH_DEFAULTS eps_typical values
+# (1.3e-4, 3e-4).
 _EPS_LIVE_FLOOR = 1e-6
 
 # Shortest Ramsey delay as a fraction of the first T2-scale delay
@@ -95,9 +94,18 @@ _EPS_LIVE_FLOOR = 1e-6
 # that sat at the edge of the previous 0.5*T2 window.
 _RAMSEY_SHORT_DELAY_FRAC = 0.2
 
-# Seed of the virtual-Z frame twirl in _build_gate_rep_circuit (per N, so a
-# probe's circuits are reproducible).
-_GATE_TWIRL_SEED = 20_261_001
+# Gate probe (randomized benchmarking): per length, _RB_SEQUENCES random
+# Clifford sequences, at fractions of the longest length 0.3/eps_typical
+# Cliffords (capped at 5000), where the decay (1 - 2*eps*20/24)**m has fallen
+# to ~e^-0.5.
+_RB_SEQUENCES = (10, 20, 30)
+_RB_FRACTIONS = (1 / 16, 1 / 2, 1)
+_RB_DECAY_EPS_CLIFFORDS = 0.3
+_RB_MAX_LENGTH = 5000
+# Pulses (sx or x) per Clifford of _rb_clifford_table, averaged over the 24:
+# eps = EPC / RB_PULSES_PER_CLIFFORD is the error per pulse, sx and x counted
+# alike.
+RB_PULSES_PER_CLIFFORD = 20 / 24
 
 
 def _require_pos_finite(name, v) -> float:
@@ -236,9 +244,9 @@ class BackendProfile:
     chance that at least one delay point lands where the signal has partially
     decayed, regardless of where the true timescale actually falls.
 
-    gate_rep_n: architecture-appropriate gate-repetition counts, computed from
-    eps_typical so the total depolarizing signal neither saturates nor stays
-    flat (see BackendProfile.gate_rep_n).
+    rb_lengths: the gate probe's three randomized-benchmarking sequence
+    lengths, computed from eps_typical so the decay neither saturates nor
+    stays flat (see BackendProfile.rb_lengths).
     """
     architecture: str
     T1_prior_s:   float
@@ -311,16 +319,14 @@ class BackendProfile:
         return 0.90 * np.pi / t1
 
     @property
-    def gate_rep_n(self) -> list[int]:
+    def rb_lengths(self) -> list[int]:
         eps    = self.constants["eps_typical"]
         eps_max = self.constants["eps_max"]
         if not (np.isfinite(eps) and 0 < eps <= eps_max):
             raise ValueError(f"eps_typical must be finite and in (0, eps_max={eps_max}], "
                              f"got {eps!r}")
-        n_max  = max(5, min(int(1.0 / (4.0 * eps)), 2000))
-        n_mid  = max(3, n_max // 2)
-        n_low  = max(1, n_max // 4)
-        return sorted(set([n_low, n_mid, n_max]))
+        m = min(_RB_MAX_LENGTH, max(16, round(_RB_DECAY_EPS_CLIFFORDS / eps)))
+        return [max(1, round(m * f)) for f in _RB_FRACTIONS]
 
     @classmethod
     def from_ibm_backend(cls, backend, qubit: int = 0) -> "BackendProfile":
@@ -399,7 +405,7 @@ class BackendProfile:
             custom_arch["p0_given_1"] = p0_given_1
             custom_arch["p1_given_0"] = p1_given_0
         if gate_time_ns_live is not None:
-            # live sx duration feeds the gate model's z* (_invert_gate)
+            # live sx duration, recorded with the report
             if custom_arch is None:
                 custom_arch = dict(arch)
             custom_arch["gate_time_ns"] = gate_time_ns_live
@@ -732,133 +738,70 @@ def _build_echo_circuit(delay_s: float, dt_ns: Optional[float], idx: int):
     return qc
 
 
-def _default_superconducting_pair(qc, q):
-    """sx, barrier, sxdg — Qiskit standard gate, native on IBM superconducting
-    hardware; used as the generic stand-in for any architecture without
-    a more specific registered pair (matches pre-existing behaviour). The
-    barrier stops the transpiler cancelling sx.sxdg as an identity."""
-    qc.sx(q)
-    qc.barrier(q)
-    qc.sxdg(q)
+@functools.lru_cache(maxsize=1)
+def _rb_clifford_table():
+    """The 24 one-qubit Cliffords as (a, pulse, c): the Clifford rz(c).pulse.rz(a)
+    with pulse None, "sx" or "x" and as few pulses as possible (4 none, 16 sx,
+    4 x: the compilation qiskit-experiments uses on IBM's rz/sx/x basis);
+    mult[i][j], the index of Clifford j applied after Clifford i; finish[i][e],
+    the index of the Clifford that takes Clifford i's output back to |e>."""
+    h, s, x = np.array([[1, 1], [1, -1]]) / np.sqrt(2), np.diag([1, 1j]), np.array([[0, 1], [1, 0]])
+    same = lambda u, v: abs(np.trace(u.conj().T @ v)) > 1.999
+    us = [np.eye(2)]
+    for u in us:
+        us += [g @ u for g in (h, s) if not any(same(g @ u, v) for v in us)]
+    rz = lambda t: np.diag([np.exp(-0.5j * t), np.exp(0.5j * t)])
+    pulses = {None: np.eye(2), "sx": np.array([[1 + 1j, 1 - 1j], [1 - 1j, 1 + 1j]]) / 2, "x": x}
+    forms = [(a, g, c) for g in pulses for a in np.arange(4) * np.pi / 2 for c in np.arange(4) * np.pi / 2]
+    gates = [next(f for f in forms if same(rz(f[2]) @ pulses[f[1]] @ rz(f[0]), u)) for u in us]
+    find = lambda u: next(i for i, v in enumerate(us) if same(u, v))
+    mult = [[find(v @ u) for v in us] for u in us]
+    finish = [[find(t @ u.conj().T) for t in (np.eye(2), x)] for u in us]
+    return gates, mult, finish
 
 
-def _default_trapped_ion_pair(qc, q, phase_turns: float = 0.0):
-    """GPI2(0), GPI2(0.5) — native IonQ pulses; GPI2(0.5) is verified
-    equal to GPI2(0)^dagger, so the pair nets to identity exactly as
-    sx/sxdg does. Falls back to an equivalent R-gate decomposition if
-    qiskit_ionq is not installed. A barrier separates the two gates in
-    both branches so the transpiler cannot cancel the pair.
-
-    phase_turns shifts both pulse phases (GPI2(p), GPI2(p + 0.5)): the
-    native, exactly equivalent form of conjugating the pair by a virtual
-    Z frame rotation of 2*pi*p, used by the gate-repetition frame twirl."""
-    try:
-        from qiskit_ionq.ionq_gates import GPI2Gate
-        qc.append(GPI2Gate(phase_turns), [q])
-        qc.barrier(q)
-        qc.append(GPI2Gate(phase_turns + 0.5), [q])
-    except ImportError:
-        phi = 2.0 * np.pi * phase_turns
-        qc.r(np.pi / 2, phi, q)
-        qc.barrier(q)
-        qc.r(np.pi / 2, phi + np.pi, q)
-
-
-# Registry mapping architecture name -> callable(qc, q) -> None, applying
-# one native (G, G^-1) pair that nets to identity in the absence of
-# coherent error, isolating the depolarizing/incoherent component that
-# forward_gate() models. Two entries ship built in; third-party backends
-# (Quantum Machines, Google, Rigetti, IQM, etc.) register
-# their own physical self-inverse pair via register_native_pair() below —
-# no change to core inversion logic (forward_gate, _invert_gate,
-# lindblad_inversion) is ever required to add a new architecture.
-NATIVE_INVERSE_PAIRS: dict = {
-    "superconducting": _default_superconducting_pair,
-    "trapped_ion":      _default_trapped_ion_pair,
-}
-
-
-def register_native_pair(architecture: str, pair_fn) -> None:
-    """
-    Register a native self-inverse single-qubit gate pair for a new
-    architecture, so the gate-repetition (epsilon_sx) probe can run on
-    it without modifying quantum_canary's core code.
-
-    pair_fn must have signature pair_fn(qc, q) -> None and append exactly
-    one native gate G followed by its native inverse G^-1 to qubit q of
-    qc (a qiskit QuantumCircuit), such that G . G^-1 = I in the absence
-    of coherent error. This is what makes the depolarizing-channel
-    forward model (forward_gate) correctly isolate incoherent gate error
-    from coherent over-rotation — see the design note in build_probe_circuits
-    and Section IV of the paper.
-
-    pair_fn should place a barrier between G and G^-1 (qc.barrier(q)) so
-    the transpiler cannot cancel the pair as an identity;
-    _build_gate_rep_circuit() inserts a barrier between successive pairs.
-
-    Example (hypothetical new backend with a native Rx(pi/2)):
-        def my_pair(qc, q):
-            qc.rx(np.pi / 2, q)
-            qc.barrier(q)
-            qc.rx(-np.pi / 2, q)
-        register_native_pair("myvendor_custom", my_pair)
-
-    The registered architecture name can then be passed to
-    build_custom_arch() / BackendProfile.from_architecture() and to
-    _build_gate_rep_circuit() / build_probe_circuits() directly.
-    """
-    NATIVE_INVERSE_PAIRS[architecture] = pair_fn
-
-
-def _sqrtx_native_inverse_pair(qc, q, architecture: str, frame_rad: float = 0.0):
-    """
-    Applies one native (G, G^-1) pair on qubit q for the given
-    architecture, looked up from NATIVE_INVERSE_PAIRS. Unregistered
-    architectures (including "unknown", which has no confirmed native
-    self-inverse pair yet) fall back to the superconducting sx/sxdg
-    default, preserving prior behaviour exactly — register_native_pair()
-    is the supported way to override this for a specific backend.
-
-    frame_rad != 0 conjugates the pair by a virtual Z rotation of that
-    angle: the built-in trapped-ion pair shifts its GPI2 phases (native);
-    every other pair is wrapped as rz(frame), pair, rz(-frame). Ideally the
-    pair is still the identity, and Z conjugation leaves its Z-survival
-    (the R_zz the gate model fits) unchanged.
-    """
-    pair_fn = NATIVE_INVERSE_PAIRS.get(architecture, _default_superconducting_pair)
-    if frame_rad == 0.0:
-        pair_fn(qc, q)
-    elif pair_fn is _default_trapped_ion_pair:
-        pair_fn(qc, q, phase_turns=frame_rad / (2.0 * np.pi))
-    else:
-        qc.rz(frame_rad, q)
-        pair_fn(qc, q)
-        qc.rz(-frame_rad, q)
-
-
-def _build_gate_rep_circuit(N: int, architecture: str = "superconducting",
-                            twirl: bool = True):
-    """N native (G, G^-1) pairs, then a Z measurement.
-
-    twirl=True (default) conjugates each pair by its own random virtual Z
-    frame (uniform in [0, 2*pi), seeded per N by _GATE_TWIRL_SEED so the
-    circuit is reproducible). A residual coherent rotation that survives
-    the pair -- e.g. the qubit detuning acting during the pulses, which
-    does not cancel in G*G^-1 -- then points along a different equatorial
-    axis in every pair and adds up as a random walk (angle ~ sqrt(N)*theta)
-    instead of coherently (N*theta), so its contribution to the decay
-    becomes second order and the depolarizing model stays valid (frame
-    randomization in the sense of randomized compiling, Wallman & Emerson,
-    PRA 94, 052325 (2016)). Virtual Z is free on IBM (rz) and IonQ (GPI2
-    phase). twirl=False builds the original untwirled train.
-    """
+def _build_rb_circuit(m: int, end: int, architecture: str, rng, name: str):
+    """m random Cliffords (uniform over the 24, drawn from rng), then the one
+    Clifford that returns the qubit to |end>, then a Z measurement. Each
+    Clifford is rz(c).pulse.rz(a) (_rb_clifford_table); the rz are virtual.
+    Superconducting: rz, sx and x gates, adjacent rz merged. Trapped ion: each
+    pulse is the native GPI2 (sx) or GPI (x) with its phase shifted by minus
+    the rz frame accumulated before it (R gates of the same rotations if
+    qiskit_ionq is not installed)."""
     from qiskit import QuantumCircuit
-    qc = QuantumCircuit(1, 1, name=f"gate_rep_N{N}")
-    frames = (np.random.default_rng([_GATE_TWIRL_SEED, int(N)]).uniform(0.0, 2.0 * np.pi, int(N))
-              if twirl else np.zeros(int(N)))
-    for k in range(N):
-        _sqrtx_native_inverse_pair(qc, 0, architecture, frame_rad=float(frames[k]))
-        qc.barrier(0)
+    gates, mult, finish = _rb_clifford_table()
+    idx = [int(i) for i in rng.integers(24, size=int(m))]
+    net = 0
+    for i in idx:
+        net = mult[net][i]
+    idx.append(finish[net][int(end)])
+    qc = QuantumCircuit(1, 1, name=name)
+    if architecture == "trapped_ion":
+        try:
+            from qiskit_ionq.ionq_gates import GPI2Gate, GPIGate
+            native = {"sx": GPI2Gate, "x": GPIGate}
+        except ImportError:
+            native = None
+        frame = 0.0
+        for i in idx:
+            a, pulse, c = gates[i]
+            frame = (frame + a) % (2.0 * np.pi)
+            if pulse is not None:
+                if native is not None:
+                    qc.append(native[pulse]((-frame / (2.0 * np.pi)) % 1.0), [0])
+                else:
+                    qc.r(np.pi / 2 if pulse == "sx" else np.pi, -frame, 0)
+            frame = (frame + c) % (2.0 * np.pi)
+    else:
+        carry = 0.0
+        for i in idx:
+            a, pulse, c = gates[i]
+            if pulse is None:
+                carry += a + c
+                continue
+            qc.rz(a + carry, 0)
+            getattr(qc, pulse)(0)
+            carry = c
     qc.measure(0, 0)
     return qc
 
@@ -903,7 +846,13 @@ def split_qubits_for_op_limit(target_qubits: list, ops_per_qubit: int,
     return batches
 
 
-def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
+def build_probe_circuits(profile: BackendProfile, seed: Optional[int] = None) -> tuple[list, dict]:
+    """One qubit's probe circuits and the metadata lindblad_inversion needs.
+    The gate family is randomized benchmarking: per length of
+    profile.rb_lengths, _RB_SEQUENCES random Clifford sequences
+    (_build_rb_circuit), even-numbered ones ending in |0>, odd ones in |1>.
+    seed fixes the sequences; None draws a fresh seed, so each call has its
+    own sequences. The seed used is metadata["rb_seed"]."""
     t1_delays     = profile.t1_delays_s
     ramsey_delays = profile.ramsey_delays_s
     echo_delays   = profile.echo_delays_s
@@ -916,22 +865,27 @@ def build_probe_circuits(profile: BackendProfile) -> tuple[list, dict]:
         circuits.append(_build_ramsey_x_circuit(t, profile.dt_ns, i))
         circuits.append(_build_ramsey_y_circuit(t, profile.dt_ns, i))
 
-    gate_rep_n = profile.gate_rep_n
-    for N in gate_rep_n:
-        circuits.append(_build_gate_rep_circuit(N, profile.architecture))
+    rb_lengths = profile.rb_lengths
+    rb_seed = int(np.random.SeedSequence().generate_state(1)[0]) if seed is None else int(seed)
+    rng = np.random.default_rng(rb_seed)
+    for s, (m, k) in enumerate(zip(rb_lengths, _RB_SEQUENCES)):
+        for j in range(k):
+            circuits.append(_build_rb_circuit(m, j % 2, profile.architecture, rng, f"rb_{s}_{j}_m{m}"))
 
     for i, t in enumerate(echo_delays):
         circuits.append(_build_echo_circuit(t, profile.dt_ns, i))
 
     n_t1     = len(t1_delays)
     n_ramsey = 2 * len(ramsey_delays)
-    n_gate   = len(gate_rep_n)
+    n_gate   = sum(_RB_SEQUENCES)
     n_echo   = len(echo_delays)
 
     metadata = {
         "t1_delays_s":    t1_delays,
         "ramsey_delays_s": ramsey_delays,
-        "gate_rep_N":     gate_rep_n,
+        "rb_lengths":     rb_lengths,
+        "rb_sequences":   list(_RB_SEQUENCES),
+        "rb_seed":        rb_seed,
         "echo_delays_s":  echo_delays,
         "n_t1":           n_t1,
         "n_ramsey":       n_ramsey,
@@ -1015,35 +969,8 @@ def forward_echo(tau_s, T2_echo_s: float, p0_given_1: float = 0.0, p1_given_0: f
     return p_ideal * (1.0 - p0_given_1) + (1.0 - p_ideal) * p1_given_0
 
 
-def forward_gate(N, epsilon_sx: float, p0_given_1: float = 0.0, p1_given_0: float = 0.0):
-    
-    N = np.asarray(N, dtype=float)
-    p_ideal = 0.5 * (1.0 + (1.0 - 2.0*epsilon_sx)**(2.0*N))
-    return p_ideal * (1.0 - p1_given_0) + (1.0 - p_ideal) * p0_given_1
-
-
-def forward_gate_affine(N, epsilon_sx: float, z_star: float,
-                        p0_given_1: float = 0.0, p1_given_0: float = 0.0):
-    """Gate-repetition P0 for a non-unital (affine) per-pair channel.
-
-    For the native pair the Z Bloch component obeys z -> R_zz*z + R_z0
-    (e.g. amplitude damping toward |0> during the gates). Starting from
-    z_0 = 1, after N pairs z_N = z* + (1 - z*)*lambda**(2N) with
-    lambda = 1 - 2*epsilon_sx (R_zz = lambda**2) and fixed point
-    z* = R_z0/(1 - R_zz); P_ideal(0) = (1 + z_N)/2, then readout error is
-    applied as in forward_gate. z_star = 0 reproduces forward_gate exactly.
-    z_star is not fitted: _invert_gate computes it (_gate_z_star) from the
-    run's fitted T1, combined T2 and the gate time t_g, for the per-gate
-    channel thermal relaxation (T=0) over t_g followed by depolarizing.
-    """
-    N = np.asarray(N, dtype=float)
-    z = z_star + (1.0 - z_star) * (1.0 - 2.0*epsilon_sx)**(2.0*N)
-    p_ideal = 0.5 * (1.0 + z)
-    return p_ideal * (1.0 - p1_given_0) + (1.0 - p_ideal) * p0_given_1
-
-
 def _irls_refit(model, xdata, ydata, popt, pcov, shots, bounds):
-    """Iteratively re-weighted refit shared by the four probe fits.
+    """Iteratively re-weighted refit shared by the T1, Ramsey and echo fits.
 
     The first curve_fit weights each point by sqrt(p(1-p)/shots) (floor
     1e-3) evaluated at the SEED guess; with absolute_sigma=True a poor seed
@@ -1225,88 +1152,40 @@ def _invert_ramsey(p1_x_arr: np.ndarray, p1_y_arr: np.ndarray,
     return T2, sT2, dw, sdw, resid
 
 
-def _gate_z_star(epsilon_sx: float, T1_s: float, T2_s: float, gate_time_s: float) -> float:
-    """Fixed point z* of the native pair's Z Bloch map (forward_gate_affine).
-
-    Per native gate: thermal relaxation (T=0) over t_g, then depolarizing
-    with Bloch shrink d: (x, y, z) -> (d*a*x, d*a*y, d*(b*z + 1 - b)),
-    a = exp(-t_g/T2), b = exp(-t_g/T1), T2 capped at 2*T1. For the pair,
-    z -> d^2*a*b*z + d*(1 - b). With (1 - 2*eps)^2 = d^2*a*b this gives
-    z* = (1 - 2*eps)*(1 - b) / (sqrt(a*b)*(1 - (1 - 2*eps)^2)), clipped to
-    [0, 1] (eps below the coherence floor (1 - sqrt(a*b))/2 would need
-    d > 1). If 1 - (1 - 2*eps)^2 <= 1e-15 (eps ~ 0) returns 1, i.e.
-    P_ideal(0) = 1, avoiding 0/0.
-    """
-    T2_s = min(T2_s, 2.0 * T1_s)
-    a = np.exp(-gate_time_s / T2_s)
-    b = np.exp(-gate_time_s / T1_s)
-    lam = 1.0 - 2.0 * float(epsilon_sx)
-    den = 1.0 - lam**2
-    if den <= 1e-15:
-        return 1.0
-    return float(np.clip(lam * (1.0 - b) / (np.sqrt(a * b) * den), 0.0, 1.0))
-
-
-def _invert_gate(p0_measured: np.ndarray, N_values: np.ndarray,
-                  arch: dict, shots_gate: int,
-                  T1_est_s: Optional[float] = None, T2_est_s: Optional[float] = None,
-                  gate_time_s: Optional[float] = None) -> tuple[float, float, float, float]:
-    """Returns (epsilon_sx, sigma_epsilon, residual, z_star); epsilon_sx is
-    the only fitted parameter. If T1_est_s, T2_est_s and gate_time_s are all
-    finite and > 0, the model is forward_gate_affine with z_star =
-    _gate_z_star(epsilon_sx, T1_est_s, T2_est_s, gate_time_s) recomputed at
-    each trial epsilon_sx (not fitted); z_star is returned at the fitted
-    epsilon_sx. Otherwise z_star = 0: forward_gate, the unital model, which
-    ignores relaxation toward |0> during the gates. Same model for 2 or
-    >= 3 repetition counts."""
-    p0_given_1 = arch.get("p0_given_1", 0.0)
-    p1_given_0 = arch.get("p1_given_0", 0.0)
-    spam_model = lambda N_values, epsilon_sx: forward_gate(N_values, epsilon_sx, p0_given_1, p1_given_0)
-    affine_model = lambda N_values, epsilon_sx, z_star: forward_gate_affine(
-        N_values, epsilon_sx, z_star, p0_given_1, p1_given_0)
-    if all(v is not None and np.isfinite(v) and v > 0 for v in (T1_est_s, T2_est_s, gate_time_s)):
-        z_of_eps = lambda epsilon_sx: _gate_z_star(epsilon_sx, T1_est_s, T2_est_s, gate_time_s)
-        gate_model = lambda N_values, epsilon_sx: affine_model(N_values, epsilon_sx, z_of_eps(epsilon_sx))
-        # Coherence floor (1 - sqrt(a*b))/2: eps with d = 1 (no depolarizing).
-        eps_floor = float((1.0 - np.sqrt(np.exp(-gate_time_s / min(T2_est_s, 2.0 * T1_est_s))
-                                         * np.exp(-gate_time_s / T1_est_s))) / 2.0)
-    else:
-        z_of_eps = lambda epsilon_sx: 0.0
-        gate_model = spam_model
-        eps_floor = 0.0
-
-    if len(p0_measured) < 2:
-        return arch["eps_typical"], float("inf"), float("inf"), 0.0
-
-    denom    = float(p0_measured[0]) - float(p0_measured[1])
-    eps_guess = arch["eps_typical"]
-    if len(p0_measured) >= 3 and abs(denom) > 1e-6:
-        x = (float(p0_measured[1]) - float(p0_measured[2])) / denom
-        if 0 < x < 1:
-            eps_guess = float(np.clip((1 - x**(1.0/(2.0*N_values[0])))/2.0,
-                                      0.0, arch["eps_max"]))
-    # Seed at or above the coherence floor: well below it z* is clipped at 1,
-    # the model is flat in eps and the fit cannot leave the seed.
-    eps_guess = max(eps_guess, eps_floor)
-    p_guess = spam_model(N_values, eps_guess)
-    fit_sigma = np.maximum(np.sqrt(np.clip(p_guess*(1.0-p_guess), 0, None)/shots_gate), 1e-3)
+def _invert_rb(p0_measured: np.ndarray, lengths, sequences,
+               arch: dict) -> tuple[float, float, float, float]:
+    """Gate fit (randomized benchmarking). p0_measured: P(0) of every gate
+    circuit, in build_probe_circuits order. Per length m, D = mean P(0) of the
+    sequences ending in |0> minus mean P(0) of those ending in |1>, which is
+    A*(1 - 2*RB_PULSES_PER_CLIFFORD*eps)**m: readout shifts both means
+    equally and cancels. A and eps (the error per pulse; the error per
+    Clifford is RB_PULSES_PER_CLIFFORD*eps) are fitted with each D weighted
+    by its standard error from the spread between sequences (floor 1e-3).
+    Returns (eps, sigma, chi2/dof, residual); chi2 has len(lengths) - 2 dof."""
+    starts = np.cumsum((0,) + tuple(int(k) for k in sequences))
+    d, sd = [], []
+    for s in range(len(sequences)):
+        block = np.asarray(p0_measured[starts[s]:starts[s + 1]], dtype=float)
+        end0, end1 = block[0::2], block[1::2]
+        d.append(end0.mean() - end1.mean())
+        sd.append(max(np.sqrt(end0.var(ddof=1) / len(end0) + end1.var(ddof=1) / len(end1)), 1e-3))
+    d, sd, m = np.array(d), np.array(sd), np.array(lengths, dtype=float)
+    model = lambda m, amp, eps: amp * (1.0 - 2.0 * RB_PULSES_PER_CLIFFORD * eps) ** m
+    eps_seed = 0.4 / (RB_PULSES_PER_CLIFFORD * m[-1])
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
-            popt, pcov = curve_fit(gate_model, N_values, p0_measured,
-                                   p0=[eps_guess],
-                                   sigma=fit_sigma, absolute_sigma=True,
-                                   bounds=([0.0], [arch["eps_max"]]),
+            popt, pcov = curve_fit(model, m, d, p0=[max(d[0], 0.1), eps_seed],
+                                   sigma=sd, absolute_sigma=True,
+                                   bounds=([0.0, 0.0], [1.5, arch["eps_max"]]),
                                    maxfev=10_000)
-            popt, pcov = _irls_refit(gate_model, N_values, p0_measured, popt, pcov,
-                                     shots_gate, ([0.0], [arch["eps_max"]]))
-        eps    = float(popt[0])
-        z_star = float(z_of_eps(eps))
-        sigma  = float(np.sqrt(pcov[0, 0]))
-        resid  = float(np.sum((p0_measured - affine_model(N_values, eps, z_star))**2))
+        eps, sigma = float(popt[1]), float(np.sqrt(pcov[1, 1]))
+        pred = model(m, *popt)
+        chi2 = float(np.sum(((d - pred) / sd)**2)) / max(len(m) - 2, 1)
+        resid = float(np.sum((d - pred)**2))
     except Exception:
-        eps, sigma, resid, z_star = eps_guess, np.inf, np.inf, 0.0
-    return eps, sigma, resid, z_star
+        eps, sigma, chi2, resid = eps_seed, float("inf"), float("inf"), float("inf")
+    return eps, sigma, chi2, resid
 
 
 def _invert_echo(p1_measured: np.ndarray, tau_s: np.ndarray,
@@ -1389,7 +1268,7 @@ class InversionResult:
     echo_chi2_dof:      float = 0.0
     calibration_source: Optional[CalibrationSource] = None
     prior_warning:      str = ""
-    gate_z_star:        float = 0.0
+    rb_seed:            Optional[int] = None
 
     def summary(self, arch: Optional[dict] = None) -> str:
         if arch is None:
@@ -1419,7 +1298,7 @@ def lindblad_inversion(counts_list: list[dict],
                         profile:     BackendProfile,
                         shots_t1:    int = 300,
                         shots_ramsey:int = 600,
-                        shots_gate:  int = 500,
+                        shots_gate:  int = 24,
                         shots_echo:  int = 500,
                         qubit_id:    int = 0,
                         timestamp:   str = "") -> InversionResult:
@@ -1508,17 +1387,8 @@ def lindblad_inversion(counts_list: list[dict],
         T2_rep, sT2_rep = T2_echo, float(sT2_echo * np.sqrt(echo_chi2_factor))
 
     p0_gate = np.array([c.get("0",0)/shots_gate for c in gate_counts])
-    N_vals  = np.array(metadata["gate_rep_N"], dtype=float)
-    # z* is computed from this run's T1, echo T2 and the gate time; eps is
-    # the only fitted parameter (n_params=1). Reported T1/T2 are passed:
-    # NaN after a failed fit gives z* = 0 (unital).
-    gate_time_ns = arch.get("gate_time_ns")
-    eps, seps, r_gate, z_star = _invert_gate(
-        p0_gate, N_vals, arch, shots_gate, T1_est_s=T1_rep, T2_est_s=T2_rep,
-        gate_time_s=gate_time_ns * 1e-9 if gate_time_ns is not None else None)
-    gate_chi2 = _chi2_per_dof(p0_gate,
-        forward_gate_affine(N_vals, eps, z_star, arch.get("p0_given_1", 0.0), arch.get("p1_given_0", 0.0)),
-        shots_gate, n_params=1)
+    eps, seps, gate_chi2, r_gate = _invert_rb(
+        p0_gate, metadata["rb_lengths"], metadata["rb_sequences"], arch)
 
     gate_failed = _fit_failed(seps)
 
@@ -1527,7 +1397,7 @@ def lindblad_inversion(counts_list: list[dict],
         ("T1", t1_chi2, t1d, "T1_prior_s"),
         ("Ramsey/T2", ramsey_chi2, ramsey_delays, "T2_prior_s"),
         ("Echo/T2", echo_chi2, echo_delays, "T2_prior_s"),
-        ("Gate-rep/eps", gate_chi2, N_vals, "eps_typical"),
+        ("Gate/RB", gate_chi2, metadata["rb_lengths"], "eps_typical"),
     ]
     messages = []
     for label, chi2, delays_arr, prior_name in chi2_dof_checks:
@@ -1565,4 +1435,4 @@ def lindblad_inversion(counts_list: list[dict],
         echo_residual=r_echo, echo_chi2_dof=echo_chi2,
         calibration_source=profile.calibration_source,
         prior_warning=prior_warning,
-        gate_z_star=z_star)
+        rb_seed=metadata.get("rb_seed"))
