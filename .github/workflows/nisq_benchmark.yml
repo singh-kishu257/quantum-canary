@@ -1,10 +1,10 @@
-name: NISQ Benchmark - Canary vs qiskit-experiments (Parallel Matrix)
+name: NISQ benchmark - Canary vs qiskit-experiments
 
-# benchmark.py on the NISQ simulator with every 1c noise mechanism on, and
-# qiskit-experiments (T1, T2Hahn, T2Ramsey, StandardRB) run on the same
-# simulated qubits. Each architecture is split into SHARDS parallel jobs
-# (disjoint instance ranges, instance i always uses seed offset + i), then
-# merged into one validated CSV.
+# research/nisq_benchmark.py.
+# Each architecture is split into SHARDS parallel jobs; shard k runs instances i with
+# i mod SHARDS == k (seed = held-out offset + i), so the shot-sweep instances (i < n_sweep)
+# are spread evenly. The merge job checks that every (instance, arm, parameter) row is present
+# exactly once and writes one CSV with its provenance file.
 
 on:
   workflow_dispatch:
@@ -13,43 +13,27 @@ on:
         description: "Instances per architecture"
         required: false
         default: "300"
+      n_sweep:
+        description: "Instances (0..n_sweep-1) that also run the 8-budget shot sweep (1,080 to 138,240 shots)"
+        required: false
+        default: "100"
 
 permissions:
   contents: read
 
 concurrency:
-  group: nisq-benchmark-${{ github.ref }}
+  group: nisq-benchmark-qe-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   N_INSTANCES: ${{ github.event.inputs.n_instances || '300' }}
+  N_SWEEP: ${{ github.event.inputs.n_sweep || '100' }}
   SHARDS: "10"
   OPENBLAS_NUM_THREADS: "1"
   OMP_NUM_THREADS: "1"
   PYTHONPATH: src
 
 jobs:
-  selftest:
-    name: selftest (1c simulation layer)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: research/requirements.txt
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r research/requirements.txt
-
-      - name: Self-test the simulation layer
-        run: python -m quantum_canary.simulation
-
   run:
     name: ${{ matrix.architecture }} shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
@@ -73,39 +57,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r research/requirements.txt
 
-      - name: Instance range of this shard
-        id: range
+      - name: Run shard
         run: |
-          N="${N_INSTANCES}"; K="${SHARDS}"; S="${{ matrix.shard }}"
-          BASE=$(( N / K )); REM=$(( N % K ))
-          if [ "$S" -lt "$REM" ]; then COUNT=$(( BASE + 1 )); START=$(( S * (BASE + 1) ));
-          else COUNT=$BASE; START=$(( REM * (BASE + 1) + (S - REM) * BASE )); fi
-          echo "start=$START" >> "$GITHUB_OUTPUT"
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
-          echo "shard $S: instances $START..$(( START + COUNT - 1 )) ($COUNT)"
-
-      - name: Run benchmark shard
-        if: steps.range.outputs.count != '0'
-        run: |
-          python research/benchmark.py \
+          python research/nisq_benchmark.py \
             --architecture "${{ matrix.architecture }}" \
-            --n-instances "${{ steps.range.outputs.count }}" \
-            --instance-start "${{ steps.range.outputs.start }}" \
+            --n-instances "${N_INSTANCES}" --n-sweep "${N_SWEEP}" \
+            --shard "${{ matrix.shard }}" --n-shards "${SHARDS}" \
             --workers 4 \
             --out "nisq_benchmark_${{ matrix.architecture }}_shard${{ matrix.shard }}.csv"
 
       - name: Upload shard CSV
-        if: steps.range.outputs.count != '0'
         uses: actions/upload-artifact@v4
         with:
           name: nisq-benchmark-${{ matrix.architecture }}-shard${{ matrix.shard }}
-          path: nisq_benchmark_${{ matrix.architecture }}_shard${{ matrix.shard }}.csv
+          path: |
+            nisq_benchmark_${{ matrix.architecture }}_shard${{ matrix.shard }}.csv
+            nisq_benchmark_${{ matrix.architecture }}_shard${{ matrix.shard }}.csv.meta.json
           if-no-files-found: error
           retention-days: 90
 
   merge:
     name: merge
-    needs: [selftest, run]
+    needs: [run]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -127,20 +100,23 @@ jobs:
         with:
           pattern: nisq-benchmark-*-shard*
           merge-multiple: true
-          path: benchmark_inputs
+          path: shard_inputs
 
-      - name: Combine into nisq_benchmark.csv
+      - name: Combine and validate
         run: |
           ARGS=()
-          for f in benchmark_inputs/*.csv; do ARGS+=(--input "$f"); done
-          python research/benchmark.py --combine \
-            --n-instances "${N_INSTANCES}" "${ARGS[@]}" \
+          for f in shard_inputs/*.csv; do ARGS+=(--input "$f"); done
+          python research/nisq_benchmark.py --combine \
+            --n-instances "${N_INSTANCES}" --n-sweep "${N_SWEEP}" "${ARGS[@]}" \
             --out nisq_benchmark.csv
 
       - name: Upload nisq_benchmark.csv
         uses: actions/upload-artifact@v4
         with:
           name: nisq-benchmark-combined
-          path: nisq_benchmark.csv
+          path: |
+            nisq_benchmark.csv
+            nisq_benchmark.csv.meta.json
+            shard_inputs/*.meta.json
           if-no-files-found: error
           retention-days: 90
