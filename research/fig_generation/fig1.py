@@ -252,7 +252,7 @@ for c in (0, 1):
     col_x.append(end + 1.8)
 assert col_x[-1] - 1.8 <= x1 - 1.4, col_x
 items(x0 + 1.6, x1 - 1.6, yb0 - 2 * (PITCH + 0.3) + 0.70 * BODY * PT - 0.3, [
-    ("star", r"Readout error in every model; fitted $T_1$ bounds $T_2$ and feeds the gate fit; $\sigma$ for each"),
+    ("star", r"Readout error in the $T_1$, Ramsey and echo models (RB cancels it); $T_2 \leq 2T_1$; $\sigma$ for each"),
 ], r0 + 0.4, "fit")
 step_box(X3[1], r0, IX1, r1, 5, "Health", F_ORG, [
     (("hl", H_GREEN), "GREEN: all fits pass"),
@@ -272,8 +272,8 @@ step_box(CX0, IF[0], CX1, IF[1], None, "Interfaces", F_LAV, [
     ("dot", "CLI: quantum-canary"),
 ])
 step_box(CX0, DE[0], CX1, DE[1], None, "Decisions", F_WHT, pad=1.1, entries=[
-    ("star", "RED qubit \u2192 best spare"),
-    ("dot", r"XY4 decoupling if $T_2^*/T_2 < 0.8$"),
+    ("star", "RED qubit \u2192 re-run the check"),
+    ("dot", r"Decoupling if $T_2^*/T_2 < 0.8$"),
     ("dot", r"Frame update if $|\Delta\omega|\,T_2^* > 1\,\mathrm{rad}$"),
 ])
 step_box(CX0, DR[0], CX1, DR[1], None, "Drift between checks", F_WHT, [
@@ -326,5 +326,11 @@ block_arrow([(IX1, ymid3), (CX0, ymid3)])
 QR = QB[2] - 0.9
 text(QR, ymid1 + 2.0, "Calibration data", ha="right")
 text(QR, BUS + 2.6, "Runs probes", ha="right")
-text(QR, ymid3 + 2.0, "Measured counts", ha="right")
+text(QR, ymid3 + 2.0, "Counts", ha="right")
 print("overflow:", OVERFLOW)
+
+OUT_DIR = __import__("pathlib").Path(__file__).resolve().parents[1] / "figures"
+OUT_DIR.mkdir(exist_ok=True)
+for ext, kw in (("pdf", {}), ("png", {"dpi": 600})):
+    fig.savefig(OUT_DIR / f"fig1.{ext}", **kw)
+print("saved:", OUT_DIR / "fig1.pdf", OUT_DIR / "fig1.png")
