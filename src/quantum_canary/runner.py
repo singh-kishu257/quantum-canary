@@ -5,8 +5,8 @@ engine (quantum_canary.inversion):
 
   run_ibm()        live priors from the backend (BackendProfile.from_ibm_backend),
                    the engine's probe circuits (inversion.build_probe_circuits),
-                   block-interleaved execution (inversion.interleave_probe_blocks),
-                   one IBM Sampler job, and the engine's inversion
+                   execution plan (inversion.interleave_probe_blocks; one block
+                   by default), one IBM Sampler job, and the engine's inversion
                    (inversion.lindblad_inversion) per qubit.
   run_simulation() the per-qubit flow of research/ideal_parity.py
                    (regime="ideal") or of research/benchmark.py with its
@@ -42,8 +42,14 @@ __all__ = [
 # Shots per circuit of each probe family: the values every research benchmark
 # (ideal_parity.py, benchmark.py) uses.
 DEFAULT_SHOTS: Dict[str, int] = {"t1": 300, "ramsey": 600, "gate": 24, "echo": 500}
-# Block-interleaved execution: benchmark.py's default (probe_blocks = 10).
-DEFAULT_PROBE_BLOCKS = 10
+# Interleaved blocks per architecture (inversion.interleave_probe_blocks). A
+# superconducting check lasts about a second, so each circuit's shots run once:
+# one compact job, which also fits a full 156-qubit chip (ten blocks repeat
+# every RB circuit ten times and exceed IBM's runtime memory). A trapped-ion
+# check of all four families lasts hours, so its shots are split into ten
+# blocks that every family samples alike. IonQ hardware runs only the RB
+# family and defaults to one block (ionq.run_ionq).
+DEFAULT_PROBE_BLOCKS: Dict[str, int] = {"superconducting": 1, "trapped_ion": 10}
 
 # research/benchmark.py constants and default configuration (regime="nisq").
 _NISQ_T_CALIB_S = 0.0
@@ -422,7 +428,7 @@ def _block_numbers(shots_list: Sequence[int], n_blocks: int) -> List[int]:
 
 
 def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = None,
-            probe_blocks: int = DEFAULT_PROBE_BLOCKS, sampler=None,
+            probe_blocks: Optional[int] = None, sampler=None,
             parallel: bool = True) -> CanaryReport:
     """Run the Canary probe on physical `qubits` of an IBM (superconducting)
     backend and invert each qubit.
@@ -431,8 +437,8 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
                   (or a qiskit_ibm_runtime fake backend for a local dry run).
     qubits:       physical qubit indices.
     shots:        per-circuit shots per probe family (default DEFAULT_SHOTS).
-    probe_blocks: block-interleaved submission (default 10, as in the
-                  benchmarks); 1 submits each circuit's shots consecutively.
+    probe_blocks: interleaved blocks (default DEFAULT_PROBE_BLOCKS
+                  ["superconducting"] = 1: each circuit's shots consecutively).
                   Qiskit Runtime does not guarantee that the circuits of a
                   job execute in submission order, so on hardware this sets
                   the submitted order only.
@@ -463,6 +469,7 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
     if n_backend is not None and any(not 0 <= q < n_backend for q in qubits):
         raise ValueError(f"qubits {qubits} outside 0..{n_backend - 1} of {backend.name}")
     shots = _check_shots(shots)
+    probe_blocks = DEFAULT_PROBE_BLOCKS["superconducting"] if probe_blocks is None else probe_blocks
 
     profiles, logs, metas, probes, plans = {}, {}, {}, {}, {}
     for q in qubits:
@@ -672,7 +679,7 @@ def _simulate_one(architecture: str, regime: str, seed: int, qubit: int,
 def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
                    regime: str = "nisq", seed: Optional[int] = None,
                    shots: Optional[Dict[str, int]] = None,
-                   probe_blocks: int = DEFAULT_PROBE_BLOCKS) -> CanaryReport:
+                   probe_blocks: Optional[int] = None) -> CanaryReport:
     """Run Canary on simulated qubits and keep the true parameters.
 
     Each qubit is an independent simulated device, generated and probed
@@ -686,7 +693,7 @@ def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
                      literature detuning population, detuning during gates,
                      coherent gate error, per-qubit readout heterogeneity,
                      stale calibration and SPAM priors (1 h old), and
-                     time-resolved block-interleaved execution.
+                     time-resolved execution.
       regime="ideal" research/ideal_parity.py: correctly specified,
                      stationary Markovian noise.
     The true epsilon_sx is the error per pulse randomized benchmarking
@@ -694,7 +701,8 @@ def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
     Qubit i uses seed (seed + i); seed defaults to the benchmarks' offset for
     the architecture (0 superconducting, 100000 trapped ion), so with default
     settings qubit i reproduces benchmark instance i.
-    probe_blocks applies to regime="nisq" only (the ideal benchmark runs each
+    probe_blocks (default DEFAULT_PROBE_BLOCKS[architecture]: 1 superconducting,
+    10 trapped ion) applies to regime="nisq" only (the ideal benchmark runs each
     circuit's shots consecutively).
     """
     if architecture not in ("superconducting", "trapped_ion"):
@@ -705,6 +713,7 @@ def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
     if n_qubits < 1:
         raise ValueError(f"n_qubits must be >= 1, got {n_qubits}")
     shots = _check_shots(shots)
+    probe_blocks = DEFAULT_PROBE_BLOCKS[architecture] if probe_blocks is None else probe_blocks
     base = _ARCH_SEED_OFFSET[architecture] if seed is None else int(seed)
 
     reports = []

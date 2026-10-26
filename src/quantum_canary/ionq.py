@@ -14,7 +14,9 @@ debiasing off (debiasing averages permuted copies of a circuit, which mixes
 up the ions). Each ion is probed in its own circuits by default: on Forte-1
 in August 2026, running several ions in the same circuit gave results
 disturbed by crosstalk. parallel=True shares circuits between ions, in
-batches of at most max_ops gates.
+batches of at most max_ops gates. probe_blocks=N (default 1) splits every
+circuit's shots into N blocks, one job per block in order, so all sequence
+lengths sample the same stretch of time.
 
 Quantum Canary does not price runs. ionq_estimate() asks IonQ for its own
 estimate of a job (cost and execution time, in IonQ's units), and max_cost
@@ -82,9 +84,11 @@ class IonQReport:
     raw: List[Dict[str, Any]] = field(default_factory=list, repr=False)
     rb_seed: Optional[int] = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    probe_blocks: int = 1
 
     def to_dict(self) -> Dict[str, Any]:
         return {"backend": self.backend, "ions": list(self.ions), "shots": self.shots,
+                "probe_blocks": self.probe_blocks,
                 "rb_lengths": list(self.rb_lengths), "rb_seed": self.rb_seed,
                 "eps_prior": self.eps_prior,
                 "p0_given_1": self.spam[0], "p1_given_0": self.spam[1],
@@ -94,7 +98,8 @@ class IonQReport:
 
     def render(self) -> str:
         lines = [f"IonQ {self.backend}: {len(self.ions)} ions, RB lengths {self.rb_lengths} x "
-                 f"{list(inv._RB_SEQUENCES)} sequences, {self.shots} shots, "
+                 f"{list(inv._RB_SEQUENCES)} sequences, {self.shots} shots"
+                 + (f" in {self.probe_blocks} blocks" if self.probe_blocks > 1 else "") + ", "
                  f"jobs {', '.join(str(j) for j in self.job_ids)}",
                  f"  {'ion':>4}  {'epsilon_sx':>12}  {'sigma':>9}  {'chi2/dof':>8}"]
         for r in self.results:
@@ -228,7 +233,8 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
              eps_prior: Optional[float] = None, spam: Optional[Tuple[float, float]] = None,
              max_ops: int = DEFAULT_MAX_OPS, max_cost: Optional[float] = None,
              run_options: Optional[Dict[str, Any]] = None,
-             parallel: bool = False, seed: Optional[int] = None) -> IonQReport:
+             parallel: bool = False, seed: Optional[int] = None,
+             probe_blocks: int = 1) -> IonQReport:
     """Run Canary's gate-error probe on `ions` of a qiskit-ionq native-gate
     backend (provider.get_backend("qpu.forte-1", gateset="native"), or the
     "simulator" backend with a noise model) and fit epsilon_sx per ion.
@@ -239,10 +245,16 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     characterization (ionq_priors), or the engine's trapped-ion value if there
     is none. seed fixes the random sequences (None: a fresh seed, recorded as
     rb_seed). One job per batch of ions (one ion per batch unless
-    parallel=True), all circuits with the same shots. With max_cost, IonQ's
-    own estimate (ionq_estimate) of all jobs is fetched first and the run is
-    refused if it is higher, or if IonQ returns no estimate.
+    parallel=True), all circuits with the same shots; probe_blocks (a divisor
+    of shots, default 1) runs each batch as that many jobs in order, each with
+    shots / probe_blocks per circuit, and sums their counts. With max_cost,
+    IonQ's own estimate (ionq_estimate) of all jobs is fetched first and the
+    run is refused if it is higher, or if IonQ returns no estimate.
     """
+    if isinstance(probe_blocks, bool) or int(probe_blocks) != probe_blocks or probe_blocks < 1 \
+            or int(shots) % int(probe_blocks):
+        raise ValueError(f"probe_blocks must be an int >= 1 dividing shots={shots}, got {probe_blocks!r}")
+    blocks, per_block = int(probe_blocks), int(shots) // int(probe_blocks)
     if eps_prior is None or spam is None:
         published = ionq_priors(backend) or {}
         eps_prior = eps_prior if eps_prior is not None else published.get("eps_prior")
@@ -252,8 +264,8 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     rb_seed = int(np.random.SeedSequence().generate_state(1)[0]) if seed is None else int(seed)
     batches, circuits = ionq_circuits(ions, rb_lengths, max_ops, parallel, rb_seed)
     n_per_batch = sum(inv._RB_SEQUENCES)
-    estimates = [ionq_estimate(backend, circuits[b * n_per_batch:(b + 1) * n_per_batch], shots)
-                 for b in range(len(batches))]
+    estimates = [e for b in range(len(batches))
+                 for e in [ionq_estimate(backend, circuits[b * n_per_batch:(b + 1) * n_per_batch], per_block)] * blocks]
     if max_cost is not None:
         if any(e is None or e.get("cost") is None for e in estimates):
             raise ValueError("IonQ returned no cost estimate, so max_cost cannot be checked")
@@ -262,7 +274,7 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
             raise ValueError(f"IonQ estimates {total:,.2f} {estimates[0]['cost_unit']}, "
                              f"above max_cost={max_cost:,.2f}")
 
-    options = {"shots": int(shots)}
+    options = {"shots": per_block}
     try:
         from qiskit_ionq import ErrorMitigation
         options["error_mitigation"] = ErrorMitigation.NO_DEBIASING
@@ -270,32 +282,35 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
         pass
     options.update(run_options or {})
 
-    per_ion: Dict[int, List[float]] = {q: [] for q in ions}
+    zeros = {q: np.zeros(n_per_batch) for q in ions}
+    totals = {q: np.zeros(n_per_batch) for q in ions}
     job_ids, raw = [], []
     for b, batch in enumerate(batches):
         batch_circuits = circuits[b * n_per_batch:(b + 1) * n_per_batch]
-        job = backend.run(batch_circuits, **options)
-        job_id = job.job_id() if hasattr(job, "job_id") else None
-        job_ids.append(job_id)
-        result = job.result()
-        for k in range(len(batch_circuits)):
-            probs = None
-            try:
-                probs = result.data(k).get("probabilities")
-            except Exception:
+        for block in range(blocks):
+            job = backend.run(batch_circuits, **options)
+            job_id = job.job_id() if hasattr(job, "job_id") else None
+            job_ids.append(job_id)
+            result = job.result()
+            for k in range(len(batch_circuits)):
                 probs = None
-            counts = result.get_counts(k)
-            source = probs if probs else counts
-            raw.append({"job_id": job_id, "batch": list(batch), "circuit": k,
-                        "counts": dict(counts), "probabilities": dict(probs) if probs else None})
-            for j, q in enumerate(batch):
-                zero, total = _p0(source, j)
-                per_ion[q].append(zero / total if total else float("nan"))
+                try:
+                    probs = result.data(k).get("probabilities")
+                except Exception:
+                    probs = None
+                counts = result.get_counts(k)
+                source = probs if probs else counts
+                raw.append({"job_id": job_id, "batch": list(batch), "block": block, "circuit": k,
+                            "counts": dict(counts), "probabilities": dict(probs) if probs else None})
+                for j, q in enumerate(batch):
+                    zero, total = _p0(source, j)
+                    zeros[q][k] += zero
+                    totals[q][k] += total
 
     results = []
     dof = len(rb_lengths) - 2
     for q in ions:
-        p0 = np.array(per_ion[q])
+        p0 = np.where(totals[q] > 0, zeros[q] / np.where(totals[q] > 0, totals[q], 1.0), np.nan)
         eps, sigma, chi2_dof, _ = inv._invert_rb(p0, rb_lengths, inv._RB_SEQUENCES, arch)
         results.append(IonResult(ion=int(q), epsilon_sx=float(eps), epsilon_sx_sigma=float(sigma),
                                  chi2_dof=chi2_dof, chi2_p=float(_chi2.sf(chi2_dof * dof, dof)),
@@ -306,7 +321,7 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
                       eps_prior=float(arch["eps_typical"]),
                       spam=(float(arch["p0_given_1"]), float(arch["p1_given_0"])),
                       batches=[list(b) for b in batches], job_ids=job_ids, ionq_estimates=estimates,
-                      results=results, raw=raw, rb_seed=rb_seed)
+                      results=results, raw=raw, rb_seed=rb_seed, probe_blocks=blocks)
 
 
 def is_ionq(backend) -> bool:
@@ -341,7 +356,7 @@ def to_canary_report(report: IonQReport) -> "runner.CanaryReport":
     raw_by_ion: Dict[int, List[Dict[str, Any]]] = {q: [] for q in report.ions}
     for entry in report.raw:
         for bit, ion in enumerate(entry["batch"]):
-            raw_by_ion[int(ion)].append({"circuit": entry["circuit"], "block": 0,
+            raw_by_ion[int(ion)].append({"circuit": entry["circuit"], "block": entry.get("block", 0),
                                          "bit": bit, "counts": entry["counts"],
                                          "probabilities": entry["probabilities"]})
     qubits = []
@@ -361,7 +376,7 @@ def to_canary_report(report: IonQReport) -> "runner.CanaryReport":
                                          health=ion_health(r.epsilon_sx_sigma, r.chi2_dof)))
     return runner.CanaryReport(
         mode="hardware", backend=report.backend, architecture="trapped_ion",
-        shots={"t1": 0, "ramsey": 0, "gate": report.shots, "echo": 0}, probe_blocks=1,
+        shots={"t1": 0, "ramsey": 0, "gate": report.shots, "echo": 0}, probe_blocks=report.probe_blocks,
         circuits_per_qubit=sum(inv._RB_SEQUENCES), qubits=qubits, timestamp=report.timestamp,
         job_id=",".join(str(j) for j in report.job_ids if j) or None,
         groups=[list(b) for b in report.batches], block_counts=raw_by_ion)

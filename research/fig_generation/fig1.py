@@ -223,7 +223,7 @@ step_box(X1[1], r0, X1[1] + w1[1], r1, 2, "74 probe circuits", F_LAV, [
 ])
 step_box(X1[2], r0, X1[2] + w1[2], r1, 3, "Execution plan", F_YEL, [
     ("dot", "Parallel groups: shots scale with groups, not qubits"),
-    ("dot", "10 interleaved blocks"),
+    ("dot", "1 job; ions: 10 blocks"),
 ])
 
 # ----------------------------------------------------------------- row 2: probe sequences

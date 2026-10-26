@@ -48,7 +48,7 @@ if (SCRIPT_DIR.parent / "src").is_dir():
 
 from quantum_canary import api, inversion as inv, runner, simulation as sim
 
-REGIME, T_CALIB_S, T_MEASURE_S, PROBE_BLOCKS = "nisq", 0.0, 3600.0, 10
+REGIME, T_CALIB_S, T_MEASURE_S = "nisq", 0.0, 3600.0
 PARAMETERS = ("T1_s", "T2_s", "delta_omega", "epsilon_sx")
 TRUTH_FAMILIES = {"T1_s": ("t1_",), "T2_s": ("echo_",),
                   "delta_omega": ("ramsey_X_", "ramsey_Y_"), "epsilon_sx": ("rb_",)}
@@ -148,7 +148,8 @@ def make_qubit(architecture: str, seed: int):
 
 
 def run_canary(architecture, truth, prior, mult, rb_seed, aer_seed, t_measure):
-    """One Canary check at mult x the default shots, block-interleaved, run in simulated real time."""
+    """One Canary check at mult x the default shots, with the package's interleaved blocks for the architecture
+    (runner.DEFAULT_PROBE_BLOCKS), run in simulated real time."""
     shots = {k: int(round(v * mult)) for k, v in CANARY_SHOTS.items()}
     p01, p10 = (float(np.clip(prior.spam_p0_given_1_prior, 0, SPAM_CLIP_MAX)),
                 float(np.clip(prior.spam_p1_given_0_prior, 0, SPAM_CLIP_MAX)))
@@ -161,7 +162,7 @@ def run_canary(architecture, truth, prior, mult, rb_seed, aer_seed, t_measure):
                                  prior_confidence="prior_informed")
     circuits, meta = inv.build_probe_circuits(profile, seed=rb_seed)
     shots_list = runner._shots_list(meta, shots)
-    bc, bs, bi = inv.interleave_probe_blocks(circuits, shots_list, PROBE_BLOCKS)
+    bc, bs, bi = inv.interleave_probe_blocks(circuits, shots_list, runner.DEFAULT_PROBE_BLOCKS[architecture])
     if len(bc) > 1000:
         raise RuntimeError(f"{len(bc)} block entries would reuse Aer seeds")
     res = sim.simulate_probe(bc, truth, shots=bs, t_s=t_measure, dt_ns=profile.dt_ns, seed=aer_seed,

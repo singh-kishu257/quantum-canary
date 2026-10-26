@@ -253,21 +253,27 @@ def _ibm_usage(backend, job_id: Optional[str]) -> Optional[float]:
     return None
 
 
-def check(backend, qubits: Sequence[int]) -> Report:
+def check(backend, qubits: Sequence[int], probe_blocks: Optional[int] = None) -> Report:
     """Check `qubits` of an IBM backend (or a qiskit-ibm-runtime fake backend) in
     one short job and return the Report. On a qiskit-ionq backend the qubits are
     ions and only the gate error is measured (ionq.run_ionq, one job per ion, no
-    cost limit: use run_ionq(..., max_cost=...) for one)."""
+    cost limit: use run_ionq(..., max_cost=...) for one). probe_blocks splits
+    each circuit's shots into that many interleaved blocks; default 1 on both
+    (runner.DEFAULT_PROBE_BLOCKS, ionq.run_ionq)."""
     if ionq.is_ionq(backend):
-        return Report(ionq.to_canary_report(ionq.run_ionq(backend, qubits)))
-    raw = runner.run_ibm(backend, qubits)
+        return Report(ionq.to_canary_report(ionq.run_ionq(
+            backend, qubits, probe_blocks=1 if probe_blocks is None else probe_blocks)))
+    raw = runner.run_ibm(backend, qubits, probe_blocks=probe_blocks)
     return Report(raw, ibm_usage_s=_ibm_usage(backend, raw.job_id))
 
 
 def simulate(n_qubits: int = 3, architecture: str = "superconducting",
-             regime: str = "nisq", seed: Optional[int] = None) -> Report:
-    """Check simulated qubits, no backend needed; report[q].truth holds the true values."""
-    return Report(runner.run_simulation(architecture, n_qubits=n_qubits, regime=regime, seed=seed))
+             regime: str = "nisq", seed: Optional[int] = None,
+             probe_blocks: Optional[int] = None) -> Report:
+    """Check simulated qubits, no backend needed; report[q].truth holds the true values.
+    probe_blocks defaults to runner.DEFAULT_PROBE_BLOCKS[architecture]."""
+    return Report(runner.run_simulation(architecture, n_qubits=n_qubits, regime=regime, seed=seed,
+                                        probe_blocks=probe_blocks))
 
 
 def load(path) -> Report:

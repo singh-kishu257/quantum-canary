@@ -190,6 +190,60 @@ def test_ionq_works_like_ibm(tmp_path):
     assert np.isnan(drift.z_scores[0]["T1_s"]) and drift.z_scores[0]["epsilon_sx"] > 10
 
 
+def test_probe_block_defaults():
+    import inspect
+    assert runner.DEFAULT_PROBE_BLOCKS == {"superconducting": 1, "trapped_ion": 10}
+    for fn in (runner.run_ibm, runner.run_simulation, api.check, api.simulate):
+        assert inspect.signature(fn).parameters["probe_blocks"].default is None
+    assert inspect.signature(ionq.run_ionq).parameters["probe_blocks"].default == 1
+
+
+class _FakeIonQ:
+    """Records every job; circuit k of job j returns z = (k + j) % 25 zeros out of its shots (<= 24)."""
+    name = "fake_ionq"
+
+    def __init__(self):
+        self.jobs = []
+
+    def run(self, circuits, **options):
+        j, shots = len(self.jobs), options["shots"]
+        self.jobs.append((len(circuits), shots))
+
+        class Result:
+            def data(self, k):
+                return {}
+
+            def get_counts(self, k):
+                z = min((k + j) % 25, shots)
+                return {"0": z, "1": shots - z}
+
+        class Job:
+            def job_id(self):
+                return f"job{j}"
+
+            def result(self):
+                return Result()
+        return Job()
+
+
+@pytest.mark.parametrize("blocks", [1, 3])
+def test_run_ionq_blocks_split_shots_and_sum_counts(blocks):
+    backend = _FakeIonQ()
+    report = ionq.run_ionq(backend, [5], eps_prior=2e-4, spam=(0.01, 0.01), seed=1, probe_blocks=blocks)
+    assert backend.jobs == [(60, 24 // blocks)] * blocks
+    assert report.probe_blocks == blocks and report.job_ids == [f"job{b}" for b in range(blocks)]
+    assert sorted({e["block"] for e in report.raw}) == list(range(blocks))
+    per = 24 // blocks
+    expected = [sum(min((k + b) % 25, per) for b in range(blocks)) / 24 for k in range(60)]
+    assert np.allclose(report.results[0].p0, expected)
+    assert ionq.to_canary_report(report).probe_blocks == blocks
+
+
+def test_run_ionq_rejects_blocks_not_dividing_shots():
+    with pytest.raises(ValueError, match="dividing shots"):
+        ionq.run_ionq(_FakeIonQ(), [5], eps_prior=2e-4, spam=(0.01, 0.01), probe_blocks=5)
+
+
 def test_ionq_backend_detection():
     from qiskit_ionq import IonQProvider
     from qiskit_ibm_runtime.fake_provider import FakeProviderForBackendV2
