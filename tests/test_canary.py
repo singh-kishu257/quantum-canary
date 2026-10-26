@@ -234,7 +234,8 @@ def test_run_ionq_blocks_split_shots_and_sum_counts(blocks):
     assert report.probe_blocks == blocks and report.job_ids == [f"job{b}" for b in range(blocks)]
     assert sorted({e["block"] for e in report.raw}) == list(range(blocks))
     per = 24 // blocks
-    expected = [sum(min((k + b) % 25, per) for b in range(blocks)) / 24 for k in range(60)]
+    position = {k: i for i, k in enumerate(ionq._mixed_order(inv._RB_SEQUENCES))}
+    expected = [sum(min((position[k] + b) % 25, per) for b in range(blocks)) / 24 for k in range(60)]
     assert np.allclose(report.results[0].p0, expected)
     assert ionq.to_canary_report(report).probe_blocks == blocks
 
@@ -286,8 +287,15 @@ def test_run_ionq_splits_large_batches_into_jobs_without_changing_the_fit():
     assert [r.p0 for r in a.results] == [r.p0 for r in b.results]
     assert [r.epsilon_sx for r in a.results] == [r.epsilon_sx for r in b.results]
     _, circuits = ionq.ionq_circuits(ions, [94, 750, 1500], seed=1)
+    order = ionq._mixed_order(inv._RB_SEQUENCES)
+    assert sorted(order) == list(range(60))
+    chunks = ionq._job_chunks([circuits[k] for k in order], ionq.DEFAULT_MAX_JOB_GATES)
     assert all(sum(v for qc in chunk for k, v in qc.count_ops().items() if k.startswith("gpi")) <= ionq.DEFAULT_MAX_JOB_GATES
-               for _, chunk in ionq._job_chunks(circuits, ionq.DEFAULT_MAX_JOB_GATES))
+               for _, chunk in chunks)
+    group = lambda k: 0 if k < 10 else 1 if k < 30 else 2
+    for start, chunk in chunks:
+        share = np.bincount([group(order[start + i]) for i in range(len(chunk))], minlength=3) / len(chunk)
+        assert np.allclose(share, [1 / 6, 2 / 6, 3 / 6], atol=0.15)
 
 
 def test_ionq_shares_circuits_by_default():

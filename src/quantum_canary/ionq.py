@@ -196,6 +196,17 @@ def ionq_estimate(backend, circuits: Sequence[Any], shots: int) -> Optional[Dict
             "execution_time": execution, "queue_time": queue, "raw": raws}
 
 
+def _mixed_order(sizes: Sequence[int]) -> List[int]:
+    """Indices of circuits in the engine's order (consecutive groups of `sizes`, one per sequence length) arranged
+    so every group is spread evenly over the list: consecutive jobs then each hold the same mix of lengths, and a
+    difference between jobs shifts all lengths alike instead of bending the decay."""
+    keys, start = [], 0
+    for s, n in enumerate(sizes):
+        keys += [((j + 0.5) / n, s, start + j) for j in range(n)]
+        start += n
+    return [k for _, _, k in sorted(keys)]
+
+
 def _job_chunks(circuits: Sequence[Any], max_gates: int) -> List[Tuple[int, List[Any]]]:
     """Consecutive (first index, circuits) runs of at most max_gates native gates each (one circuit if it alone
     exceeds max_gates): the jobs one batch is submitted as, in order, so each stays under IonQ's payload limit.
@@ -285,7 +296,9 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     of shots, default 1) runs each batch as that many jobs in order, each with
     shots / probe_blocks per circuit, and sums their counts. Each of those is
     sent as consecutive jobs of at most max_job_gates gates (IonQ's 10 MB
-    payload limit; the cost is unchanged, IonQ bills per circuit). With max_cost,
+    payload limit; the cost is unchanged, IonQ bills per circuit), the
+    circuits ordered so every job holds the same mix of sequence lengths
+    (_mixed_order). With max_cost,
     IonQ's own estimate (ionq_estimate) of all jobs is fetched first and the
     run is refused if it is higher, or if IonQ returns no estimate.
     """
@@ -325,14 +338,15 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     job_ids, raw = [], []
     for b, batch in enumerate(batches):
         batch_circuits = circuits[b * n_per_batch:(b + 1) * n_per_batch]
+        order = _mixed_order(inv._RB_SEQUENCES)
         for block in range(blocks):
-            for start, chunk in _job_chunks(batch_circuits, max_job_gates):
+            for start, chunk in _job_chunks([batch_circuits[k] for k in order], max_job_gates):
                 job = backend.run(chunk, **options)
                 job_id = job.job_id() if hasattr(job, "job_id") else None
                 job_ids.append(job_id)
                 result = job.result()
                 for i in range(len(chunk)):
-                    k = start + i
+                    k = order[start + i]
                     probs = None
                     try:
                         probs = result.data(i).get("probabilities")

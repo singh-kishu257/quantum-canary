@@ -2,7 +2,8 @@
 Usage: python research/ionq_hardware.py TAG [BACKEND] [MAX_COST]   e.g.  A   |   A qpu.forte-1 3000
        python research/ionq_hardware.py estimate [BACKEND]          IonQ's prior, sequence lengths and cost estimate;
                                                                     nothing is submitted
-BACKEND sim:forte-1 is IonQ's simulator with the forte-1 noise model, priors from qpu.forte-1's characterization.
+BACKEND sim:forte-1 is IonQ's simulator with the forte-1 noise model, priors from qpu.forte-1's characterization,
+on qubits 0-9 (a simulator simulates every qubit up to the highest one used, and cannot run 34).
 A run saves the Canary report and IonQ's full report (IonQ's cost estimates, the prior, sequence lengths, job ids,
 raw counts, start time and wall time)."""
 import json, sys, time, pathlib, quantum_canary as canary
@@ -41,7 +42,8 @@ if tag == "estimate":
     sys.exit()
 
 start, t0 = datetime.now(timezone.utc).isoformat(), time.perf_counter()
-raw = canary.run_ionq(backend, IONS, max_cost=float(cap) if cap else None,
+ions = list(range(len(IONS))) if noise else IONS  # simulators run the circuit's full width: keep it 10 qubits
+raw = canary.run_ionq(backend, ions, max_cost=float(cap) if cap else None,
                       run_options={"noise_model": noise} if noise else None, **priors)
 wall = time.perf_counter() - t0
 report = canary.Report(canary.ionq.to_canary_report(raw))
