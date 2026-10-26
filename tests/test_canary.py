@@ -298,6 +298,56 @@ def test_run_ionq_splits_large_batches_into_jobs_without_changing_the_fit():
         assert np.allclose(share, [1 / 6, 2 / 6, 3 / 6], atol=0.15)
 
 
+class _QueuedIonQ:
+    """A backend whose jobs finish only when told, are retrievable by id, and return their circuit names."""
+    name = "qpu.fake"
+
+    def __init__(self):
+        self.jobs = {}
+
+    def run(self, circuits, **options):
+        names, shots, jid = [qc.name for qc in circuits], options["shots"], f"job{len(self.jobs)}"
+
+        class Result:
+            def to_dict(self):
+                return {"results": [{"header": {"name": n}} for n in names]}
+
+            def data(self, i):
+                return {}
+
+            def get_counts(self, i):
+                z = 4 + sum(map(ord, names[i])) % 17
+                return {"0": z, "1": shots - z}
+
+        job = type("Job", (), {"finished": False, "job_id": lambda s: jid, "result": lambda s: Result(),
+                               "done": lambda s: s.finished})()
+        self.jobs[jid] = job
+        return job
+
+    def retrieve_job(self, jid):
+        return self.jobs[jid]
+
+
+def test_submit_then_collect_later_matches_run_ionq():
+    import json
+    ions, kw = [0, 3, 6, 9, 12, 14, 18, 21, 27, 33], dict(eps_prior=2e-4, spam=(0.004, 0.003), seed=3)
+    direct = ionq.run_ionq(_QueuedIonQ(), ions, **kw)
+    backend, saved = _QueuedIonQ(), []
+    plan = ionq.submit_ionq(backend, ions, on_job=lambda p: saved.append(len(p["jobs"])), **kw)
+    assert saved == [1, 2, 3, 4] and len(backend.jobs) == 4
+    on_disk = json.loads(json.dumps({**plan, "jobs": [{k: v for k, v in r.items() if k != "_job"} for r in plan["jobs"]]}))
+    assert ionq.collect_ionq(backend, on_disk, wait=False) is None
+    for job in backend.jobs.values():
+        job.finished = True
+    later = ionq.collect_ionq(backend, on_disk, wait=False)
+    assert [r.p0 for r in later.results] == [r.p0 for r in direct.results]
+    assert [r.epsilon_sx for r in later.results] == [r.epsilon_sx for r in direct.results]
+    assert later.job_ids == ["job0", "job1", "job2", "job3"] and later.rb_seed == 3
+    on_disk["jobs"][0]["names"] = list(reversed(on_disk["jobs"][0]["names"]))
+    with pytest.raises(RuntimeError, match="returned circuits"):
+        ionq.collect_ionq(backend, on_disk)
+
+
 def test_ionq_shares_circuits_by_default():
     import inspect
     assert inspect.signature(ionq.run_ionq).parameters["parallel"].default is True

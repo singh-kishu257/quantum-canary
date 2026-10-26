@@ -39,7 +39,7 @@ from scipy.stats import chi2 as _chi2
 from . import inversion as inv
 from . import online, runner
 
-__all__ = ["IonResult", "IonQReport", "ionq_circuits", "ionq_estimate", "ionq_priors", "run_ionq",
+__all__ = ["IonResult", "IonQReport", "ionq_circuits", "ionq_estimate", "ionq_priors", "run_ionq", "submit_ionq", "collect_ionq",
            "ion_health", "to_canary_report"]
 
 DEFAULT_SHOTS = runner.DEFAULT_SHOTS["gate"]
@@ -301,7 +301,26 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     (_mixed_order). With max_cost,
     IonQ's own estimate (ionq_estimate) of all jobs is fetched first and the
     run is refused if it is higher, or if IonQ returns no estimate.
+    run_ionq is submit_ionq followed by collect_ionq, waiting for every job.
     """
+    return collect_ionq(backend, submit_ionq(backend, ions, shots, eps_prior, spam, max_ops, max_job_gates,
+                                             max_cost, run_options, parallel, seed, probe_blocks))
+
+
+def submit_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
+                eps_prior: Optional[float] = None, spam: Optional[Tuple[float, float]] = None,
+                max_ops: int = DEFAULT_MAX_OPS, max_job_gates: int = DEFAULT_MAX_JOB_GATES,
+                max_cost: Optional[float] = None, run_options: Optional[Dict[str, Any]] = None,
+                parallel: bool = True, seed: Optional[int] = None, probe_blocks: int = 1,
+                on_job=None) -> Dict[str, Any]:
+    """The submission half of run_ionq (same arguments): priors, circuits and
+    IonQ's estimate against max_cost, then every job submitted without
+    waiting. Returns the plan collect_ionq needs: backend, ions, shots,
+    probe_blocks, rb_lengths, rb_seed, eps_prior, spam, batches, IonQ's
+    estimates and, per job, its id, batch, block, submission time and the
+    circuits it holds (indices and names); each job's handle is kept under
+    "_job", the rest is JSON. on_job(plan) is called after every submission,
+    so the plan can be saved before the next job is sent."""
     if isinstance(probe_blocks, bool) or int(probe_blocks) != probe_blocks or probe_blocks < 1 \
             or int(shots) % int(probe_blocks):
         raise ValueError(f"probe_blocks must be an int >= 1 dividing shots={shots}, got {probe_blocks!r}")
@@ -333,34 +352,73 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
         pass
     options.update(run_options or {})
 
-    zeros = {q: np.zeros(n_per_batch) for q in ions}
-    totals = {q: np.zeros(n_per_batch) for q in ions}
-    job_ids, raw = [], []
+    plan = {"backend": str(getattr(backend, "name", backend)), "ions": [int(q) for q in ions], "shots": int(shots),
+            "probe_blocks": blocks, "rb_lengths": [int(m) for m in rb_lengths], "rb_seed": rb_seed,
+            "eps_prior": float(arch["eps_typical"]), "spam": [float(arch["p0_given_1"]), float(arch["p1_given_0"])],
+            "batches": [list(b) for b in batches], "ionq_estimates": estimates, "jobs": []}
     for b, batch in enumerate(batches):
         batch_circuits = circuits[b * n_per_batch:(b + 1) * n_per_batch]
         order = _mixed_order(inv._RB_SEQUENCES)
         for block in range(blocks):
             for start, chunk in _job_chunks([batch_circuits[k] for k in order], max_job_gates):
                 job = backend.run(chunk, **options)
-                job_id = job.job_id() if hasattr(job, "job_id") else None
-                job_ids.append(job_id)
-                result = job.result()
-                for i in range(len(chunk)):
-                    k = order[start + i]
-                    probs = None
-                    try:
-                        probs = result.data(i).get("probabilities")
-                    except Exception:
-                        probs = None
-                    counts = result.get_counts(i)
-                    source = probs if probs else counts
-                    raw.append({"job_id": job_id, "batch": list(batch), "block": block, "circuit": k,
-                                "counts": dict(counts), "probabilities": dict(probs) if probs else None})
-                    for j, q in enumerate(batch):
-                        zero, total = _p0(source, j)
-                        zeros[q][k] += zero
-                        totals[q][k] += total
+                plan["jobs"].append({"job_id": job.job_id() if hasattr(job, "job_id") else None, "batch": b,
+                                     "block": block, "circuits": [order[start + i] for i in range(len(chunk))],
+                                     "names": [qc.name for qc in chunk],
+                                     "submitted_utc": datetime.now(timezone.utc).isoformat(), "_job": job})
+                if on_job is not None:
+                    on_job(plan)
+    return plan
 
+
+def _result_names(result) -> Optional[List[str]]:
+    """The circuit names a result carries (IonQ returns them in its headers), or None if it carries none."""
+    try:
+        names = [r["header"].get("name") for r in result.to_dict()["results"]]
+    except Exception:
+        return None
+    return names if all(names) else None
+
+
+def collect_ionq(backend, plan: Dict[str, Any], wait: bool = True) -> Optional[IonQReport]:
+    """The collection half of run_ionq: every job of a submit_ionq plan (its
+    "_job" handle, or backend.retrieve_job(job_id) for a plan read back from
+    disk), its counts summed per circuit and the fit per ion, as run_ionq
+    returns it. With wait=False, None while any job is unfinished. Raises if
+    the circuit names a job returns differ from the plan's."""
+    jobs = []
+    for rec in plan["jobs"]:
+        job = rec.get("_job") or backend.retrieve_job(rec["job_id"])
+        if not wait and not job.done():
+            return None
+        jobs.append((rec, job))
+    n_per_batch = sum(inv._RB_SEQUENCES)
+    ions, rb_lengths, shots = plan["ions"], plan["rb_lengths"], plan["shots"]
+    zeros = {q: np.zeros(n_per_batch) for q in ions}
+    totals = {q: np.zeros(n_per_batch) for q in ions}
+    raw = []
+    for rec, job in jobs:
+        result = job.result()
+        names = _result_names(result)
+        if names is not None and names != rec["names"]:
+            raise RuntimeError(f"job {rec['job_id']} returned circuits {names[:2]} ..., the plan has {rec['names'][:2]} ...")
+        batch = plan["batches"][rec["batch"]]
+        for i, k in enumerate(rec["circuits"]):
+            probs = None
+            try:
+                probs = result.data(i).get("probabilities")
+            except Exception:
+                probs = None
+            counts = result.get_counts(i)
+            source = probs if probs else counts
+            raw.append({"job_id": rec["job_id"], "batch": list(batch), "block": rec["block"], "circuit": k,
+                        "counts": dict(counts), "probabilities": dict(probs) if probs else None})
+            for j, q in enumerate(batch):
+                zero, total = _p0(source, j)
+                zeros[q][k] += zero
+                totals[q][k] += total
+
+    arch = _arch(plan["eps_prior"], tuple(plan["spam"]))
     results = []
     dof = len(rb_lengths) - 2
     for q in ions:
@@ -370,12 +428,12 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
                                  chi2_dof=chi2_dof, chi2_p=float(_chi2.sf(chi2_dof * dof, dof)),
                                  rb_lengths=[int(m) for m in rb_lengths], p0=[float(x) for x in p0],
                                  shots=[int(shots)] * n_per_batch))
-    return IonQReport(backend=str(getattr(backend, "name", backend)), ions=[int(q) for q in ions],
-                      shots=int(shots), rb_lengths=[int(m) for m in rb_lengths],
-                      eps_prior=float(arch["eps_typical"]),
+    return IonQReport(backend=plan["backend"], ions=[int(q) for q in ions], shots=int(shots),
+                      rb_lengths=[int(m) for m in rb_lengths], eps_prior=float(arch["eps_typical"]),
                       spam=(float(arch["p0_given_1"]), float(arch["p1_given_0"])),
-                      batches=[list(b) for b in batches], job_ids=job_ids, ionq_estimates=estimates,
-                      results=results, raw=raw, rb_seed=rb_seed, probe_blocks=blocks)
+                      batches=[list(b) for b in plan["batches"]], job_ids=[r["job_id"] for r in plan["jobs"]],
+                      ionq_estimates=plan["ionq_estimates"], results=results, raw=raw, rb_seed=plan["rb_seed"],
+                      probe_blocks=plan["probe_blocks"])
 
 
 def is_ionq(backend) -> bool:

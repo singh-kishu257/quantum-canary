@@ -1,0 +1,2138 @@
+{
+ "backend": "ionq_qpu.forte-1",
+ "ions": [
+  0,
+  3,
+  6,
+  9,
+  12,
+  14,
+  18,
+  21,
+  27,
+  33
+ ],
+ "shots": 24,
+ "probe_blocks": 1,
+ "rb_lengths": [
+  94,
+  750,
+  1500
+ ],
+ "rb_seed": 480125444,
+ "eps_prior": 0.00019999999999997797,
+ "spam": [
+  0.004146496815286562,
+  0.002853503184713333
+ ],
+ "batches": [
+  [
+   0,
+   3,
+   6,
+   9,
+   12,
+   14,
+   18,
+   21,
+   27,
+   33
+  ]
+ ],
+ "ionq_estimates": [
+  {
+   "cost": 1756.008,
+   "cost_unit": "usd",
+   "per_circuit_cost": [
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    20.0836,
+    38.32,
+    38.35,
+    38.26,
+    38.26,
+    38.63,
+    38.37,
+    38.4,
+    38.41,
+    38.31,
+    38.6,
+    38.38,
+    38.34,
+    38.65,
+    38.38,
+    38.56,
+    38.38,
+    38.72,
+    38.51,
+    38.35,
+    38.46,
+    38.19,
+    38.52,
+    38.54,
+    38.54,
+    38.54,
+    38.27,
+    38.69,
+    38.42,
+    38.43,
+    38.72
+   ],
+   "execution_time": 2561688.0,
+   "queue_time": 38624589,
+   "raw": [
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 799,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:26:50.804Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 3991,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 802,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:26:51.763Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 4000,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 797,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:26:52.746Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 3984,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 789,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:26:53.675Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 3958,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 790,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:26:54.617Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 3962,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 792,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:26:55.534Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 3968,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 788,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:26:56.432Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 3955,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 799,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:26:57.412Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 3991,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 802,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:26:58.425Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 4000,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 795,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:26:59.353Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 3978,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6299,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:00.303Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31934,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6278,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:01.277Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31830,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6273,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:02.228Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31805,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6202,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:03.165Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31452,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6289,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:04.161Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31885,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6267,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:05.170Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31775,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6305,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:06.153Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31964,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6235,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:07.160Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31616,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6293,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:08.112Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31905,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6270,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:09.097Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31790,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6238,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:10.107Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31631,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6260,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:11.045Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31740,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6289,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:12.020Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31885,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6250,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:13.038Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31691,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6278,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:13.973Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31830,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6245,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:14.877Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31666,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6243,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:15.834Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31656,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6324,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:16.831Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 32059,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6223,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:17.745Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31556,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 6261,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:18.680Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 20.08,
+     "estimated_execution_time": 31745,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12473,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:19.663Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.32,
+     "estimated_execution_time": 62668,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12484,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:20.634Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.35,
+     "estimated_execution_time": 62723,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12456,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:21.612Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.26,
+     "estimated_execution_time": 62583,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12454,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:22.563Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.26,
+     "estimated_execution_time": 62573,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12574,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:23.586Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.63,
+     "estimated_execution_time": 63171,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12490,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:24.618Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.37,
+     "estimated_execution_time": 62753,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12501,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:25.570Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.4,
+     "estimated_execution_time": 62807,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12502,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:26.485Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.41,
+     "estimated_execution_time": 62812,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12471,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:27.426Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.31,
+     "estimated_execution_time": 62658,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12564,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:28.500Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.6,
+     "estimated_execution_time": 63121,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12494,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:29.560Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.38,
+     "estimated_execution_time": 62773,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12481,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:30.545Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.34,
+     "estimated_execution_time": 62708,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12583,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:31.517Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.65,
+     "estimated_execution_time": 63216,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12493,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:32.507Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.38,
+     "estimated_execution_time": 62768,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12553,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:33.466Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.56,
+     "estimated_execution_time": 63066,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12494,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:34.392Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.38,
+     "estimated_execution_time": 62773,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12604,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:35.325Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.72,
+     "estimated_execution_time": 63320,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12537,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:36.366Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.51,
+     "estimated_execution_time": 62987,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12483,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:37.353Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.35,
+     "estimated_execution_time": 62718,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12518,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:38.505Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.46,
+     "estimated_execution_time": 62892,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12431,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:39.570Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.19,
+     "estimated_execution_time": 62459,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12539,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:40.583Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.52,
+     "estimated_execution_time": 62997,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12545,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:41.574Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.54,
+     "estimated_execution_time": 63026,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12544,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:42.669Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.54,
+     "estimated_execution_time": 63021,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12545,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:43.707Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.54,
+     "estimated_execution_time": 63026,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12459,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:44.753Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.27,
+     "estimated_execution_time": 62598,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12594,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:45.828Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.69,
+     "estimated_execution_time": 63270,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12505,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:46.894Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.42,
+     "estimated_execution_time": 62827,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12509,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:47.950Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.43,
+     "estimated_execution_time": 62847,
+     "current_predicted_queue_time": 38624589
+    },
+    {
+     "estimate_context": {
+      "organization": "edu.umd",
+      "project": "Personal Workspace (kanishka.singh.ums@gmail.com)",
+      "type": "ionq.circuit.v1",
+      "backend": "qpu.forte-1",
+      "1q_gates": 12605,
+      "2q_gates": 0,
+      "qubits": 10,
+      "shots": 24,
+      "error_mitigation": false,
+      "session": false
+     },
+     "estimated_at": "2026-10-26T16:27:48.981Z",
+     "estimated_unit": "usd",
+     "rate_card": {
+      "id": "01922aaa-694a-7aa5-b8b4-2d0a7ebce307",
+      "rates": [
+       {
+        "sku": "forte_on_demand",
+        "unit": "gates",
+        "cost_1q_gate": 0.000128,
+        "cost_2q_gate": 0.000873,
+        "job_cost_minimum": 20.0836
+       }
+      ]
+     },
+     "estimated_total_cost": 38.72,
+     "estimated_execution_time": 63325,
+     "current_predicted_queue_time": 38624589
+    }
+   ]
+  }
+ ],
+ "jobs": [
+  {
+   "job_id": "01a1790a-51c5-74be-bb19-903ebf3bcb50",
+   "batch": 0,
+   "block": 0,
+   "circuits": [
+    30,
+    10,
+    0,
+    31,
+    11,
+    32,
+    33,
+    12,
+    1,
+    34,
+    13,
+    35,
+    36,
+    14,
+    2,
+    37,
+    15
+   ],
+   "names": [
+    "canary_rb_2_0_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_0_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_0_0_m94_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_1_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_1_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_2_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_3_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_2_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_0_1_m94_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_4_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_3_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_5_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_6_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_4_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_0_2_m94_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_7_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_5_m750_ions0-3-6-9-12-14-18-21-27-33"
+   ],
+   "submitted_utc": "2026-10-26T16:27:57.652259+00:00"
+  },
+  {
+   "job_id": "01a1790a-82f7-7220-8f35-e5471d7a2ad1",
+   "batch": 0,
+   "block": 0,
+   "circuits": [
+    38,
+    39,
+    16,
+    3,
+    40,
+    17,
+    41,
+    42,
+    18,
+    4,
+    43,
+    19,
+    44,
+    45,
+    20,
+    5,
+    46
+   ],
+   "names": [
+    "canary_rb_2_8_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_9_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_6_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_0_3_m94_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_10_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_7_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_11_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_12_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_8_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_0_4_m94_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_13_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_9_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_14_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_15_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_10_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_0_5_m94_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_16_m1500_ions0-3-6-9-12-14-18-21-27-33"
+   ],
+   "submitted_utc": "2026-10-26T16:28:10.367528+00:00"
+  },
+  {
+   "job_id": "01a1790a-b511-76ad-aff8-3eff202fe3cd",
+   "batch": 0,
+   "block": 0,
+   "circuits": [
+    21,
+    47,
+    48,
+    22,
+    6,
+    49,
+    23,
+    50,
+    51,
+    24,
+    7,
+    52,
+    25,
+    53,
+    54,
+    26,
+    8
+   ],
+   "names": [
+    "canary_rb_1_11_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_17_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_18_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_12_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_0_6_m94_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_19_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_13_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_20_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_21_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_14_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_0_7_m94_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_22_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_15_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_23_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_24_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_16_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_0_8_m94_ions0-3-6-9-12-14-18-21-27-33"
+   ],
+   "submitted_utc": "2026-10-26T16:28:23.064968+00:00"
+  },
+  {
+   "job_id": "01a1790a-d285-7228-a7f8-583191203ae4",
+   "batch": 0,
+   "block": 0,
+   "circuits": [
+    55,
+    27,
+    56,
+    57,
+    28,
+    9,
+    58,
+    29,
+    59
+   ],
+   "names": [
+    "canary_rb_2_25_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_17_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_26_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_27_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_18_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_0_9_m94_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_28_m1500_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_1_19_m750_ions0-3-6-9-12-14-18-21-27-33",
+    "canary_rb_2_29_m1500_ions0-3-6-9-12-14-18-21-27-33"
+   ],
+   "submitted_utc": "2026-10-26T16:28:30.535488+00:00"
+  }
+ ],
+ "tag": "A",
+ "request": "qpu.forte-1"
+}
