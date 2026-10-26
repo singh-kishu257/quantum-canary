@@ -1,4 +1,4 @@
-"""Fig. 5 -- IBM Kingston, all 154 operational qubits: Canary against qiskit-experiments (QE) in IBM's standard
+"""Fig. 6 -- IBM Kingston, all 154 operational qubits: Canary against qiskit-experiments (QE) in IBM's standard
 configuration (research/data/hardware/ibm_kingston_20261026T014902Z, sandwich C1 QE1 C2 QE2 C3).
 (a-d) Bland-Altman of Canary (mean of C1 and C2) against QE1, with the band predicted in silico; QE default fits
 and QE's own analysis re-run with the decay floor fixed at its physical value; (e) repeatability between repeats;
@@ -210,4 +210,4 @@ ax_h.text(0.5, 0.97, "8,640 vs 92,000\nshots/qubit", transform=ax_h.transAxes, h
           fontsize=c.SIZE - 1)
 ax_h.text(0.5, -0.36, "(h) Cost, 154 qubits", transform=ax_h.transAxes, ha="center", va="top")
 
-c.save(fig, "fig5")
+c.save(fig, "fig6")

@@ -4,6 +4,7 @@ import json
 import pathlib
 import numpy as np
 import pandas as pd
+from nisq_common import holm
 
 RUN = pathlib.Path(__file__).resolve().parents[1] / "data" / "hardware" / "ibm_kingston_20261026T014902Z"
 CANARY_STEPS, QE_STEPS = ("C1", "C2", "C3"), ("QE1", "QE2")
@@ -169,6 +170,93 @@ def bland_altman(x):
 def robust_sd(x):
     x = np.asarray(x, dtype=float)
     return float(1.4826 * np.median(np.abs(x - np.median(x))))
+
+
+def chip_layout():
+    """(x, y) of every qubit and the coupled pairs, from the two-qubit gates in IBM's calibration: Heron r2 rows of
+    16 qubits (qubit 20k + c at column c of row k), each bridge qubit between the two rows it couples, at the mean
+    column of its neighbours."""
+    c = json.load(open(RUN / "calibration_C1.json"))
+    pairs = sorted({tuple(sorted(g["qubits"])) for g in c["gates"] if len(g["qubits"]) == 2})
+    pos = {q: (q % 20, -2 * (q // 20)) for q in range(len(c["qubits"])) if q % 20 < 16}
+    for q in range(len(c["qubits"])):
+        if q % 20 >= 16:
+            nb = [p for a, b in pairs for p in (a, b) if q in (a, b) and p != q and p in pos]
+            pos[q] = (float(np.mean([pos[p][0] for p in nb])), float(np.mean([pos[p][1] for p in nb])))
+    return pos, pairs
+
+
+def job_times(at="mid"):
+    """When each measurement ran on the QPU (POSIX s): per Canary step its one job, per QE step and family its own
+    job; the midpoint of IBM's running-to-finished window (at="mid") or its start (at="start")."""
+    from datetime import datetime
+    ts = lambda x: datetime.fromisoformat(x.replace("Z", "+00:00")).timestamp()
+    when = lambda j: (ts(j["running"]) + ts(j["finished"])) / 2 if at == "mid" else ts(j["running"])
+    out = {}
+    for step in CANARY_STEPS + QE_STEPS:
+        jobs = {j["job_id"]: j for j in json.load(open(RUN / f"timing_{step}.json"))["jobs"]}
+        for p in CANARY_FIELDS:
+            ids = list(jobs) if step in CANARY_STEPS else json.load(open(RUN / f"{step}.json"))[QE_FIELDS[p][0]]["job_ids"]
+            assert len(ids) == 1
+            out[(step, p)] = when(jobs[ids[0]])
+    return out
+
+
+def drift(at="mid"):
+    """Per (qubit, parameter), over the whole sandwich:
+    Canary's change across C1, C2, C3: Cochran's Q (2 dof; with two checks Q is the square of canary.compare's z),
+    on the error bars canary.compare uses (each inflated by sqrt(max(chi2/dof, 1)) where it inflates them, T2 as
+    reported), with its p, Holm over every qubit and parameter, and
+    the between-check SD beyond the error bars, tau (DerSimonian-Laird), relative to the weighted mean (%; delta-
+    omega in Hz). QE's change QE1 to QE2 likewise (Q with 1 dof). The time-matched signed changes: Canary's
+    trajectory interpolated linearly to the times of QE's two jobs (job_times), its change between them against
+    QE2 - QE1 (relative to each tool's own mean, %; delta-omega in Hz). QE: floor-fixed refits for T1 and epsilon,
+    default fits otherwise. Delta-omega only where both QE values lie inside Canary's unambiguous range."""
+    from scipy.stats import chi2
+    from quantum_canary.workflow import _DRIFT_PARAMS
+    d, ref, rng, t = load(), qe_refits(), canary_dw_range_hz(), job_times(at)
+    inflate = {name: chi is not None for name, _, chi in _DRIFT_PARAMS}
+    rows = []
+    for p in CANARY_FIELDS:
+        v, s = wide(d, p)
+        sc = s[list(CANARY_STEPS)]
+        if inflate[p]:
+            chi = d[(d.tool == "canary") & (d.parameter == p)].pivot(index="qubit", columns="step", values="chi2_dof")
+            sc = sc * np.sqrt(np.maximum(chi[list(CANARY_STEPS)], 1))
+        if p in ("T1_s", "epsilon_sx"):
+            r = ref[ref.parameter == p]
+            qv = r.pivot(index="qubit", columns="step", values="floor_fixed")
+            qs = r.pivot(index="qubit", columns="step", values="floor_fixed_sigma")
+        else:
+            qv, qs = v[list(QE_STEPS)], s[list(QE_STEPS)]
+        tc = [t[(c, p)] for c in CANARY_STEPS]
+        t1, t2 = t[("QE1", p)], t[("QE2", p)]
+        assert tc[0] < t1 < tc[1] < t2 < tc[2]
+        for q in v.index:
+            x, sx = v.loc[q, list(CANARY_STEPS)].values.astype(float), sc.loc[q].values.astype(float)
+            y = np.array([qv[c].get(q, np.nan) for c in QE_STEPS], dtype=float)
+            sy = np.array([qs[c].get(q, np.nan) for c in QE_STEPS], dtype=float)
+            if not (np.all(np.isfinite(x)) and np.all(sx > 0) and np.all(np.isfinite(y)) and np.all(sy > 0)):
+                continue
+            if p == "delta_omega" and not np.all(np.abs(y) < rng[q]):
+                continue
+            row = dict(qubit=q, parameter=p)
+            for tool, z, sz in (("canary", x, sx), ("qe", y, sy)):
+                w = 1 / sz ** 2
+                m = np.sum(w * z) / np.sum(w)
+                Q = float(np.sum(w * (z - m) ** 2))
+                tau = np.sqrt(max(0.0, (Q - (len(z) - 1)) / (np.sum(w) - np.sum(w ** 2) / np.sum(w))))
+                row.update({f"{tool}_Q": Q, f"{tool}_p": float(chi2.sf(Q, len(z) - 1)), f"{tool}_mean": m,
+                            f"{tool}_tau": tau if p == "delta_omega" else 100 * tau / m})
+            dc = np.interp(t2, tc, x) - np.interp(t1, tc, x)
+            dq = y[1] - y[0]
+            row["canary_change"] = dc if p == "delta_omega" else 100 * dc / np.mean(x)
+            row["qe_change"] = dq if p == "delta_omega" else 100 * dq / np.mean(y)
+            rows.append(row)
+    out = pd.DataFrame(rows)
+    out["canary_p_holm"] = holm(out.canary_p.values)
+    out["qe_p_holm"] = holm(out.qe_p.values)
+    return out
 
 
 def timing():

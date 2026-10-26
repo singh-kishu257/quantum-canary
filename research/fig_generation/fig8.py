@@ -1,9 +1,9 @@
-"""Fig. 6 -- IonQ Forte-1: Canary's gate error on ten ions measured in parallel (simultaneous randomized benchmarking),
+"""Fig. 8 -- IonQ Forte-1: Canary's gate error on ten ions measured in parallel (simultaneous randomized benchmarking),
 runs collected by research/ionq_hardware.py (research/data/hardware/ionq_qpu.forte-1_<run>_<time>_ionq.json).
 (a) epsilon per ion in every run, ion 0 measured alone, and IonQ's published median; (b) run-to-run consistency:
 each run against the other runs of the same ion, in units of their combined error bar; (c) cost of one ten-ion check
 in parallel and one ion at a time, from IonQ's rate card. IEEE single column (3.5 in).
-Usage: python fig6.py [RUN_GLOB]   (default: the QPU runs A-D; a relative glob is taken in research/data/hardware)
+Usage: python fig8.py [RUN_GLOB]   (default: the QPU runs A-D; a relative glob is taken in research/data/hardware)
 """
 import glob
 import json
@@ -110,7 +110,7 @@ else:
     ax_c.set_yticks([])
 fig.text(0.5675, 0.004, "(c) Cost of one ten-ion check", ha="center", va="bottom")
 
-c.save(fig, "fig6" if RUN_GLOB.startswith("ionq_qpu") else "fig6_test")
+c.save(fig, "fig8" if RUN_GLOB.startswith("ionq_qpu") else "fig8_test")
 for k in range(len(runs)):
     print(f"run {chr(65 + k)}: median eps {np.median(eps[k]):.2e}, poor fits {sum(x['poor_fit'] for x in runs[k]['results'])}")
 print(f"|z| <= 2: {inside}/{len(zf)}")

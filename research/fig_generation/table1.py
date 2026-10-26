@@ -2,7 +2,8 @@
 research/figures/table1.tex and research/figures/tables_supp.tex, and as readable Markdown to research/figures/tables.md.
 I: median |error| [95% CI] per arm; S1: full accuracy and calibration per arm; S2: compare() false alarms on
 repeated checks of unchanged qubits; S3: robustness against coherent fraction and prior error (thirds);
-S4: Canary chi2 flags and health in the NISQ regime; S5: QE failed fits along the sweep.
+S4: Canary chi2 flags and health in the NISQ regime; S5: QE failed fits along the sweep; S6: robustness, every
+condition x parameter x tool x platform (Fig. 5).
 """
 import numpy as np
 from scipy.stats import chi2, norm
@@ -48,7 +49,8 @@ def latex(caption, label, cols, header, rows, wide=True):
 PLAIN = ((r"$T_2^*/T_2 < 0.8$", "T₂*/T₂ < 0.8"), (r"$T_2^*/T_2$", "T₂*/T₂"), ("$T_1$", "T₁"), ("$T_2$", "T₂"),
          (r"$\Delta\omega/2\pi$", "Δω/2π"), (r"$\Delta\omega$", "Δω"), (r"$\varepsilon$", "ε"), (r"$\chi^2$", "χ²"),
          (r"$|z| \leq 1$", "|z| ≤ 1"), (r"$|z| \leq 2$", "|z| ≤ 2"), (r"$\sigma$", "σ"), ("$-$", "−"),
-         ("$n$", "n"), ("$z$", "z"), (r"\texttt{compare()}", "`compare()`"), (r"\%", "%"), ("--", "–"))
+         ("$n$", "n"), ("$z$", "z"), (r"\texttt{compare()}", "`compare()`"), (r"\%", "%"), ("--", "–"),
+         (r"2$\sigma$", "2σ"), (r"$\rho$", "ρ"), ("$<$", "<"), ("$p$", "p"))
 
 
 def plain(s):
@@ -58,9 +60,10 @@ def plain(s):
 
 
 def markdown(title, cap, header, rows):
-    out = [f"## {title}", "", plain(cap), "", "| " + " | ".join(plain(h) for h in header) + " |",
+    cell = lambda s: plain(s).replace("|", r"\|")
+    out = [f"## {title}", "", plain(cap), "", "| " + " | ".join(cell(h) for h in header) + " |",
            "|" + "---|" * len(header)]
-    out += ["| " + " | ".join(plain(x) for x in r) + " |" for r in rows if r is not None]
+    out += ["| " + " | ".join(cell(x) for x in r) + " |" for r in rows if r is not None]
     return "\n".join(out + [""])
 
 
@@ -189,10 +192,30 @@ def table_s5():
     return header, rows, cap, latex(cap, "tab:s5", "lrcccc", header, rows, wide=False)
 
 
+def table_s6():
+    grid = c.robustness_grid(d, c.conditions(d))
+    names = {"coherent": "Coherent share of gate error", "readout": "Readout error", "switching": "T1 switching rate",
+             "ratio": "T2*/T2 (lower worse)", "detuning": "Detuning size", "prior": "Prior error"}
+    header = ["Platform", "Condition", "Parameter", "Tool", "Median |error|, best to worst fifth",
+              "2$\\sigma$ coverage, best to worst fifth (\\%)", "Spearman $\\rho$", "$p$ (Holm)"]
+    rows = []
+    for r in grid.itertuples():
+        unit = "Hz" if r.parameter == "delta_omega" else "\\%"
+        rows.append([r.platform, names[r.condition], HEAD[r.parameter], r.tool,
+                     f"{g3(r.error_best)} to {g3(r.error_worst)} {unit}", f"{r.coverage_best:.0f} to {r.coverage_worst:.0f}",
+                     f"{r.rho:+.2f}", f"{r.p_holm:.1e}" + (" *" if r.p_holm < 0.05 else "")])
+    cap = ("Robustness, every condition that differs between the simulated qubits against every parameter and both "
+           "tools (Canary; QE in IBM's standard configuration). Qubits in fifths of the condition; Spearman $\\rho$ "
+           "of the condition (signed so that positive means the error grows as the condition worsens) with the "
+           f"per-qubit |error|; $p$ Holm-corrected over all {len(grid)} tests (* $<$ 0.05). Fixed-strength "
+           "mechanisms (T1 drift, frequency drift, motional heating, detuning during gates) are not varied.")
+    return header, rows, cap, latex(cap, "tab:s6", "llllcccc", header, rows)
+
+
 assert not (~d[d.tool == "canary"].ok).any(), "Table S5 states Canary never failed"
 md, supp = ["# NISQ benchmark tables (research/data/nisq_benchmark.csv)", ""], []
 for title, fn in (("Table I", table_main), ("Table S1", table_s1), ("Table S2", table_s2), ("Table S3", table_s3),
-                  ("Table S4", table_s4), ("Table S5", table_s5)):
+                  ("Table S4", table_s4), ("Table S5", table_s5), ("Table S6", table_s6)):
     h, r, cap, tex = fn()
     md.append(markdown(title, cap, h, r))
     if title == "Table I":

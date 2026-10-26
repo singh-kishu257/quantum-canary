@@ -99,6 +99,72 @@ def paired(d, arch, param, arm_a, arm_b):
     return a.loc[j].values, b.loc[j].values
 
 
+def conditions(d):
+    """Per simulated qubit, every condition that differs between qubits: the two drawn on purpose (coherent share
+    of the gate error, prior error envelope), T2*/T2 and the true detuning (stored in the CSV), and the readout
+    error and T1 switching rate, rebuilt from each qubit's seed with research/nisq_benchmark.make_qubit (the
+    qubit's description only, nothing is re-simulated). The rebuilt qubits are checked against the CSV's stored
+    values. Cached in research/figures/nisq_conditions.csv."""
+    cache = OUT_DIR / "nisq_conditions.csv"
+    if cache.exists():
+        return pd.read_csv(cache).set_index(["architecture", "instance_id"])
+    import sys
+    import warnings
+    sys.path.insert(0, str(HERE.parent))
+    import nisq_benchmark as nb
+    warnings.filterwarnings("ignore")
+    base = d[d.arm == "canary_x1"]
+    rows = []
+    for (arch, inst), g in base.groupby(["architecture", "instance_id"]):
+        r0 = g.iloc[0]
+        truth, prior, cf, pf = nb.make_qubit(arch, int(r0.seed))
+        ratio = float(np.ravel(truth.architecture_specific.get("t2_ramsey_over_echo", [np.nan]))[0])
+        assert np.isclose(cf, r0.coherent_fraction, rtol=1e-12) and np.isclose(pf, r0.perturbation_frac, rtol=1e-12)
+        assert np.isnan(ratio) == np.isnan(r0.t2_ramsey_over_echo) and (np.isnan(ratio) or np.isclose(ratio, r0.t2_ramsey_over_echo, rtol=1e-12))
+        tele = truth.drift_processes.get("T1_telegraph")
+        rows.append(dict(architecture=arch, instance_id=int(inst), coherent=cf, prior=pf, ratio=ratio,
+                         readout=0.5 * (truth.spam_p0_given_1[0] + truth.spam_p1_given_0[0]),
+                         switching=tele.params["rate"] if tele is not None else np.nan,
+                         detuning=abs(g[g.parameter == "delta_omega"].true_value.iloc[0]) / (2 * np.pi)))
+    out = pd.DataFrame(rows)
+    out.to_csv(cache, index=False)
+    return out.set_index(["architecture", "instance_id"])
+
+
+WORSE = {"coherent": 1, "readout": 1, "switching": 1, "ratio": -1, "detuning": 1, "prior": 1}
+
+
+def fifths(k, arch, cond):
+    """Qubits of one platform in fifths of a condition, 0 = best, 4 = worst (T2*/T2 is worse when lower)."""
+    x = k.loc[arch][cond].dropna()
+    return pd.qcut(WORSE[cond] * x, 5, labels=False), x
+
+
+def robustness_grid(d, k):
+    """Every condition x parameter x tool (Canary, QE standard) x platform: Spearman rank correlation of the
+    condition (signed so that positive = error grows as the condition worsens) with the per-qubit |error|, its
+    Holm-corrected p over the whole grid, and median |error| and 2-sigma coverage in the best and worst fifths."""
+    from scipy.stats import spearmanr
+    rows = []
+    for arch, tag in ARCH:
+        for cond in WORSE:
+            if k.loc[arch][cond].isna().all():
+                continue
+            fifth, x = fifths(k, arch, cond)
+            for p in PARAMS:
+                for arm, tool in (("canary_x1", "Canary"), ("qe_ibm", "QE standard")):
+                    g = sel(d, arch, arm, p).set_index("instance_id").join(fifth.rename("f")).join(x.rename("x"))
+                    rho, pv = spearmanr(WORSE[cond] * g.x, g.err)
+                    med = g.groupby("f").err.median()
+                    cov = g.groupby("f").z_score.apply(lambda z: 100 * np.mean(np.abs(z) <= 2))
+                    rows.append(dict(platform=tag, condition=cond, parameter=p, tool=tool, n=len(g), rho=rho, p=pv,
+                                     error_best=med.iloc[0], error_worst=med.iloc[-1], coverage_best=cov.iloc[0],
+                                     coverage_worst=cov.iloc[-1]))
+    out = pd.DataFrame(rows)
+    out["p_holm"] = holm(out.p.values)
+    return out
+
+
 def save(fig, name):
     OUT_DIR.mkdir(exist_ok=True)
     for ext in ("pdf", "png"):
