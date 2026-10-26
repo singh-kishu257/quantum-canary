@@ -1,0 +1,45 @@
+{
+ "start_utc": "2026-10-26T02:20:06.790721+00:00",
+ "wall_s": 799.4277849999999,
+ "cpu_s": 625.109375,
+ "job_ids": [
+  "dbfbhpgm94ac738t7p80",
+  "dbfbi8fsstms73fdgirg",
+  "dbfbinvsstms73fdgjv0",
+  "dbfbn3fpc3tc739n51ag"
+ ],
+ "qpu_s": 63.0,
+ "ibm_s": 155.967549,
+ "queue_s": 5.957111,
+ "classical_s": 643.4602359999999,
+ "jobs": [
+  {
+   "job_id": "dbfbhpgm94ac738t7p80",
+   "qpu_s": 7.0,
+   "created": "2026-10-26T02:20:22.816273Z",
+   "finished": "2026-10-26T02:20:46.823337Z",
+   "running": "2026-10-26T02:20:24.620241Z"
+  },
+  {
+   "job_id": "dbfbi8fsstms73fdgirg",
+   "qpu_s": 7.0,
+   "created": "2026-10-26T02:21:21.66363Z",
+   "finished": "2026-10-26T02:21:33.587306Z",
+   "running": "2026-10-26T02:21:23.109588Z"
+  },
+  {
+   "job_id": "dbfbinvsstms73fdgjv0",
+   "qpu_s": 31.0,
+   "created": "2026-10-26T02:22:23.746028Z",
+   "finished": "2026-10-26T02:23:11.12045Z",
+   "running": "2026-10-26T02:22:25.152108Z"
+  },
+  {
+   "job_id": "dbfbn3fpc3tc739n51ag",
+   "qpu_s": 18.0,
+   "created": "2026-10-26T02:31:41.477745Z",
+   "finished": "2026-10-26T02:32:54.140132Z",
+   "running": "2026-10-26T02:31:42.77885Z"
+  }
+ ]
+}
