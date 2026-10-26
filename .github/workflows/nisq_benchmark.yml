@@ -4,7 +4,7 @@ name: NISQ benchmark - Canary vs qiskit-experiments
 # Each architecture is split into SHARDS parallel jobs; shard k runs instances i with
 # i mod SHARDS == k (seed = held-out offset + i), so the shot-sweep instances (i < n_sweep)
 # are spread evenly. The merge job checks that every (instance, arm, parameter) row is present
-# exactly once and writes one CSV with its provenance file.
+# exactly once and writes one CSV.
 
 on:
   workflow_dispatch:
@@ -72,7 +72,6 @@ jobs:
           name: nisq-benchmark-${{ matrix.architecture }}-shard${{ matrix.shard }}
           path: |
             nisq_benchmark_${{ matrix.architecture }}_shard${{ matrix.shard }}.csv
-            nisq_benchmark_${{ matrix.architecture }}_shard${{ matrix.shard }}.csv.meta.json
           if-no-files-found: error
           retention-days: 90
 
@@ -116,7 +115,5 @@ jobs:
           name: nisq-benchmark-combined
           path: |
             nisq_benchmark.csv
-            nisq_benchmark.csv.meta.json
-            shard_inputs/*.meta.json
           if-no-files-found: error
           retention-days: 90

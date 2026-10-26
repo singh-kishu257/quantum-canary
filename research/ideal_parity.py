@@ -315,9 +315,7 @@ def write_csv(rows: List[Dict[str, Any]], path: pathlib.Path) -> None:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         writer.writerows(ordered)
-    from provenance import write_meta
-    write_meta(path)
-    print(f"[ideal_parity] wrote {len(ordered)} rows -> {path} (+ .meta.json)", flush=True)
+    print(f"[ideal_parity] wrote {len(ordered)} rows -> {path}", flush=True)
 
 
 def summarize(rows: List[Dict[str, Any]]) -> None:

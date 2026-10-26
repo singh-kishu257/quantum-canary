@@ -330,9 +330,7 @@ def write_csv(rows, path: pathlib.Path):
         w = csv.DictWriter(f, fieldnames=COLUMNS)
         w.writeheader()
         w.writerows(rows)
-    from provenance import write_meta
-    write_meta(path)
-    print(f"[nisq_benchmark] wrote {len(rows)} rows -> {path} (+ .meta.json)", flush=True)
+    print(f"[nisq_benchmark] wrote {len(rows)} rows -> {path}", flush=True)
 
 
 def main():

@@ -256,8 +256,8 @@ def _ibm_usage(backend, job_id: Optional[str]) -> Optional[float]:
 def check(backend, qubits: Sequence[int], probe_blocks: Optional[int] = None) -> Report:
     """Check `qubits` of an IBM backend (or a qiskit-ibm-runtime fake backend) in
     one short job and return the Report. On a qiskit-ionq backend the qubits are
-    ions and only the gate error is measured (ionq.run_ionq, one job per ion, no
-    cost limit: use run_ionq(..., max_cost=...) for one). probe_blocks splits
+    ions and only the gate error is measured (ionq.run_ionq: all ions in shared
+    circuits, no cost limit: use run_ionq(..., max_cost=...) for one). probe_blocks splits
     each circuit's shots into that many interleaved blocks; default 1 on both
     (runner.DEFAULT_PROBE_BLOCKS, ionq.run_ionq)."""
     if ionq.is_ionq(backend):

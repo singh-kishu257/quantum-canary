@@ -6,7 +6,6 @@ seconds, fetched after the timer; ibm_s and queue_s = their merged intervals; cl
 Usage: sandwich BACKEND  |  canary BACKEND TAG [QUBITS]   e.g. canary ibm_kingston smoke 13  |  canary ibm_kingston C3"""
 import json, pathlib, sys, time, quantum_canary as canary
 from datetime import datetime, timezone
-from provenance import write_meta
 from qiskit_experiments.framework import BatchExperiment, ParallelExperiment
 from qiskit_experiments.library import StandardRB, T1, T2Hahn, T2Ramsey
 OUT, QE_SHOTS = pathlib.Path(__file__).resolve().parent / "data" / "hardware", {"t1": 1000, "hahn": 1000, "ramsey": 2000, "rb": 1000}
@@ -46,7 +45,6 @@ def step(name, tag, run, need_s, work, job_ids):
     (run / f"calibration_{tag}.json").write_text(json.dumps(p.to_dict(), default=str))
     jsonable = lambda v: [v.nominal_value, v.std_dev] if hasattr(v, "std_dev") else str(v)
     result.save(run / f"{tag}.json") if hasattr(result, "save") else (run / f"{tag}.json").write_text(json.dumps(result, default=jsonable))
-    write_meta(run / f"{tag}.json")
     return result
 
 def chip(b, p, run):

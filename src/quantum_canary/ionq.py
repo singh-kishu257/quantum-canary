@@ -11,10 +11,14 @@ ion's epsilon_sx (error per pulse) comes from the engine's own gate fit
 
 Circuits are sent as IonQ native gates with optimization off and IonQ's
 debiasing off (debiasing averages permuted copies of a circuit, which mixes
-up the ions). Each ion is probed in its own circuits by default: on Forte-1
-in August 2026, running several ions in the same circuit gave results
-disturbed by crosstalk. parallel=True shares circuits between ions, in
-batches of at most max_ops gates. probe_blocks=N (default 1) splits every
+up the ions). By default the ions share circuits (batches of at most max_ops
+gates), each running its own independent random sequences: simultaneous
+randomized benchmarking, so epsilon_sx is the error per pulse while all the
+ions are driven, crosstalk included. IonQ bills every circuit of a job at
+least its minimum charge, so this is also far cheaper than probing ions one
+at a time. parallel=False probes each ion in its own circuits (isolated
+error; on Forte-1 in August 2026 the earlier gate-pair probe was disturbed
+by crosstalk when ions shared circuits). probe_blocks=N (default 1) splits every
 circuit's shots into N blocks, one job per block in order, so all sequence
 lengths sample the same stretch of time.
 
@@ -130,7 +134,7 @@ def _profile(arch: Dict[str, Any]) -> inv.BackendProfile:
 
 
 def ionq_circuits(ions: Sequence[int], rb_lengths: Sequence[int],
-                  max_ops: int = DEFAULT_MAX_OPS, parallel: bool = False,
+                  max_ops: int = DEFAULT_MAX_OPS, parallel: bool = True,
                   seed: Optional[int] = None) -> Tuple[List[List[int]], List[Any]]:
     """Batches of ions and, for each batch, the gate probe's circuits
     (inversion._RB_SEQUENCES per length of rb_lengths, in the engine's order):
@@ -158,23 +162,36 @@ def ionq_circuits(ions: Sequence[int], rb_lengths: Sequence[int],
 
 def ionq_estimate(backend, circuits: Sequence[Any], shots: int) -> Optional[Dict[str, Any]]:
     """IonQ's own estimate for one job of `circuits` with `shots` each, from
-    its /jobs/estimate endpoint (qiskit-ionq's client.estimate_job), given the
-    job's native gate count and qubit count: a dict with IonQ's estimated
-    cost, cost unit, execution and queue time and the raw response, or None
-    if the backend gives no estimate (simulators, mock backends, API errors)."""
+    its /jobs/estimate endpoint (qiskit-ionq's client.estimate_job), asked once
+    per circuit: IonQ bills each circuit of a job as its own child job, at
+    least the rate card's job_cost_minimum, so the cost is the sum over
+    circuits of max(IonQ's estimate, that minimum). Returns a dict with that
+    cost, its unit, the per-circuit costs, the summed execution time, the
+    queue time and the raw responses, or None if the backend gives no
+    estimate (simulators, mock backends, API errors). The cost is read from
+    estimated_cost or, in IonQ's current API, estimated_total_cost; times are
+    in IonQ's units (milliseconds in October 2026)."""
     client = getattr(backend, "client", None)
     if client is None or not hasattr(client, "estimate_job"):
         return None
-    oneq = sum(n for qc in circuits for name, n in qc.count_ops().items() if name.startswith("gpi"))
-    qubits = len({qc.find_bit(i.qubits[0]).index for qc in circuits for i in qc.data
-                  if i.operation.name == "measure"})
-    try:
-        est = client.estimate_job(backend=str(backend.name), oneq_gates=int(oneq), twoq_gates=0,
-                                  qubits=int(qubits), shots=int(shots), error_mitigation=False)
-    except Exception:
-        return None
-    return {"cost": est.cost, "cost_unit": est.cost_unit, "execution_time_s": est.exec_time,
-            "queue_time_s": est.queue_time, "raw": est.to_dict()}
+    costs, raws, unit, execution, queue = [], [], None, 0.0, None
+    for qc in circuits:
+        oneq = sum(n for name, n in qc.count_ops().items() if name.startswith("gpi"))
+        qubits = len({qc.find_bit(i.qubits[0]).index for i in qc.data if i.operation.name == "measure"})
+        try:
+            est = client.estimate_job(backend=str(backend.name), oneq_gates=int(oneq), twoq_gates=0,
+                                      qubits=int(qubits), shots=int(shots), error_mitigation=False)
+        except Exception:
+            return None
+        raw = est.to_dict()
+        cost = est.cost if est.cost is not None else raw.get("estimated_total_cost")
+        minimum = max([float(r.get("job_cost_minimum") or 0.0) for r in raw.get("rate_card", {}).get("rates", [])] or [0.0])
+        costs.append(None if cost is None else max(float(cost), minimum))
+        raws.append(raw)
+        unit, queue = unit or est.cost_unit or raw.get("estimated_unit"), est.queue_time
+        execution += float(est.exec_time or 0.0)
+    return {"cost": None if None in costs else sum(costs), "cost_unit": unit, "per_circuit_cost": costs,
+            "execution_time": execution, "queue_time": queue, "raw": raws}
 
 
 def _p0(counts: Dict[str, float], bit: int) -> Tuple[float, float]:
@@ -233,7 +250,7 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
              eps_prior: Optional[float] = None, spam: Optional[Tuple[float, float]] = None,
              max_ops: int = DEFAULT_MAX_OPS, max_cost: Optional[float] = None,
              run_options: Optional[Dict[str, Any]] = None,
-             parallel: bool = False, seed: Optional[int] = None,
+             parallel: bool = True, seed: Optional[int] = None,
              probe_blocks: int = 1) -> IonQReport:
     """Run Canary's gate-error probe on `ions` of a qiskit-ionq native-gate
     backend (provider.get_backend("qpu.forte-1", gateset="native"), or the
@@ -244,8 +261,9 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     the fit). Each one not given comes from the device's published
     characterization (ionq_priors), or the engine's trapped-ion value if there
     is none. seed fixes the random sequences (None: a fresh seed, recorded as
-    rb_seed). One job per batch of ions (one ion per batch unless
-    parallel=True), all circuits with the same shots; probe_blocks (a divisor
+    rb_seed). One job per batch of ions (all ions in shared circuits unless
+    that exceeds max_ops; parallel=False: one ion per batch), all circuits
+    with the same shots; probe_blocks (a divisor
     of shots, default 1) runs each batch as that many jobs in order, each with
     shots / probe_blocks per circuit, and sums their counts. With max_cost,
     IonQ's own estimate (ionq_estimate) of all jobs is fetched first and the

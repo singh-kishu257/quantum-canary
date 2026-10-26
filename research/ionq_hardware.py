@@ -1,17 +1,48 @@
-"""Quantum-Canary gate error on ten fixed IonQ ions, priors from IonQ characterization.
-Usage: python research/ionq_hardware.py TAG [BACKEND] [MAX_COST]   e.g.  A   |   B qpu.forte-1 3000"""
-import sys, pathlib, quantum_canary as canary
-from provenance import write_meta
+"""Quantum-Canary gate error on ten fixed IonQ ions, priors from IonQ's published characterization.
+Usage: python research/ionq_hardware.py TAG [BACKEND] [MAX_COST]   e.g.  A   |   A qpu.forte-1 3000
+       python research/ionq_hardware.py estimate [BACKEND]          IonQ's prior, sequence lengths and cost estimate;
+                                                                    nothing is submitted
+A run saves the Canary report and IonQ's full report (IonQ's cost estimates, the prior, sequence lengths, job ids,
+raw counts, start time and wall time)."""
+import json, sys, time, pathlib, quantum_canary as canary
+from datetime import datetime, timezone
 
+IONS = [0, 3, 6, 9, 12, 14, 18, 21, 27, 33]
 tag, name, cap = sys.argv[1], (sys.argv[2:3] or ["simulator"])[0], (sys.argv[3:4] or [None])[0]
 
-if name.startswith("qpu.") and cap is None:
+if name.startswith("qpu.") and cap is None and tag != "estimate":
     sys.exit("a QPU run needs MAX_COST (checked against IonQ's estimate)")
 
-backend = canary.credentials.ionq_provider(pathlib.Path(__file__).parents[1] / "ionq_api_token.txt").get_backend(name, gateset="native")
-report = canary.Report(canary.ionq.to_canary_report(canary.run_ionq(backend, [0, 3, 6, 9, 12, 14, 18, 21, 27, 33], max_cost=float(cap) if cap else None)))
-report.print()
-out = pathlib.Path(__file__).parent / "data" / "hardware" / f"ionq_{name}_{tag}_{report.timestamp[:19].replace(':', '')}.json"
+backend = canary.credentials.ionq_provider(pathlib.Path(__file__).resolve().parents[1] / "ionq_api_token.txt").get_backend(name, gateset="native")
 
+if tag == "estimate":
+    prior = canary.ionq.ionq_priors(backend) or {}
+    arch = canary.ionq._arch(prior.get("eps_prior"), prior.get("spam"))
+    lengths = canary.ionq._profile(arch).rb_lengths
+    batches, circuits = canary.ionq.ionq_circuits(IONS, lengths, seed=0)
+    n = len(circuits) // len(batches)
+    est = [canary.ionq.ionq_estimate(backend, circuits[i * n:(i + 1) * n], canary.ionq.DEFAULT_SHOTS) for i in range(len(batches))]
+    gates = sum(v for qc in circuits for k, v in qc.count_ops().items() if k.startswith("gpi"))
+    print(f"IonQ characterization {prior.get('date')}: eps_prior {arch['eps_typical']:.3g} (1 - median 1q fidelity), spam {prior.get('spam')}")
+    print(f"RB lengths {lengths}; {n} circuits x {canary.ionq.DEFAULT_SHOTS} shots per job; {gates * canary.ionq.DEFAULT_SHOTS:,.0f} gate-shots per run")
+    for b, e in zip(batches, est):
+        print(f"  job, ions {b}: " + (f"{e['cost']:,.2f} {e['cost_unit']} (per circuit {min(e['per_circuit_cost']):.2f}-"
+                                      f"{max(e['per_circuit_cost']):.2f}), execution {e['execution_time']:,.0f} (IonQ's units, ms)"
+                                      if e and e.get("cost") is not None else f"no cost from IonQ; IonQ returned {e and e.get('raw')}"))
+    if all(e and e.get("cost") is not None for e in est):
+        print(f"one run: {sum(e['cost'] for e in est):,.2f} {est[0]['cost_unit']}  (A + B: {2 * sum(e['cost'] for e in est):,.2f})")
+    sys.exit()
+
+start, t0 = datetime.now(timezone.utc).isoformat(), time.perf_counter()
+try:
+    raw = canary.run_ionq(backend, IONS, max_cost=float(cap) if cap else None)
+except ValueError as e:
+    sys.exit(f"not submitted: {e}")
+wall = time.perf_counter() - t0
+report = canary.Report(canary.ionq.to_canary_report(raw))
+report.print()
+stem = f"ionq_{name}_{tag}_{report.timestamp[:19].replace(':', '')}"
+out = pathlib.Path(__file__).resolve().parent / "data" / "hardware" / f"{stem}.json"
 report.save(out)
-write_meta(out)
+full = out.parent / f"{stem}_ionq.json"
+full.write_text(json.dumps(dict(raw.to_dict(), start_utc=start, wall_s=wall), indent=1, default=str))

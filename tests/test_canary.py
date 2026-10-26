@@ -239,6 +239,33 @@ def test_run_ionq_blocks_split_shots_and_sum_counts(blocks):
     assert ionq.to_canary_report(report).probe_blocks == blocks
 
 
+class _IonQRateCard:
+    """IonQ's /jobs/estimate reply as of October 2026: estimated_total_cost from gates x shots at the rate card,
+    which also carries the per-job minimum that IonQ applies to each circuit (child job) of a job."""
+    def estimate_job(self, oneq_gates, shots, **kwargs):
+        from qiskit_ionq.ionq_client import JobEstimate
+        return JobEstimate({"estimated_unit": "usd", "estimated_total_cost": round(oneq_gates * shots * 0.000128, 2),
+                            "estimated_execution_time": 1000, "rate_card": {"rates": [
+                                {"sku": "forte_on_demand", "cost_1q_gate": 0.000128, "job_cost_minimum": 20.0836}]}})
+
+
+def test_ionq_estimate_prices_each_circuit_with_its_minimum():
+    backend = type("B", (), {"name": "qpu.forte-1", "client": _IonQRateCard()})()
+    _, one_ion = ionq.ionq_circuits([0], [94, 750, 1500], parallel=False, seed=0)
+    e = ionq.ionq_estimate(backend, one_ion, 24)
+    assert e["cost_unit"] == "usd" and round(e["cost"], 2) == 1205.02
+    _, ten_ions = ionq.ionq_circuits([0, 3, 6, 9, 12, 14, 18, 21, 27, 33], [94, 750, 1500], seed=0)
+    e10 = ionq.ionq_estimate(backend, ten_ions, 24)
+    assert len(ten_ions) == 60 and 1600 < e10["cost"] < 1900 and min(e10["per_circuit_cost"]) == 20.0836
+
+
+def test_ionq_shares_circuits_by_default():
+    import inspect
+    assert inspect.signature(ionq.run_ionq).parameters["parallel"].default is True
+    batches, circuits = ionq.ionq_circuits([0, 3, 6], [94, 750, 1500], seed=0)
+    assert batches == [[0, 3, 6]] and len(circuits) == 60
+
+
 def test_run_ionq_rejects_blocks_not_dividing_shots():
     with pytest.raises(ValueError, match="dividing shots"):
         ionq.run_ionq(_FakeIonQ(), [5], eps_prior=2e-4, spam=(0.01, 0.01), probe_blocks=5)
