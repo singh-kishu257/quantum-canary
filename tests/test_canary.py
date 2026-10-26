@@ -259,6 +259,37 @@ def test_ionq_estimate_prices_each_circuit_with_its_minimum():
     assert len(ten_ions) == 60 and 1600 < e10["cost"] < 1900 and min(e10["per_circuit_cost"]) == 20.0836
 
 
+def test_run_ionq_splits_large_batches_into_jobs_without_changing_the_fit():
+    class ByName:
+        """Counts that depend only on the circuit (its name), not on how circuits are grouped into jobs."""
+        def __init__(self):
+            self.jobs = []
+
+        def run(self, circuits, **options):
+            self.jobs.append(len(circuits))
+            names = [qc.name for qc in circuits]
+
+            class Result:
+                def data(self, i):
+                    return {}
+
+                def get_counts(self, i):
+                    z = 6 + hash(names[i]) % 13
+                    return {"0": z, "1": options["shots"] - z}
+            return type("J", (), {"job_id": lambda s: f"j{len(names)}", "result": lambda s: Result()})()
+
+    ions = [0, 3, 6, 9, 12, 14, 18, 21, 27, 33]
+    one, split = ByName(), ByName()
+    a = ionq.run_ionq(one, ions, eps_prior=2e-4, spam=(0.004, 0.003), seed=1, max_job_gates=10 ** 9)
+    b = ionq.run_ionq(split, ions, eps_prior=2e-4, spam=(0.004, 0.003), seed=1)
+    assert one.jobs == [60] and len(split.jobs) > 1 and sum(split.jobs) == 60
+    assert [r.p0 for r in a.results] == [r.p0 for r in b.results]
+    assert [r.epsilon_sx for r in a.results] == [r.epsilon_sx for r in b.results]
+    _, circuits = ionq.ionq_circuits(ions, [94, 750, 1500], seed=1)
+    assert all(sum(v for qc in chunk for k, v in qc.count_ops().items() if k.startswith("gpi")) <= ionq.DEFAULT_MAX_JOB_GATES
+               for _, chunk in ionq._job_chunks(circuits, ionq.DEFAULT_MAX_JOB_GATES))
+
+
 def test_ionq_shares_circuits_by_default():
     import inspect
     assert inspect.signature(ionq.run_ionq).parameters["parallel"].default is True

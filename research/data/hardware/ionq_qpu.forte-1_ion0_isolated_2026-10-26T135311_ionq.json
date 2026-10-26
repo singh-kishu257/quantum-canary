@@ -1,0 +1,939 @@
+{
+ "backend": "qpu.forte-1",
+ "ions": [
+  0
+ ],
+ "shots": 24,
+ "probe_blocks": 1,
+ "rb_lengths": [
+  94,
+  750,
+  1500
+ ],
+ "rb_seed": null,
+ "eps_prior": 0.00019999999999997797,
+ "p0_given_1": 0.004146496815286562,
+ "p1_given_0": 0.002853503184713333,
+ "batches": [
+  [
+   0
+  ]
+ ],
+ "job_ids": [
+  "01a17651-12aa-74ec-94da-6c115c3895b6"
+ ],
+ "ionq_estimates": [
+  null
+ ],
+ "timestamp": "2026-10-26T13:53:11.225417+00:00",
+ "results": [
+  {
+   "ion": 0,
+   "epsilon_sx": 0.0001092988148130205,
+   "epsilon_sx_sigma": 1.3605589399192632e-05,
+   "chi2_dof": 0.7513105445487209,
+   "chi2_p": 0.38606162157277235,
+   "poor_fit": false,
+   "rb_lengths": [
+    94,
+    750,
+    1500
+   ],
+   "p0": [
+    1.0,
+    0.0,
+    1.0,
+    0.0,
+    1.0,
+    0.041666666666666664,
+    1.0,
+    0.0,
+    0.9583333333333334,
+    0.0,
+    0.9583333333333334,
+    0.08333333333333333,
+    0.9166666666666666,
+    0.0,
+    0.9583333333333334,
+    0.041666666666666664,
+    0.9583333333333334,
+    0.125,
+    0.9583333333333334,
+    0.0,
+    0.9166666666666666,
+    0.0,
+    0.9583333333333334,
+    0.08333333333333333,
+    0.9583333333333334,
+    0.08333333333333333,
+    0.875,
+    0.0,
+    0.9583333333333334,
+    0.125,
+    0.875,
+    0.0,
+    0.875,
+    0.125,
+    0.9166666666666666,
+    0.125,
+    0.9583333333333334,
+    0.08333333333333333,
+    0.8333333333333334,
+    0.08333333333333333,
+    0.7916666666666666,
+    0.08333333333333333,
+    0.9166666666666666,
+    0.16666666666666666,
+    0.6666666666666666,
+    0.08333333333333333,
+    0.9583333333333334,
+    0.08333333333333333,
+    0.7916666666666666,
+    0.16666666666666666,
+    0.875,
+    0.041666666666666664,
+    0.9583333333333334,
+    0.041666666666666664,
+    0.7916666666666666,
+    0.20833333333333334,
+    0.7916666666666666,
+    0.16666666666666666,
+    0.7916666666666666,
+    0.08333333333333333
+   ],
+   "shots": [
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24
+   ]
+  }
+ ],
+ "raw": [
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 0,
+   "name": "canary_rb_0_0_m94_ions0",
+   "counts": {
+    "0": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 1,
+   "name": "canary_rb_0_1_m94_ions0",
+   "counts": {
+    "1": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 2,
+   "name": "canary_rb_0_2_m94_ions0",
+   "counts": {
+    "0": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 3,
+   "name": "canary_rb_0_3_m94_ions0",
+   "counts": {
+    "1": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 4,
+   "name": "canary_rb_0_4_m94_ions0",
+   "counts": {
+    "0": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 5,
+   "name": "canary_rb_0_5_m94_ions0",
+   "counts": {
+    "0": 1,
+    "1": 23
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 6,
+   "name": "canary_rb_0_6_m94_ions0",
+   "counts": {
+    "0": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 7,
+   "name": "canary_rb_0_7_m94_ions0",
+   "counts": {
+    "1": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 8,
+   "name": "canary_rb_0_8_m94_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 9,
+   "name": "canary_rb_0_9_m94_ions0",
+   "counts": {
+    "1": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 10,
+   "name": "canary_rb_1_0_m750_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 11,
+   "name": "canary_rb_1_1_m750_ions0",
+   "counts": {
+    "0": 2,
+    "1": 22
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 12,
+   "name": "canary_rb_1_2_m750_ions0",
+   "counts": {
+    "0": 22,
+    "1": 2
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 13,
+   "name": "canary_rb_1_3_m750_ions0",
+   "counts": {
+    "1": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 14,
+   "name": "canary_rb_1_4_m750_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 15,
+   "name": "canary_rb_1_5_m750_ions0",
+   "counts": {
+    "0": 1,
+    "1": 23
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 16,
+   "name": "canary_rb_1_6_m750_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 17,
+   "name": "canary_rb_1_7_m750_ions0",
+   "counts": {
+    "0": 3,
+    "1": 21
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 18,
+   "name": "canary_rb_1_8_m750_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 19,
+   "name": "canary_rb_1_9_m750_ions0",
+   "counts": {
+    "1": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 20,
+   "name": "canary_rb_1_10_m750_ions0",
+   "counts": {
+    "0": 22,
+    "1": 2
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 21,
+   "name": "canary_rb_1_11_m750_ions0",
+   "counts": {
+    "1": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 22,
+   "name": "canary_rb_1_12_m750_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 23,
+   "name": "canary_rb_1_13_m750_ions0",
+   "counts": {
+    "0": 2,
+    "1": 22
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 24,
+   "name": "canary_rb_1_14_m750_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 25,
+   "name": "canary_rb_1_15_m750_ions0",
+   "counts": {
+    "0": 2,
+    "1": 22
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 26,
+   "name": "canary_rb_1_16_m750_ions0",
+   "counts": {
+    "0": 21,
+    "1": 3
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 27,
+   "name": "canary_rb_1_17_m750_ions0",
+   "counts": {
+    "1": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 28,
+   "name": "canary_rb_1_18_m750_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 29,
+   "name": "canary_rb_1_19_m750_ions0",
+   "counts": {
+    "0": 3,
+    "1": 21
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 30,
+   "name": "canary_rb_2_0_m1500_ions0",
+   "counts": {
+    "0": 21,
+    "1": 3
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 31,
+   "name": "canary_rb_2_1_m1500_ions0",
+   "counts": {
+    "1": 24
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 32,
+   "name": "canary_rb_2_2_m1500_ions0",
+   "counts": {
+    "0": 21,
+    "1": 3
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 33,
+   "name": "canary_rb_2_3_m1500_ions0",
+   "counts": {
+    "0": 3,
+    "1": 21
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 34,
+   "name": "canary_rb_2_4_m1500_ions0",
+   "counts": {
+    "0": 22,
+    "1": 2
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 35,
+   "name": "canary_rb_2_5_m1500_ions0",
+   "counts": {
+    "0": 3,
+    "1": 21
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 36,
+   "name": "canary_rb_2_6_m1500_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 37,
+   "name": "canary_rb_2_7_m1500_ions0",
+   "counts": {
+    "0": 2,
+    "1": 22
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 38,
+   "name": "canary_rb_2_8_m1500_ions0",
+   "counts": {
+    "0": 20,
+    "1": 4
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 39,
+   "name": "canary_rb_2_9_m1500_ions0",
+   "counts": {
+    "0": 2,
+    "1": 22
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 40,
+   "name": "canary_rb_2_10_m1500_ions0",
+   "counts": {
+    "0": 19,
+    "1": 5
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 41,
+   "name": "canary_rb_2_11_m1500_ions0",
+   "counts": {
+    "0": 2,
+    "1": 22
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 42,
+   "name": "canary_rb_2_12_m1500_ions0",
+   "counts": {
+    "0": 22,
+    "1": 2
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 43,
+   "name": "canary_rb_2_13_m1500_ions0",
+   "counts": {
+    "0": 4,
+    "1": 20
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 44,
+   "name": "canary_rb_2_14_m1500_ions0",
+   "counts": {
+    "0": 16,
+    "1": 8
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 45,
+   "name": "canary_rb_2_15_m1500_ions0",
+   "counts": {
+    "0": 2,
+    "1": 22
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 46,
+   "name": "canary_rb_2_16_m1500_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 47,
+   "name": "canary_rb_2_17_m1500_ions0",
+   "counts": {
+    "0": 2,
+    "1": 22
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 48,
+   "name": "canary_rb_2_18_m1500_ions0",
+   "counts": {
+    "0": 19,
+    "1": 5
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 49,
+   "name": "canary_rb_2_19_m1500_ions0",
+   "counts": {
+    "0": 4,
+    "1": 20
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 50,
+   "name": "canary_rb_2_20_m1500_ions0",
+   "counts": {
+    "0": 21,
+    "1": 3
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 51,
+   "name": "canary_rb_2_21_m1500_ions0",
+   "counts": {
+    "0": 1,
+    "1": 23
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 52,
+   "name": "canary_rb_2_22_m1500_ions0",
+   "counts": {
+    "0": 23,
+    "1": 1
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 53,
+   "name": "canary_rb_2_23_m1500_ions0",
+   "counts": {
+    "0": 1,
+    "1": 23
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 54,
+   "name": "canary_rb_2_24_m1500_ions0",
+   "counts": {
+    "0": 19,
+    "1": 5
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 55,
+   "name": "canary_rb_2_25_m1500_ions0",
+   "counts": {
+    "0": 5,
+    "1": 19
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 56,
+   "name": "canary_rb_2_26_m1500_ions0",
+   "counts": {
+    "0": 19,
+    "1": 5
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 57,
+   "name": "canary_rb_2_27_m1500_ions0",
+   "counts": {
+    "0": 4,
+    "1": 20
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 58,
+   "name": "canary_rb_2_28_m1500_ions0",
+   "counts": {
+    "0": 19,
+    "1": 5
+   },
+   "probabilities": null
+  },
+  {
+   "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+   "batch": [
+    0
+   ],
+   "circuit": 59,
+   "name": "canary_rb_2_29_m1500_ions0",
+   "counts": {
+    "0": 2,
+    "1": 22
+   },
+   "probabilities": null
+  }
+ ],
+ "retrieved_utc": "2026-10-26T13:53:11.230863+00:00",
+ "prior_date": "2026-10-25 00:00:00+00:00"
+}

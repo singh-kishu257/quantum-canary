@@ -41,11 +41,8 @@ if tag == "estimate":
     sys.exit()
 
 start, t0 = datetime.now(timezone.utc).isoformat(), time.perf_counter()
-try:
-    raw = canary.run_ionq(backend, IONS, max_cost=float(cap) if cap else None,
-                          run_options={"noise_model": noise} if noise else None, **priors)
-except ValueError as e:
-    sys.exit(f"not submitted: {e}")
+raw = canary.run_ionq(backend, IONS, max_cost=float(cap) if cap else None,
+                      run_options={"noise_model": noise} if noise else None, **priors)
 wall = time.perf_counter() - t0
 report = canary.Report(canary.ionq.to_canary_report(raw))
 report.print()

@@ -1,0 +1,680 @@
+{
+  "backend": "qpu.forte-1",
+  "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+  "ibm_usage_s": null,
+  "health": {
+    "0": "GREEN"
+  },
+  "health_reason": {
+    "0": ""
+  },
+  "fit_over_limit": {
+    "0": []
+  },
+  "dynamical_decoupling": {
+    "0": []
+  },
+  "frequency_offset": {
+    "0": []
+  },
+  "at_bound": {
+    "0": []
+  },
+  "report": {
+    "mode": "hardware",
+    "backend": "qpu.forte-1",
+    "architecture": "trapped_ion",
+    "regime": null,
+    "job_id": "01a17651-12aa-74ec-94da-6c115c3895b6",
+    "shots": {
+      "t1": 0,
+      "ramsey": 0,
+      "gate": 24,
+      "echo": 0
+    },
+    "probe_blocks": 1,
+    "circuits_per_qubit": 60,
+    "groups": [
+      [
+        0
+      ]
+    ],
+    "timestamp": "2026-10-26T13:53:11.225417+00:00",
+    "qubits": [
+      {
+        "qubit": 0,
+        "health": "GREEN",
+        "truth": null,
+        "prior_confidence": "prior_informed",
+        "T1_prior_s": 100.0,
+        "T2_prior_s": 1.0,
+        "eps_prior": 0.00019999999999997797,
+        "p0_given_1": 0.004146496815286562,
+        "p1_given_0": 0.002853503184713333,
+        "gate_time_ns": 110000.0,
+        "dt_ns": null,
+        "result": {
+          "backend_name": "qpu.forte-1",
+          "qubit_id": 0,
+          "timestamp": "2026-10-26T13:53:11.225417+00:00",
+          "architecture": "trapped_ion",
+          "T1_s": NaN,
+          "T1_sigma_s": NaN,
+          "T2_s": NaN,
+          "T2_sigma_s": NaN,
+          "delta_omega": NaN,
+          "delta_omega_sigma": NaN,
+          "epsilon_sx": 0.0001092988148130205,
+          "epsilon_sx_sigma": 1.3605589399192632e-05,
+          "t1_residual": NaN,
+          "ramsey_residual": NaN,
+          "gate_residual": NaN,
+          "t1_chi2_dof": NaN,
+          "ramsey_chi2_dof": NaN,
+          "gate_chi2_dof": 0.7513105445487209,
+          "T2_ramsey_s": NaN,
+          "T2_ramsey_sigma_s": NaN,
+          "T2_echo_s": NaN,
+          "T2_echo_sigma_s": NaN,
+          "echo_residual": NaN,
+          "echo_chi2_dof": NaN,
+          "calibration_source": null,
+          "prior_warning": "",
+          "rb_seed": null
+        },
+        "engine_log": []
+      }
+    ],
+    "block_counts": {
+      "0": [
+        {
+          "circuit": 0,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 1,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "1": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 2,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 3,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "1": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 4,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 5,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 1,
+            "1": 23
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 6,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 7,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "1": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 8,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 9,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "1": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 10,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 11,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 2,
+            "1": 22
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 12,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 22,
+            "1": 2
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 13,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "1": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 14,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 15,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 1,
+            "1": 23
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 16,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 17,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 3,
+            "1": 21
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 18,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 19,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "1": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 20,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 22,
+            "1": 2
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 21,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "1": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 22,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 23,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 2,
+            "1": 22
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 24,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 25,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 2,
+            "1": 22
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 26,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 21,
+            "1": 3
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 27,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "1": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 28,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 29,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 3,
+            "1": 21
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 30,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 21,
+            "1": 3
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 31,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "1": 24
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 32,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 21,
+            "1": 3
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 33,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 3,
+            "1": 21
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 34,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 22,
+            "1": 2
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 35,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 3,
+            "1": 21
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 36,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 37,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 2,
+            "1": 22
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 38,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 20,
+            "1": 4
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 39,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 2,
+            "1": 22
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 40,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 19,
+            "1": 5
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 41,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 2,
+            "1": 22
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 42,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 22,
+            "1": 2
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 43,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 4,
+            "1": 20
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 44,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 16,
+            "1": 8
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 45,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 2,
+            "1": 22
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 46,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 47,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 2,
+            "1": 22
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 48,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 19,
+            "1": 5
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 49,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 4,
+            "1": 20
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 50,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 21,
+            "1": 3
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 51,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 1,
+            "1": 23
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 52,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 23,
+            "1": 1
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 53,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 1,
+            "1": 23
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 54,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 19,
+            "1": 5
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 55,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 5,
+            "1": 19
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 56,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 19,
+            "1": 5
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 57,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 4,
+            "1": 20
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 58,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 19,
+            "1": 5
+          },
+          "probabilities": null
+        },
+        {
+          "circuit": 59,
+          "block": 0,
+          "bit": 0,
+          "counts": {
+            "0": 2,
+            "1": 22
+          },
+          "probabilities": null
+        }
+      ]
+    }
+  }
+}

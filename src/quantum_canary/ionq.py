@@ -44,6 +44,8 @@ __all__ = ["IonResult", "IonQReport", "ionq_circuits", "ionq_estimate", "ionq_pr
 
 DEFAULT_SHOTS = runner.DEFAULT_SHOTS["gate"]
 DEFAULT_MAX_OPS = 24_000
+# IonQ rejects a job larger than 10 MB, about 46 bytes per native gate: 150,000 gates is about 6.9 MB.
+DEFAULT_MAX_JOB_GATES = 150_000
 POOR_FIT_P = 0.01
 
 
@@ -194,6 +196,21 @@ def ionq_estimate(backend, circuits: Sequence[Any], shots: int) -> Optional[Dict
             "execution_time": execution, "queue_time": queue, "raw": raws}
 
 
+def _job_chunks(circuits: Sequence[Any], max_gates: int) -> List[Tuple[int, List[Any]]]:
+    """Consecutive (first index, circuits) runs of at most max_gates native gates each (one circuit if it alone
+    exceeds max_gates): the jobs one batch is submitted as, in order, so each stays under IonQ's payload limit.
+    IonQ bills each circuit separately, so the split does not change the cost."""
+    out, start, count = [], 0, 0
+    for i, qc in enumerate(circuits):
+        gates = sum(n for name, n in qc.count_ops().items() if name.startswith("gpi"))
+        if i > start and count + gates > max_gates:
+            out.append((start, list(circuits[start:i])))
+            start, count = i, 0
+        count += gates
+    out.append((start, list(circuits[start:])))
+    return out
+
+
 def _p0(counts: Dict[str, float], bit: int) -> Tuple[float, float]:
     """(weight of 0, total weight) on clbit `bit` of a counts or probability
     dict whose keys are bitstrings with clbit 0 rightmost."""
@@ -248,7 +265,8 @@ def ionq_priors(backend) -> Optional[Dict[str, Any]]:
 
 def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
              eps_prior: Optional[float] = None, spam: Optional[Tuple[float, float]] = None,
-             max_ops: int = DEFAULT_MAX_OPS, max_cost: Optional[float] = None,
+             max_ops: int = DEFAULT_MAX_OPS, max_job_gates: int = DEFAULT_MAX_JOB_GATES,
+             max_cost: Optional[float] = None,
              run_options: Optional[Dict[str, Any]] = None,
              parallel: bool = True, seed: Optional[int] = None,
              probe_blocks: int = 1) -> IonQReport:
@@ -265,7 +283,9 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     that exceeds max_ops; parallel=False: one ion per batch), all circuits
     with the same shots; probe_blocks (a divisor
     of shots, default 1) runs each batch as that many jobs in order, each with
-    shots / probe_blocks per circuit, and sums their counts. With max_cost,
+    shots / probe_blocks per circuit, and sums their counts. Each of those is
+    sent as consecutive jobs of at most max_job_gates gates (IonQ's 10 MB
+    payload limit; the cost is unchanged, IonQ bills per circuit). With max_cost,
     IonQ's own estimate (ionq_estimate) of all jobs is fetched first and the
     run is refused if it is higher, or if IonQ returns no estimate.
     """
@@ -306,24 +326,26 @@ def run_ionq(backend, ions: Sequence[int], shots: int = DEFAULT_SHOTS,
     for b, batch in enumerate(batches):
         batch_circuits = circuits[b * n_per_batch:(b + 1) * n_per_batch]
         for block in range(blocks):
-            job = backend.run(batch_circuits, **options)
-            job_id = job.job_id() if hasattr(job, "job_id") else None
-            job_ids.append(job_id)
-            result = job.result()
-            for k in range(len(batch_circuits)):
-                probs = None
-                try:
-                    probs = result.data(k).get("probabilities")
-                except Exception:
+            for start, chunk in _job_chunks(batch_circuits, max_job_gates):
+                job = backend.run(chunk, **options)
+                job_id = job.job_id() if hasattr(job, "job_id") else None
+                job_ids.append(job_id)
+                result = job.result()
+                for i in range(len(chunk)):
+                    k = start + i
                     probs = None
-                counts = result.get_counts(k)
-                source = probs if probs else counts
-                raw.append({"job_id": job_id, "batch": list(batch), "block": block, "circuit": k,
-                            "counts": dict(counts), "probabilities": dict(probs) if probs else None})
-                for j, q in enumerate(batch):
-                    zero, total = _p0(source, j)
-                    zeros[q][k] += zero
-                    totals[q][k] += total
+                    try:
+                        probs = result.data(i).get("probabilities")
+                    except Exception:
+                        probs = None
+                    counts = result.get_counts(i)
+                    source = probs if probs else counts
+                    raw.append({"job_id": job_id, "batch": list(batch), "block": block, "circuit": k,
+                                "counts": dict(counts), "probabilities": dict(probs) if probs else None})
+                    for j, q in enumerate(batch):
+                        zero, total = _p0(source, j)
+                        zeros[q][k] += zero
+                        totals[q][k] += total
 
     results = []
     dof = len(rb_lengths) - 2
