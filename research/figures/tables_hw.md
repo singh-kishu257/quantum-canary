@@ -2,7 +2,7 @@
 
 ## Table H1
 
-Bland–Altman agreement of Canary (mean of the two checks either side of each QE run) with qiskit-experiments in IBM's standard configuration on all operational qubits of ibm_kingston. Differences are Canary − QE, relative to the pair mean (Δω: in Hz). 'Floor fixed': qiskit-experiments' own analysis re-run on its raw counts with the decay floor fixed at its physical value (RB asymptote 1/2; T1 offset at IBM's P(1|0)); the default re-run reproduces every saved value. 'Within Canary range': qubits whose QE detuning lies inside Canary's unambiguous Ramsey range (Table H5). Predicted: mean and 2.5–97.5th percentiles of Canary − QE standard in the NISQ simulation.
+Bland–Altman agreement of Canary (mean of the two checks either side of each QE run) with qiskit-experiments in IBM's standard configuration on all operational qubits of ibm_kingston. Differences are Canary − QE, relative to the pair mean (Δω: in Hz). 'Floor fixed': qiskit-experiments' own analysis re-run on its raw counts with the decay floor fixed (RB asymptote 1/2, its value for symmetric readout and unital noise; T1 offset at IBM's P(1|0)); the default re-run reproduces every saved value. 'Within Canary range': qubits whose QE detuning lies inside Canary's unambiguous Ramsey range (Table H5). Predicted: mean and 2.5–97.5th percentiles of Canary − QE standard in the NISQ simulation.
 
 | Parameter | Comparator | Sandwich | n | Bias [95% CI] | 95% LoA (±CI) | 2.5–97.5th pct. | Predicted (in silico) |
 |---|---|---|---|---|---|---|---|

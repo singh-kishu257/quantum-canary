@@ -97,7 +97,7 @@ def _qe_raw(step, family):
 
 def qe_refits():
     """qiskit-experiments' own analyses re-run on QE's raw counts: default (must reproduce the saved values) and
-    with the decay floor fixed at its physical value (RB asymptote b = 1/2; T1 base = IBM's P(1|0) for the
+    with the decay floor fixed (RB asymptote b = 1/2, its value for symmetric readout; T1 base = IBM's P(1|0) for the
     qubit). Cached in research/figures/hw_qe_refits.csv."""
     cache = pathlib.Path(__file__).resolve().parents[1] / "figures" / "hw_qe_refits.csv"
     if cache.exists():

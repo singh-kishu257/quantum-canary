@@ -1,7 +1,7 @@
 """Fig. 6 -- IBM Kingston, all 154 operational qubits: Canary against qiskit-experiments (QE) in IBM's standard
 configuration (research/data/hardware/ibm_kingston_20261026T014902Z, sandwich C1 QE1 C2 QE2 C3).
 (a-d) Bland-Altman of Canary (mean of C1 and C2) against QE1, with the band predicted in silico; QE default fits
-and QE's own analysis re-run with the decay floor fixed at its physical value; (e) repeatability between repeats;
+and QE's own analysis re-run with the decay floor fixed (RB asymptote 1/2, T1 offset at IBM's P(1|0)); (e) repeatability between repeats;
 (f) epsilon against IBM's published sx error ('QE fixed': floor fixed); (g) QE's raw RB decay and its two fits; (h) QPU,
 client (classical: wall minus IBM-side) and wall-clock seconds per run (bar and number: mean over the runs; dots: each run). QE default is dotted throughout; QE floor fixed
 solid (bias) and dashed (limits of agreement).
