@@ -1,6 +1,6 @@
 """Fig. 8 -- IonQ Forte-1: Canary's gate error on ten ions measured in parallel (simultaneous randomized benchmarking),
 runs collected by research/ionq_hardware.py (research/data/hardware/ionq_qpu.forte-1_<run>_<time>_ionq.json).
-(a) epsilon per ion in every run, ion 0 measured alone, and IonQ's published median; (b) run-to-run consistency:
+(a) epsilon per ion in every run and IonQ's published median; (b) run-to-run consistency:
 each run against the other runs of the same ion, in units of their combined error bar; (c) cost of one ten-ion check
 in parallel and one ion at a time, from IonQ's rate card. RevTeX single column (3.40 in).
 Usage: python fig8.py [RUN_GLOB]   (default: the QPU runs A-D; a relative glob is taken in research/data/hardware)
@@ -17,7 +17,6 @@ HARDWARE = c.HERE.parent / "data" / "hardware"
 RUN_GLOB = (sys.argv[1:2] or ["ionq_qpu.forte-1_[A-D]_*_ionq.json"])[0]
 pattern = RUN_GLOB if os.path.isabs(RUN_GLOB) else str(HARDWARE / RUN_GLOB)
 runs = [json.load(open(f)) for f in sorted(glob.glob(pattern))]
-isolated = [json.load(open(f)) for f in sorted(glob.glob(str(HARDWARE / "ionq_qpu.forte-1_ion0_isolated_*_ionq.json")))]
 if not runs:
     sys.exit(f"no runs match {pattern}")
 ions = runs[0]["ions"]
@@ -39,12 +38,6 @@ offset = lambda k: (k - (len(runs) - 1) / 2) * 0.14
 for k in range(len(runs)):
     ax_a.errorbar(x + offset(k), 1e4 * eps[k], yerr=1e4 * sig[k], fmt="o", ms=3.0, mew=0, lw=0.7, capsize=0,
                   color=RUN_COL[k % 4], label=f"run {chr(65 + k)}", zorder=3)
-for iso in isolated:
-    for q, res in zip(iso["ions"], iso["results"]):
-        if q in ions:
-            ax_a.errorbar([ions.index(q) - 0.42], [1e4 * res["epsilon_sx"]], yerr=[1e4 * res["epsilon_sx_sigma"]],
-                          fmt="D", ms=3.6, mfc="white", mec=c.INK, color=c.INK, lw=0.7, capsize=0, zorder=4,
-                          label=f"ion {q} alone")
 ax_a.axhline(1e4 * prior, color=c.GREY, lw=0.6, ls=(0, (3, 2)), zorder=1)
 ax_a.text(len(ions) - 0.45, 1e4 * prior, "IonQ published median", ha="right", va="bottom", color=c.GREY,
           fontsize=c.SIZE - 1)
