@@ -6,7 +6,7 @@ coverage with its 95% CI. Each top panel lists its trends that are significant (
 condition with the per-qubit error, Holm over all 80 condition x parameter x tool x platform tests of Table S6).
 Mechanisms of fixed strength (T1 drift, 1/f and OU frequency drift, motional heating, detuning during gates, drift
 during the measurement) act on every qubit with its own realization and are not varied here.
-QE failed fits are excluded (conservative for Canary). IEEE double column (7.16 in).
+QE failed fits are excluded (conservative for Canary). RevTeX page width (7.06 in).
 """
 import numpy as np
 import pandas as pd
@@ -23,7 +23,7 @@ PANELS = (("coherent", "epsilon_sx", "Coherent share of\ngate error", r"$\vareps
           ("switching", "T1_s", "$T_1$ switching rate\n(1/s)", r"$T_1$ (%)"),
           ("ratio", "delta_omega", "$T_2^*/T_2$\n(lower: more slow dephasing)", r"$\Delta\omega/2\pi$ (Hz)"),
           ("detuning", "delta_omega", "Detuning $|\\Delta\\omega|/2\\pi$\n(kHz, SC)", r"$\Delta\omega/2\pi$ (Hz)"),
-          ("prior", "T1_s", "Relative error of the\ncalibration prior", r"$T_1$ (%)"))
+          ("prior", "T1_s", "Calibration prior's\nrelative error", r"$T_1$ (%)"))
 grid = c.robustness_grid(d, k)
 SIGNIFICANT = {(r.platform, r.condition, r.parameter, r.tool) for r in grid[(grid.p_holm < 0.05) & (grid.rho > 0)].itertuples()}
 
@@ -42,7 +42,7 @@ def binned(arch, arm, param, cond):
 
 W, H = c.FULL_WIDTH, 3.75
 fig, axes = plt.subplots(2, len(PANELS), figsize=(W, H), sharex="col")
-fig.subplots_adjust(left=0.06, right=0.995, top=0.865, bottom=0.17, wspace=0.42, hspace=0.12)
+fig.subplots_adjust(left=0.06, right=0.995, top=0.865, bottom=0.17, wspace=0.52, hspace=0.12)
 scale = {"detuning": 1e-3}
 for col, (cond, param, xlabel, ylabel) in enumerate(PANELS):
     ax_e, ax_c = axes[0, col], axes[1, col]

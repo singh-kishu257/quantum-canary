@@ -2,8 +2,10 @@
 configuration (research/data/hardware/ibm_kingston_20261026T014902Z, sandwich C1 QE1 C2 QE2 C3).
 (a-d) Bland-Altman of Canary (mean of C1 and C2) against QE1, with the band predicted in silico; QE default fits
 and QE's own analysis re-run with the decay floor fixed at its physical value; (e) repeatability between repeats;
-(f) epsilon against IBM's published sx error; (g) QE's raw RB decay and its two fits; (h) cost per run.
-IEEE double column (7.16 in).
+(f) epsilon against IBM's published sx error ('QE fixed': floor fixed); (g) QE's raw RB decay and its two fits; (h) QPU,
+client (classical: wall minus IBM-side) and wall-clock seconds per run (bar and number: mean over the runs; dots: each run). QE default is dotted throughout; QE floor fixed
+solid (bias) and dashed (limits of agreement).
+RevTeX page width (7.06 in).
 """
 import numpy as np
 import matplotlib as mpl
@@ -15,8 +17,8 @@ import nisq_common as c
 c.style()
 d, refits, dw_range, cal, timing = h.load(), h.qe_refits(), h.canary_dw_range_hz(), h.ibm_calibration(), h.timing()
 QE_C = c.TOOL["qe"]
-PRED = {"T1_s": (-1.4, -26.5, 19.6), "T2_s": (-1.6, -22.6, 19.6), "delta_omega": (0.0981, -0.7562, 1.2396),
-        "epsilon_sx": (2.3, -67.3, 86.0)}
+PRED = h.predicted()
+PRED["delta_omega"] = tuple(x / 1e3 for x in PRED["delta_omega"])
 rng = np.random.default_rng(5)
 
 
@@ -47,7 +49,7 @@ def ba_panel(ax, p, scale, xlabel, ylim, xlog=False, xlim=None):
         else:
             ax.scatter(m * scale, x, s=6, facecolor=face, edgecolor=QE_C, lw=0.5, zorder=3, rasterized=True)
             s = h.bland_altman(x)
-        ls = "-" if face != "white" or len(sets) == 1 else (0, (1, 1))
+        ls = "-" if face != "white" else (0, (1, 1))
         col = QE_C
         ax.axhline(s["bias"], color=col, lw=1.0, ls=ls, zorder=4)
         for lim in (s["loa_lo"], s["loa_hi"]):
@@ -78,15 +80,15 @@ for ax, lab in zip(axes_top, ("(a) $T_1$", "(b) $T_2$", r"(c) $\Delta\omega$", r
     ax.text(0.5, -0.30, lab, transform=ax.transAxes, ha="center", va="top")
 qe_dw = h.wide(d, "delta_omega")[0].QE1.dropna()
 n_out = int((qe_dw.abs() >= dw_range.reindex(qe_dw.index)).sum())
-handles = [mpl.lines.Line2D([], [], marker="o", ls="none", ms=3.2, mfc="white", mec=QE_C, label="vs QE default"),
-           mpl.lines.Line2D([], [], marker="o", ls="none", ms=3.2, mfc=QE_C, mec=QE_C, label="vs QE floor fixed"),
-           mpl.lines.Line2D([], [], color=QE_C, lw=1.0, label="bias"),
-           mpl.lines.Line2D([], [], color=QE_C, lw=0.6, ls=(0, (4, 2)), label="95% LoA"),
+handles = [mpl.lines.Line2D([], [], color=QE_C, lw=0.9, ls=(0, (1, 1)), marker="o", ms=3.2, mfc="white", mec=QE_C,
+                            label="vs QE default (dotted: bias and 95% LoA)"),
+           mpl.lines.Line2D([], [], color=QE_C, lw=0.9, marker="o", ms=3.2, mfc=QE_C, mec=QE_C,
+                            label="vs QE floor fixed (solid: bias; dashed: 95% LoA)"),
            mpl.patches.Patch(color="#E4E4E4", label="95% LoA predicted in silico"),
            mpl.lines.Line2D([], [], marker="x", ls="none", ms=3.6, color=c.INK,
                             label=f"QE beyond Canary's $\\Delta\\omega$ range ({n_out} qubits, clipped)")]
-fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.53, 1.0), ncol=3, frameon=False,
-           handletextpad=0.3, columnspacing=1.0, handlelength=1.4)
+fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.53, 1.0), ncol=2, frameon=False,
+           handletextpad=0.4, columnspacing=1.6, handlelength=2.2)
 
 # (e) repeatability between repeats about 20 min apart
 ax_e = fig.add_axes([left, bot_y, 0.17, bot_h])
@@ -116,7 +118,7 @@ for i, (p, lab) in enumerate(groups):
 ax_e.set_xticks(range(3))
 ax_e.set_xticklabels([lab for _, lab in groups])
 ax_e.set_xlim(-0.6, 2.6)
-ax_e.set_ylabel("Median |change| (%)")
+ax_e.set_ylabel(r"Median $|$change$|$ (%)")
 v, _ = h.wide(d, "delta_omega")
 keep = v.QE1.abs() < dw_range.reindex(v.index)
 vk = v[keep.values]
@@ -136,7 +138,7 @@ fig.text(left + 0.1225, bot_y - 0.36 * bot_h, "(e) Repeatability, about 20 min a
 ax_f = fig.add_axes([left + 0.33, bot_y, 0.14, bot_h])
 v, _ = h.wide(d, "epsilon_sx")
 series = [("Canary", v.C1, c.INK, c.INK), ("QE\ndefault", v.QE1, QE_C, "white"),
-          ("QE floor\nfixed", floor_fixed("epsilon_sx", "QE1"), QE_C, QE_C)]
+          ("QE\nfixed", floor_fixed("epsilon_sx", "QE1"), QE_C, QE_C)]
 for i, (lab, s, col, face) in enumerate(series):
     r = (s / cal.epsilon_sx).dropna().values
     ax_f.scatter(i + rng.uniform(-0.18, 0.18, len(r)), r, s=4, facecolor=face, edgecolor=col, lw=0.4, alpha=0.8,
@@ -148,13 +150,13 @@ ax_f.set_yscale("log")
 ax_f.set_ylim(0.1, 30)
 ax_f.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda y, _: f"{y:g}"))
 ax_f.set_xticks(range(3))
-ax_f.set_xticklabels([s[0] for s in series])
+ax_f.set_xticklabels([s[0] for s in series], fontsize=c.SIZE - 1)
 ax_f.set_xlim(-0.5, 2.5)
 ax_f.set_ylabel(r"$\varepsilon$ / IBM's sx error")
 ax_f.text(0.5, -0.36, r"(f) $\varepsilon$ vs IBM calibration", transform=ax_f.transAxes, ha="center", va="top")
 
 # (g) QE's raw RB decay and its two fits
-ax_g = fig.add_axes([left + 0.545, bot_y, 0.17, bot_h])
+ax_g = fig.add_axes([left + 0.535, bot_y, 0.155, bot_h])
 raw = h._qe_raw("QE1", "rb")
 lengths = (10, 100, 500)
 p0 = {L: [] for L in lengths}
@@ -189,22 +191,23 @@ ax_g.legend(loc="lower left", bbox_to_anchor=(0.0, 0.12), frameon=False, handlel
 ax_g.text(0.5, -0.36, "(g) QE's RB fits on its own data", transform=ax_g.transAxes, ha="center", va="top")
 
 # (h) cost per run
-ax_h = fig.add_axes([left + 0.79, bot_y, 0.13, bot_h])
-metrics = [("QPU", "qpu_s"), ("Classical", "classical_s")]
+ax_h = fig.add_axes([left + 0.775, bot_y, 0.145, bot_h])
+metrics = [("QPU", "qpu_s"), ("Client", "classical_s"), ("Wall", "wall_s")]
 for j, (lab, key) in enumerate(metrics):
     cv = [timing[s][key] for s in h.CANARY_STEPS]
     qv = [timing[s][key] for s in h.QE_STEPS]
     for k, (vals, col, face) in enumerate(((cv, c.INK, c.INK), (qv, QE_C, "white"))):
         x = j + (k - 0.5) * 0.36
-        ax_h.bar(x, np.mean(vals), width=0.32, color=face, edgecolor=col, lw=0.7, zorder=2)
+        ax_h.bar(x, np.mean(vals), width=0.30, color=face, edgecolor=col, lw=0.7, zorder=2)
         ax_h.scatter([x] * len(vals), vals, s=5, color=c.GREY, zorder=3)
-        ax_h.text(x, np.mean(vals) * 1.15, f"{np.mean(vals):.0f}", ha="center", va="bottom", fontsize=c.SIZE - 1)
+        ax_h.text(x, max(vals) * 1.15, f"{np.mean(vals):.0f}", ha="center", va="bottom", rotation=90,
+                  fontsize=c.SIZE - 1)
 ax_h.set_yscale("log")
-ax_h.set_ylim(5, 8000)
-ax_h.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda y, _: f"{y:g}"))
+ax_h.set_ylim(5, 30000)
+ax_h.yaxis.set_major_formatter(mpl.ticker.LogFormatterMathtext())
 ax_h.set_xticks(range(len(metrics)))
-ax_h.set_xticklabels([m_[0] for m_ in metrics])
-ax_h.set_xlim(-0.6, 1.6)
+ax_h.set_xticklabels([m_[0] for m_ in metrics], fontsize=c.SIZE - 1)
+ax_h.set_xlim(-0.6, len(metrics) - 0.4)
 ax_h.set_ylabel("Seconds per run")
 ax_h.text(0.5, 0.97, "8,640 vs 92,000\nshots/qubit", transform=ax_h.transAxes, ha="center", va="top",
           fontsize=c.SIZE - 1)

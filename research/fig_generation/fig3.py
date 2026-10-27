@@ -1,7 +1,7 @@
 """Fig. 3 -- NISQ regime: Canary (8,640 shots) against qiskit-experiments (research/data/nisq_benchmark.csv).
 (a) per-qubit error ratio Canary / QE at equal shots (8,640); (b) the same against IBM's standard QE
 configuration (92,000 shots); (c) 68.3% and 95.4% error-bar coverage of the three arms.
-QE failed fits are excluded (conservative for Canary; counts in Table I). IEEE double column (7.16 in).
+QE failed fits are excluded (conservative for Canary; counts in Table I). RevTeX page width (7.06 in).
 """
 import numpy as np
 import matplotlib as mpl

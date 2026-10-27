@@ -3,6 +3,7 @@
 \footnotesize
 \caption{Median absolute error [95\% CI] against the simulator's truth, 500 simulated qubits per platform (relative error for $T_1$, $T_2$, $\varepsilon$; absolute error of $\Delta\omega/2\pi$). Circuit time: median delays plus gate time per check, a lower bound (no repetition delay or readout). Failed fits: estimates QE did not return, excluded from the medians.}
 \label{tab:nisq}
+\begin{adjustbox}{max width=\linewidth}
 \begin{tabular}{llrrccccr}
 \hline
 Platform & Method & Shots & Circuit time (s) & $T_1$ (\%) & $T_2$ (\%) & $\Delta\omega/2\pi$ (Hz) & $\varepsilon$ (\%) & Failed fits \\
@@ -16,4 +17,5 @@ TI & QE, equal shots & 8,640 & 37,200 & 6.61 [6.03, 7.46] & 14.2 [12.9, 15.8] & 
 TI & QE standard & 92,000 & 251,000 & 2.82 [2.64, 3.03] & 6.85 [6.05, 7.53] & 0.0806 [0.0692, 0.0934] & 29.6 [24.9, 33.8] & 6/2000 \\
 \hline
 \end{tabular}
+\end{adjustbox}
 \end{table*}

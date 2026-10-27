@@ -1,5 +1,6 @@
-"""Shared data loading, statistics and IEEE style for the NISQ-benchmark figures and table (research/data/nisq_benchmark.csv)."""
+"""Shared data loading, statistics and RevTeX style for the NISQ-benchmark figures and table (research/data/nisq_benchmark.csv)."""
 import pathlib
+import re
 import numpy as np
 import pandas as pd
 import matplotlib as mpl
@@ -8,8 +9,8 @@ from scipy.stats import beta, binom
 HERE = pathlib.Path(__file__).resolve().parent
 DATA = HERE.parent / "data" / "nisq_benchmark.csv"
 OUT_DIR = HERE.parent / "figures"
-FULL_WIDTH = 7.16
-FONT, SIZE = "Cambria", 8
+FULL_WIDTH, COL_WIDTH = 510 / 72.27, 246 / 72.27
+FONT, BOLD, SIZE = "cmr10", "cmb10", 8
 INK, GREY = "#1A1A1A", "#6E6E6E"
 PARAMS = ("T1_s", "T2_s", "delta_omega", "epsilon_sx")
 ARCH = (("superconducting", "SC"), ("trapped_ion", "TI"))
@@ -21,8 +22,7 @@ def style():
     mpl.rcParams.update({
         "font.family": FONT, "font.size": SIZE, "axes.labelsize": SIZE, "xtick.labelsize": SIZE,
         "ytick.labelsize": SIZE, "legend.fontsize": SIZE,
-        "mathtext.fontset": "custom", "mathtext.rm": FONT, "mathtext.it": f"{FONT}:italic",
-        "mathtext.bf": f"{FONT}:bold", "mathtext.sf": FONT, "mathtext.fallback": None,
+        "mathtext.fontset": "cm", "axes.formatter.use_mathtext": True,
         "pdf.fonttype": 42, "ps.fonttype": 42, "axes.unicode_minus": True,
         "axes.linewidth": 0.6, "xtick.major.width": 0.6, "ytick.major.width": 0.6,
         "xtick.minor.width": 0.4, "ytick.minor.width": 0.4, "xtick.major.size": 2.5, "ytick.major.size": 2.5,
@@ -165,7 +165,24 @@ def robustness_grid(d, k):
     return out
 
 
+def typeset(fig):
+    """Computer Modern text (cmr10) has no glyph beyond ASCII and prints < > | { } _ " \\ as other characters: refuse
+    such text outside $...$, and set a hyphen before a digit in plain text as a math minus."""
+    fig.canvas.draw()
+    for t in fig.findobj(mpl.text.Text):
+        parts = re.split(r"(?<!\\)\$", t.get_text())
+        if len(parts) % 2 == 0:
+            raise ValueError(f"unbalanced $ in {t.get_text()!r}")
+        for i in range(0, len(parts), 2):
+            bad = sorted({ch for ch in parts[i].replace("\\$", "") if ord(ch) > 127 or ch in '<>|{}_"\\'})
+            if bad:
+                raise ValueError(f"{bad} outside math would print wrong in Computer Modern: {t.get_text()!r}")
+            parts[i] = re.sub(r"(?<![\w.$-])-(?=\d)", "$-$", parts[i])
+        t.set_text("$".join(parts))
+
+
 def save(fig, name):
+    typeset(fig)
     OUT_DIR.mkdir(exist_ok=True)
     for ext in ("pdf", "png"):
         fig.savefig(OUT_DIR / f"{name}.{ext}", dpi=600)

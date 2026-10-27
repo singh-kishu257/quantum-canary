@@ -2,7 +2,7 @@
 runs collected by research/ionq_hardware.py (research/data/hardware/ionq_qpu.forte-1_<run>_<time>_ionq.json).
 (a) epsilon per ion in every run, ion 0 measured alone, and IonQ's published median; (b) run-to-run consistency:
 each run against the other runs of the same ion, in units of their combined error bar; (c) cost of one ten-ion check
-in parallel and one ion at a time, from IonQ's rate card. IEEE single column (3.5 in).
+in parallel and one ion at a time, from IonQ's rate card. RevTeX single column (3.40 in).
 Usage: python fig8.py [RUN_GLOB]   (default: the QPU runs A-D; a relative glob is taken in research/data/hardware)
 """
 import glob
@@ -28,7 +28,7 @@ RUN_COL = [c.COL[k] for k in ("T1_s", "T2_s", "delta_omega", "epsilon_sx")]
 prior = runs[0]["eps_prior"]
 
 c.style()
-W, H = 3.5, 4.8
+W, H = c.COL_WIDTH, 4.8
 fig = plt.figure(figsize=(W, H))
 ax_a = fig.add_axes([0.155, 0.66, 0.825, 0.29])
 ax_b = fig.add_axes([0.155, 0.35, 0.825, 0.16])

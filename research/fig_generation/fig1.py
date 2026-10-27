@@ -8,16 +8,16 @@ from matplotlib.patches import FancyBboxPatch, Rectangle, Circle, Polygon, PathP
 from matplotlib.path import Path
 from matplotlib.textpath import TextPath
 
-FONT = "Cambria"
+import nisq_common as nc
+
+FONT, BOLD = nc.FONT, nc.BOLD
 mpl.rcParams.update({
-    "font.family": FONT,
-    "mathtext.fontset": "custom", "mathtext.rm": FONT, "mathtext.it": f"{FONT}:italic",
-    "mathtext.bf": f"{FONT}:bold", "mathtext.sf": FONT, "mathtext.fallback": None,
+    "font.family": FONT, "mathtext.fontset": "cm", "axes.formatter.use_mathtext": True,
     "pdf.fonttype": 42, "ps.fonttype": 42, "axes.unicode_minus": True,
 })
-W, H = 181.0, 90.5
+W, H = nc.FULL_WIDTH * 25.4, 90.5
 PT = 25.4 / 72.0
-BODY, TITLE = 8, 9
+BODY, TITLE = 7.6, 8.6
 PITCH = 1.16 * BODY * PT
 
 INK = "#1A1A1A"; GREY = "#4D4D4D"; OUTLINE = "#333333"; FRAME = "#404040"
@@ -54,7 +54,7 @@ OVERFLOW = []
 
 # ----------------------------------------------------------------- helpers
 def wmm(s, size=BODY, weight="normal"):
-    fp = fm.FontProperties(family=FONT, size=size, weight=weight)
+    fp = fm.FontProperties(family=BOLD if weight == "bold" else FONT, size=size)
     return TextPath((0, 0), s, size=size, prop=fp).get_extents().width * PT
 
 
@@ -85,7 +85,8 @@ def wrap(s, width, size=BODY, weight="normal"):
 
 
 def text(x, y, s, size=BODY, weight="normal", ha="left", va="baseline", color=INK, z=10, **kw):
-    return ax.text(x, y, s, fontsize=size, fontweight=weight, ha=ha, va=va, color=color, zorder=z, **kw)
+    return ax.text(x, y, s, fontsize=size, family=BOLD if weight == "bold" else FONT, ha=ha, va=va, color=color,
+                   zorder=z, **kw)
 
 
 def rbox(x0, y0, x1, y1, fc, ec=OUTLINE, lw=0.75, r=1.6, z=3, ls="-"):
@@ -168,7 +169,7 @@ def step_box(x0, y0, x1, y1, n, title, fc, entries=(), ls="-", pad=1.6, top=5.05
 
 # ----------------------------------------------------------------- sections
 HDR, SUBH, TOPY = 5.2, 3.9, 89.5
-A = (1.0, 25.0); B = (27.0, 134.0); C = (136.0, 180.0)
+A = (1.0, 25.0); B = (27.0, 132.25); C = (134.25, W - 1.0)
 section(A[0], 1.0, A[1], TOPY, HDR, "Cloud QPU", QPU_H, QPU_B)
 section(B[0], 1.0, B[1], TOPY, HDR, "Quantum Canary", QC_H, QC_B)
 section(C[0], 1.0, C[1], TOPY, HDR, "To the user", OUT_H, OUT_B)
@@ -211,24 +212,24 @@ text(qc, yy + 0.5, "(gate error only)", ha="center", color=GREY, size=SEQ_SIZE i
 
 # ----------------------------------------------------------------- row 1: design + submission
 r0, r1 = row(P1)
-w1 = [31.0, 31.5]; w1.append(IX1 - IX0 - sum(w1) - 2 * G)
+w1 = [30.5, 31.0]; w1.append(IX1 - IX0 - sum(w1) - 2 * G)
 X1 = [IX0, IX0 + w1[0] + G, IX0 + w1[0] + w1[1] + 2 * G]
 step_box(X1[0], r0, X1[0] + w1[0], r1, 1, "Priors and design", F_YEL, [
     (None, r"Live $T_1$, $T_2$, $\varepsilon$, readout error (else defaults)"),
     ("dot", "Delays where data are most informative"),
 ])
 step_box(X1[1], r0, X1[1] + w1[1], r1, 2, "74 probe circuits", F_LAV, [
-    (("sw", C_T1), "Relaxation \u00d73"), (("sw", C_RAM), "Ramsey X/Y \u00d78"),
-    (("sw", C_ECHO), "Hahn echo \u00d73"), (("sw", C_GATE), "Clifford RB \u00d760"),
+    (("sw", C_T1), r"Relaxation $\times$3"), (("sw", C_RAM), r"Ramsey X/Y $\times$8"),
+    (("sw", C_ECHO), r"Hahn echo $\times$3"), (("sw", C_GATE), r"Clifford RB $\times$60"),
 ])
 step_box(X1[2], r0, X1[2] + w1[2], r1, 3, "Execution plan", F_YEL, [
     ("dot", "Parallel groups: shots scale with groups, not qubits"),
-    ("dot", "1 job; ions: 10 blocks"),
+    ("dot", "1 IBM job per check"),
 ])
 
 # ----------------------------------------------------------------- row 2: probe sequences
 r0, r1 = row(P2)
-SEQ_SIZE, PH = 7.5, 3.0
+SEQ_SIZE, PH = 7.1, 3.0
 
 
 def sequence(px0, px1, y, tokens, col, name):
@@ -262,7 +263,7 @@ def sequence(px0, px1, y, tokens, col, name):
 
 seqs = [
     ("Relaxation", C_T1, [("p", "X"), ("d", r"$\tau$"), ("m", "")], r"$\times$3 $\rightarrow$ $T_1$"),
-    ("Ramsey X / Y", C_RAM, [("p", "H"), ("d", r"$\tau$"), ("p", "H | S†H"), ("m", "")],
+    ("Ramsey X / Y", C_RAM, [("p", "H"), ("d", r"$\tau$"), ("p", r"H $|$ S$^\dagger$H"), ("m", "")],
      r"$\times$8 $\rightarrow$ $T_2^*$, $\Delta\omega$"),
     ("Hahn echo", C_ECHO, [("p", "H"), ("d", r"$\tau/2$"), ("p", "X"), ("d", r"$\tau/2$"),
                            ("p", "H"), ("m", "")], r"$\times$3 $\rightarrow$ $T_2$"),
@@ -270,7 +271,7 @@ seqs = [
      r"3 lengths, $\times$60 $\rightarrow$ $\varepsilon$"),
 ]
 GS = 2.0
-ws = [19.5, 23.0, 29.7]; ws.append(IX1 - IX0 - sum(ws) - 3 * GS)
+ws = [19.0, 22.9, 27.0]; ws.append(IX1 - IX0 - sum(ws) - 3 * GS)
 px = IX0
 for (title, col, tokens, caption), w in zip(seqs, ws):
     rbox(px, r0, px + w, r1, fc=F_WHT)
@@ -294,6 +295,7 @@ rbox(x0, r0, x1, r1, fc=F_PINK)
 badge(x0 + 0.6, r1 - 0.6, 4)
 text((x0 + x1) / 2, r1 - 2.55, "Fit noise models", size=TITLE, weight="bold", ha="center", va="center_baseline")
 yb0 = r1 - 5.05 - 0.70 * BODY * PT
+ARROW = r"$\rightarrow$"
 fam = [("Relaxation", C_T1, "$T_1$"), ("Ramsey", C_RAM, r"$T_2^*,\ \Delta\omega$"),
        ("Hahn echo", C_ECHO, "$T_2$"), ("Clifford RB", C_GATE, r"$\varepsilon$")]
 col_x = [x0 + 1.6]
@@ -305,9 +307,9 @@ for c in (0, 1):
         xo = col_x[c]; yb = yb0 - j * (PITCH + 0.3)
         ax.add_patch(Rectangle((xo, yb - 0.45), 1.2, 2.5, fc=col, ec="none", zorder=11))
         text(xo + 1.9, yb, name)
-        text(xo + ar, yb, "\u2192", color=GREY)
-        text(xo + ar + wmm("\u2192") + 0.7, yb, sym)
-    end = col_x[c] + ar + wmm("\u2192") + 0.7 + max(wmm(fam[2 * c][2]), wmm(fam[2 * c + 1][2]))
+        text(xo + ar, yb, ARROW, color=GREY)
+        text(xo + ar + wmm(ARROW) + 0.7, yb, sym)
+    end = col_x[c] + ar + wmm(ARROW) + 0.7 + max(wmm(fam[2 * c][2]), wmm(fam[2 * c + 1][2]))
     col_x.append(end + 1.8)
 assert col_x[-1] - 1.8 <= x1 - 1.4, col_x
 items(x0 + 1.6, x1 - 1.6, yb0 - 2 * (PITCH + 0.3) + 0.70 * BODY * PT - 0.3, [
@@ -315,23 +317,23 @@ items(x0 + 1.6, x1 - 1.6, yb0 - 2 * (PITCH + 0.3) + 0.70 * BODY * PT - 0.3, [
 ], r0 + 0.4, "fit")
 step_box(X3[1], r0, IX1, r1, 5, "Health", F_ORG, [
     (("hl", H_GREEN), "GREEN: all fits pass"),
-    (("hl", H_YELLOW), r"YELLOW: fit over limit, or $T_2^*$, $T_2$ differ > 20%"),
+    (("hl", H_YELLOW), r"YELLOW: fit over limit, or $T_2^*$, $T_2$ differ $>$ 20%"),
     (("hl", H_RED), "RED: a fit failed"),
     ("dot", r"$\chi^2$ limits: 5% false alarms"),
 ])
 
 # ----------------------------------------------------------------- To the user
 CX0, CX1 = C[0] + 1.5, C[1] - 1.5
-IF = (67.6, TOPY - HDR - 1.2)
-DE = (46.4, 65.7)
-DR = (32.4, 44.6)
+IF = (68.0, TOPY - HDR - 1.2)
+DE = (45.2, 66.5)
+DR = (31.9, 44.1)
 RP = (2.2, 30.4)
 step_box(CX0, IF[0], CX1, IF[1], None, "Interfaces", F_LAV, [
     ("dot", "Python: check, compare, Monitor"),
     ("dot", "CLI: quantum-canary"),
 ])
 step_box(CX0, DE[0], CX1, DE[1], None, "Decisions", F_WHT, pad=1.1, entries=[
-    ("dot", "RED qubit \u2192 re-run the check"),
+    ("dot", r"RED $\rightarrow$ re-run the check"),
     ("dot", r"Decoupling if $T_2^*/T_2 < 0.8$"),
     ("dot", r"Frame update if $|\Delta\omega|\,T_2^* > 1\,\mathrm{rad}$"),
 ])
@@ -387,6 +389,7 @@ text(QR, ymid1, "Calibration data", ha="right", va="center_baseline")
 text(QR, BUS, "Runs probes", ha="right", va="center_baseline")
 text(QR, ymid3, "Counts", ha="right", va="center_baseline")
 print("overflow:", OVERFLOW)
+nc.typeset(fig)
 
 OUT_DIR = __import__("pathlib").Path(__file__).resolve().parents[1] / "figures"
 OUT_DIR.mkdir(exist_ok=True)

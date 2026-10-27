@@ -8,7 +8,7 @@ checks it exceeds zero by chance for 37% of unchanged qubits). Open grey: not an
 Canary's change over the same interval (its trajectory interpolated linearly to the times of QE's two jobs);
 Spearman rho with its 95% CI (Fieller), Holm over the four parameters; points beyond the 98th percentile drawn
 at the edge. A change after QE2 (seen only by C3) enters Canary's interpolated change in part. QE: floor-fixed refits for T1 and epsilon.
-Delta-omega only where both QE values lie inside Canary's unambiguous range. IEEE double column (7.16 in).
+Delta-omega only where both QE values lie inside Canary's unambiguous range. RevTeX page width (7.06 in).
 """
 import numpy as np
 import matplotlib as mpl
@@ -70,9 +70,11 @@ for i, (p, label, unit) in enumerate(PARAMS):
     r, n = rho[p].statistic, len(g)
     lo, hi = np.tanh(np.arctanh(r) + np.array([-1.96, 1.96]) * np.sqrt(1.06 / (n - 3)))
     ph = p_holm[p]
-    ax.text(0.03, 0.98, f"$\\rho$ = {r:+.2f} [{lo:+.2f}, {hi:+.2f}]\n$p$ = "
-            + (f"{ph:.0e}".replace("e-0", "e-") if ph < 0.01 else f"{ph:.2f}"),
-            transform=ax.transAxes, ha="left", va="top", fontsize=c.SIZE - 1)
+    mant, expo = f"{ph:.1e}".split("e")
+    p_txt = f"$p = {mant}\\times10^{{{int(expo)}}}$" if ph < 0.01 else f"$p$ = {ph:.2f}"
+    ax.text(0.03, 0.98, f"$\\rho$ = {r:+.2f}\n[{lo:+.2f}, {hi:+.2f}]\n" + p_txt,
+            transform=ax.transAxes, ha="left", va="top", fontsize=c.SIZE - 1, zorder=5,
+            bbox=dict(fc="white", ec="none", alpha=0.85, pad=0.8))
     ax.set_title(label, fontsize=c.SIZE, pad=2)
 fig.text(0.5, 0.97, "(a) Canary: qubits that changed across C1, C2, C3 (Holm), coloured by the size of the change; grey: no change detected",
          ha="center", va="center")

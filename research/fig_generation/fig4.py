@@ -1,7 +1,7 @@
 """Fig. 4 -- accuracy against shot budget (research/data/nisq_benchmark.csv, sweep instances).
 Median |error| with its 95% CI against total shots per qubit for Canary and for IBM's QE configuration
 scaled to the same budgets; T1, T2, eps in %, delta-omega/2pi in Hz (SC) and mHz (TI).
-QE failed fits are excluded (conservative for Canary; counts in Table I). IEEE double column (7.16 in).
+QE failed fits are excluded (conservative for Canary; counts in Table I). RevTeX page width (7.06 in).
 """
 import numpy as np
 import matplotlib as mpl
@@ -61,7 +61,7 @@ for r, (arch, tag) in enumerate(c.ARCH):
         ax.set_title(f"{tag}, {c.LABEL[p]}  ({unit})", fontsize=c.SIZE, pad=3)
         if r == 1:
             ax.set_xlabel("Total shots per qubit")
-    axes[r, 0].set_ylabel("Median |error|")
+    axes[r, 0].set_ylabel(r"Median $|$error$|$")
 handles = [mpl.lines.Line2D([], [], color=c.TOOL["canary"], marker="o", ms=2.8, mew=0, lw=1.0, label="Canary"),
            mpl.lines.Line2D([], [], color=c.TOOL["qe"], marker="s", ms=2.8, mew=0, lw=1.0,
                             label="QE (IBM design, scaled)"),

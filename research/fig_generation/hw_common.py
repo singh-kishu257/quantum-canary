@@ -155,6 +155,22 @@ def diff(c, q, parameter):
     return 100 * (c - q) / ((c + q) / 2), (c + q) / 2
 
 
+def predicted():
+    """Per parameter, the mean and 2.5th/97.5th percentiles of Canary - QE in IBM's standard configuration over the
+    simulated superconducting qubits of the NISQ benchmark (one check each), on diff()'s scale (relative % of the pair
+    mean; delta-omega in Hz)."""
+    import nisq_common as nc
+    d = nc.load()
+    out = {}
+    for p in CANARY_FIELDS:
+        k = 2 * np.pi if p == "delta_omega" else 1.0
+        a = nc.sel(d, "superconducting", "canary_x1", p).set_index("instance_id").estimate / k
+        b = nc.sel(d, "superconducting", "qe_ibm", p).set_index("instance_id").estimate / k
+        x, _ = diff(a, b, p)
+        out[p] = (float(x.mean()), float(np.percentile(x, 2.5)), float(np.percentile(x, 97.5)))
+    return out
+
+
 def bland_altman(x):
     """n, bias with its 95% CI, SD, limits of agreement bias +- 1.96 SD with their approximate 95% CI
     (Bland & Altman 1999: SE = sqrt(3 SD^2 / n)), and the empirical 2.5th/97.5th percentiles."""
@@ -210,8 +226,9 @@ def drift(at="mid"):
     the between-check SD beyond the error bars, tau (DerSimonian-Laird), relative to the weighted mean (%; delta-
     omega in Hz). QE's change QE1 to QE2 likewise (Q with 1 dof). The time-matched signed changes: Canary's
     trajectory interpolated linearly to the times of QE's two jobs (job_times), its change between them against
-    QE2 - QE1 (relative to each tool's own mean, %; delta-omega in Hz). QE: floor-fixed refits for T1 and epsilon,
-    default fits otherwise. Delta-omega only where both QE values lie inside Canary's unambiguous range."""
+    QE2 - QE1 (relative to each tool's own mean, %; delta-omega in Hz), each with its standard error from the error bars
+    above. QE: floor-fixed refits for T1 and epsilon, default fits otherwise. Delta-omega only where both QE values lie
+    inside Canary's unambiguous range."""
     from scipy.stats import chi2
     from quantum_canary.workflow import _DRIFT_PARAMS
     d, ref, rng, t = load(), qe_refits(), canary_dw_range_hz(), job_times(at)
@@ -248,10 +265,12 @@ def drift(at="mid"):
                 tau = np.sqrt(max(0.0, (Q - (len(z) - 1)) / (np.sum(w) - np.sum(w ** 2) / np.sum(w))))
                 row.update({f"{tool}_Q": Q, f"{tool}_p": float(chi2.sf(Q, len(z) - 1)), f"{tool}_mean": m,
                             f"{tool}_tau": tau if p == "delta_omega" else 100 * tau / m})
+            a, b = (t1 - tc[0]) / (tc[1] - tc[0]), (t2 - tc[1]) / (tc[2] - tc[1])
             dc = np.interp(t2, tc, x) - np.interp(t1, tc, x)
-            dq = y[1] - y[0]
-            row["canary_change"] = dc if p == "delta_omega" else 100 * dc / np.mean(x)
-            row["qe_change"] = dq if p == "delta_omega" else 100 * dq / np.mean(y)
+            sdc = np.sqrt(((1 - a) * sx[0]) ** 2 + ((1 - a - b) * sx[1]) ** 2 + (b * sx[2]) ** 2)
+            dq, sdq = y[1] - y[0], np.hypot(sy[0], sy[1])
+            kc, kq = (1.0, 1.0) if p == "delta_omega" else (100 / np.mean(x), 100 / np.mean(y))
+            row.update(canary_change=kc * dc, canary_change_sigma=kc * sdc, qe_change=kq * dq, qe_change_sigma=kq * sdq)
             rows.append(row)
     out = pd.DataFrame(rows)
     out["canary_p_holm"] = holm(out.canary_p.values)

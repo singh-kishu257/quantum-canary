@@ -1,6 +1,6 @@
 """Fig. 2 -- ideal regime: Canary's estimates against the simulator's truth (research/data/ideal_parity.csv).
 (a) signed relative error of T1, T2, eps; (b) signed delta-omega error; (c) 68.3% and 95.4% error-bar coverage;
-(d) fraction of qubits over each probe's chi2/dof limit against the nominal 1.25%. IEEE single column (3.5 in).
+(d) fraction of qubits over each probe's chi2/dof limit against the nominal 1.25%. RevTeX single column (3.40 in).
 """
 import pathlib
 import numpy as np
@@ -8,21 +8,13 @@ import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from scipy.stats import beta, binom, chi2
+import nisq_common as nc
 
 HERE = pathlib.Path(__file__).resolve().parent
 DATA = HERE.parent / "data" / "ideal_parity.csv"
-OUT_DIR = HERE.parent / "figures"
 
-FONT, SIZE = "Cambria", 8
-mpl.rcParams.update({
-    "font.family": FONT, "font.size": SIZE, "axes.labelsize": SIZE, "xtick.labelsize": SIZE,
-    "ytick.labelsize": SIZE, "legend.fontsize": SIZE,
-    "mathtext.fontset": "custom", "mathtext.rm": FONT, "mathtext.it": f"{FONT}:italic",
-    "mathtext.bf": f"{FONT}:bold", "mathtext.sf": FONT, "mathtext.fallback": None,
-    "pdf.fonttype": 42, "ps.fonttype": 42, "axes.unicode_minus": True,
-    "axes.linewidth": 0.6, "xtick.major.width": 0.6, "ytick.major.width": 0.6,
-    "xtick.major.size": 2.5, "ytick.major.size": 2.5, "axes.spines.top": False, "axes.spines.right": False,
-})
+nc.style()
+SIZE = nc.SIZE
 INK, GREY = "#1A1A1A", "#6E6E6E"
 
 
@@ -75,7 +67,7 @@ assert n_inst.nunique() == 1, n_inst
 N = int(n_inst.iloc[0])
 rng = np.random.default_rng(2)
 
-W, H = 3.5, 4.75
+W, H = nc.COL_WIDTH, 4.75
 fig = plt.figure(figsize=(W, H))
 ax_a = fig.add_axes([0.155, 0.705, 0.825, 0.265])
 ax_b1 = fig.add_axes([0.155, 0.370, 0.115, 0.215])
@@ -167,7 +159,4 @@ ax_d.set_ylim(0, 5)
 ax_d.set_ylabel(r"Over $\chi^2$/dof limit (%)")
 panel_label(ax_d, "(d)", y=-0.46)
 
-OUT_DIR.mkdir(exist_ok=True)
-for ext, kw in (("pdf", {"dpi": 600}), ("png", {"dpi": 600})):
-    fig.savefig(OUT_DIR / f"fig2.{ext}", **kw)
-print("saved:", OUT_DIR / "fig2.pdf", OUT_DIR / "fig2.png", f"({W} x {H} in)")
+nc.save(fig, "fig2")

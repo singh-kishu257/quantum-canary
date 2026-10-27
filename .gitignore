@@ -32,7 +32,10 @@ htmlcov/
 logs/
 *.log
 
-# Credentials — 
+# Manuscript (private)
+manuscript/
+
+# Credentials —
 ionq_api_token.txt
 ibm_api_token.txt
 ibm_crn_instance.txt

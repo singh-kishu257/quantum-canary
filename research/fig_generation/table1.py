@@ -5,6 +5,7 @@ repeated checks of unchanged qubits; S3: robustness against coherent fraction an
 S4: Canary chi2 flags and health in the NISQ regime; S5: QE failed fits along the sweep; S6: robustness, every
 condition x parameter x tool x platform (Fig. 5).
 """
+import re
 import numpy as np
 from scipy.stats import chi2, norm
 import nisq_common as c
@@ -39,10 +40,12 @@ def med(x):
 def latex(caption, label, cols, header, rows, wide=True):
     env = "table*" if wide else "table"
     out = [f"\\begin{{{env}}}[!t]", "\\centering", "\\footnotesize", f"\\caption{{{caption}}}",
-           f"\\label{{{label}}}", f"\\begin{{tabular}}{{{cols}}}", "\\hline", " & ".join(header) + " \\\\", "\\hline"]
+           f"\\label{{{label}}}", "\\begin{adjustbox}{max width=\\linewidth}", f"\\begin{{tabular}}{{{cols}}}",
+           "\\hline", " & ".join(header) + " \\\\", "\\hline"]
+    minus = lambda s: re.sub(r"(?<![\w$.\-])-(?=\d)", "$-$", s)
     for r in rows:
-        out.append("\\hline" if r is None else " & ".join(r) + " \\\\")
-    out += ["\\hline", "\\end{tabular}", f"\\end{{{env}}}", ""]
+        out.append("\\hline" if r is None else " & ".join(map(minus, r)) + " \\\\")
+    out += ["\\hline", "\\end{tabular}", "\\end{adjustbox}", f"\\end{{{env}}}", ""]
     return "\n".join(out)
 
 
@@ -209,7 +212,10 @@ def table_s6():
            "of the condition (signed so that positive means the error grows as the condition worsens) with the "
            f"per-qubit |error|; $p$ Holm-corrected over all {len(grid)} tests (* $<$ 0.05). Fixed-strength "
            "mechanisms (T1 drift, frequency drift, motional heating, detuning during gates) are not varied.")
-    return header, rows, cap, latex(cap, "tab:s6", "llllcccc", header, rows)
+    tex = (latex(cap + " Part 1: superconducting qubits.", "tab:s6", "llllcccc", header, [r for r in rows if r[0] == "SC"])
+           + "\\addtocounter{table}{-1}\n"
+           + latex("(Continued.) Part 2: trapped ions.", "tab:s6b", "llllcccc", header, [r for r in rows if r[0] == "TI"]))
+    return header, rows, cap, tex
 
 
 assert not (~d[d.tool == "canary"].ok).any(), "Table S5 states Canary never failed"
