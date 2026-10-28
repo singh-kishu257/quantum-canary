@@ -39,7 +39,7 @@ for k in range(len(runs)):
     ax_a.errorbar(x + offset(k), 1e4 * eps[k], yerr=1e4 * sig[k], fmt="o", ms=3.0, mew=0, lw=0.7, capsize=0,
                   color=RUN_COL[k % 4], label=f"run {chr(65 + k)}", zorder=3)
 ax_a.axhline(1e4 * prior, color=c.GREY, lw=0.6, ls=(0, (3, 2)), zorder=1)
-ax_a.text(len(ions) - 0.45, 1e4 * prior, "IonQ published median", ha="right", va="bottom", color=c.GREY,
+ax_a.text(-0.6, 1e4 * prior, "IonQ median", ha="left", va="bottom", color=c.GREY,
           fontsize=c.SIZE - 1)
 ax_a.set_xticks(x)
 ax_a.set_xticklabels([str(q) for q in ions])
