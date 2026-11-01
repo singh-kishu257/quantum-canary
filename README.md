@@ -3,11 +3,11 @@
 Qubit health checks for IBM superconducting hardware, and gate-error checks for IonQ trapped ions.
 
 1. **Before your job**: check the qubits you will use.
-2. **Your jobs**: run as normal. Canary never touches them.
-3. **Between jobs**, if you like: check again as often as you want (most
+2. **Your jobs**: run as normal, without Canary interrupting.
+3. **Between jobs**, if you lwant: check again as often as you want (most
    useful in long workflows).
 4. **After**: check again and compare. If a qubit changed, results that
-   depend on it may not hold.
+   depend on that qubit may be inaccurate.
 
 Each check is its own short job: 74 circuits per qubit (8,640 shots) that
 measure T1, T2 (echo), T2\* (Ramsey), the qubit's frequency offset Δω and
