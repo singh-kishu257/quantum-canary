@@ -1,13 +1,14 @@
-"""Ideal-regime benchmark.
+"""Ideal-regime benchmark [FIGURE 2].
 
 Each instance is a simulated qubit whose noise matches Canary's model, with a
-calibration prior a few percent off the truth. Canary builds its probe from
+calibration prior perturbed a few percent off the truth. 
+
+Canary builds its probe from
 the prior, runs it on the simulator, and we compare what it recovers (T1, T2,
 delta_omega, epsilon) with the true values.
 
-The prior alone already scores a high R2 here, so read R2 next to R2_prior,
-beats_prior and the |z| coverage. SPAM is given to Canary, not measured.
-The noisy test is 3_benchmark.py. Output is one CSV.
+Output - ideal_parity.csv
+
 """
 
 from __future__ import annotations
