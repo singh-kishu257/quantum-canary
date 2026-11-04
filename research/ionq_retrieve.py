@@ -1,6 +1,10 @@
 """Retrieve a finished IonQ Canary job (e.g. one whose run was interrupted before it was saved) and fit it exactly as
-run_ionq does. Sequence lengths and ions come from the circuit names IonQ stored with the job
-(canary_rb_<s>_<j>_m<length>_ions<ions>); the priors, recorded with the fit, from IonQ's characterization now.
+run_ionq does. 
+
+Sequence lengths and ions come from the circuit names IonQ stored with the job
+(canary_rb_<s>_<j>_m<length>_ions<ions>); the priors, recorded with the fit, from IonQ's characterization.
+
+
 Usage: python research/ionq_retrieve.py JOB_ID TAG [BACKEND]     e.g.  5c3895b6-....  ion0_isolated"""
 import json, re, sys, pathlib, numpy as np, quantum_canary as canary
 from datetime import datetime, timezone

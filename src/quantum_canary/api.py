@@ -1,4 +1,4 @@
-"""The simple interface: check qubits, compare checks, check between jobs.
+"""Quantum Canary primary interface: check qubits, compare checks, check between jobs.
 
     import quantum_canary as canary
 

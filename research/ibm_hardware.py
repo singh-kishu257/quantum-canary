@@ -1,4 +1,4 @@
-"""IBM runs for the paper; every Canary prior comes from IBM's latest calibration, refreshed at each step.
+"""IBM experimantal runs (produced manuscript IBM hardware data); every Canary prior comes from IBM's latest calibration, refreshed at each step.
 QE: IBM's standard configuration (Real-time benchmarking tutorial; T2Ramsey as in the qiskit-experiments manual).
 Timing, identical for both methods (timing_TAG.json): wall_s and cpu_s of the method call on this machine (Canary =
 check() without its wait for IBM's usage figure); per job IBM's created/running/finished timestamps and measured QPU

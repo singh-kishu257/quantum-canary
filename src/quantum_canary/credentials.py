@@ -1,4 +1,4 @@
-"""Credentials for IBM and IonQ, resolved the way the vendors' own libraries do.
+"""Credentials handling (IBM/IONQ).
 
 Nothing here searches for files. By default the vendor libraries find the secret
 themselves, in their usual order:

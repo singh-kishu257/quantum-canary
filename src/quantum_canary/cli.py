@@ -1,5 +1,8 @@
 """Command-line interface: `quantum-canary` (or `python -m quantum_canary`).
 
+
+a few examples:
+
   quantum-canary check ibm_kingston 13,14            check qubits on IBM hardware
   quantum-canary check fake_fez 13,14                the same, locally, no account
   quantum-canary check qpu.forte-1 0,3               IonQ ions, gate error only

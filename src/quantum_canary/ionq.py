@@ -1,8 +1,9 @@
 """IonQ trapped-ion hardware: Canary's gate-error probe on chosen ions.
 
-On trapped ions T1 and T2 are seconds long, far beyond any circuit, so only
-the gate family is run: randomized benchmarking, the engine's random Clifford
-sequences in native GPI2/GPI pulses (inversion._build_rb_circuit) at the three
+On trapped ions T1 and T2 are seconds long, meaning the inversion circuits for 
+T1, T2, T2*, and frequency offset would take hours to days. Also, IonQ doesn't 
+allow native wait/delay commands , so only the gate family is run: randomized 
+benchmarking, the engine's random Clifford sequences in native GPI2/GPI pulses (inversion._build_rb_circuit) at the three
 lengths of BackendProfile.rb_lengths, each ion with its own sequences. Each
 ion's epsilon_sx (error per pulse) comes from the engine's own gate fit
 (inversion._invert_rb), in which readout cancels.

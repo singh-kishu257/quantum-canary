@@ -1,4 +1,4 @@
-"""NISQ benchmark: Canary vs qiskit-experiments, on the same simulated qubits.
+"""NISQ benchmark: Canary & qiskit-experiments, on the same simulated qubits.
 
 Every simulated qubit is
 generated with every NISQ noise mechanism of quantum_canary.simulation on (T1 drift and telegraph
@@ -26,7 +26,11 @@ own run:
 
 Output: one long CSV, one row per (qubit, arm, parameter). Usage:
   python research/nisq_benchmark.py --architecture superconducting --n-instances 300 --shard 0 --n-shards 10 --out x.csv
-  python research/nisq_benchmark.py --combine --n-instances 300 --n-sweep 100 --input a.csv --input b.csv --out y.csv"""
+  python research/nisq_benchmark.py --combine --n-instances 300 --n-sweep 100 --input a.csv --input b.csv --out y.csv
+
+Accompanying github actions workflow: nisq_benchmark.yml
+
+"""
 from __future__ import annotations
 
 import argparse
