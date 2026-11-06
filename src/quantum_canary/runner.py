@@ -9,8 +9,8 @@ engine (quantum_canary.inversion):
                    by default), one IBM Sampler job, and the engine's inversion
                    (inversion.lindblad_inversion) per qubit.
   run_simulation() the per-qubit flow of research/ideal_parity.py
-                   (regime="ideal") or of research/benchmark.py with its
-                   default settings (regime="nisq"), on the simulator in
+                   (regime="ideal") or a qubit with the noise mechanisms of
+                   research/nisq_benchmark.py (regime="nisq"), on the simulator in
                    quantum_canary.simulation,
                    with the true parameters kept for comparison.
 
@@ -40,7 +40,7 @@ __all__ = [
 ]
 
 # Shots per circuit of each probe family: the values every research benchmark
-# (ideal_parity.py, benchmark.py) uses.
+# (ideal_parity.py, nisq_benchmark.py) uses.
 DEFAULT_SHOTS: Dict[str, int] = {"t1": 300, "ramsey": 600, "gate": 24, "echo": 500}
 # Interleaved blocks per architecture (inversion.interleave_probe_blocks). A
 # superconducting check lasts about a second, so each circuit's shots run once:
@@ -51,17 +51,17 @@ DEFAULT_SHOTS: Dict[str, int] = {"t1": 300, "ramsey": 600, "gate": 24, "echo": 5
 # family and defaults to one block (ionq.run_ionq).
 DEFAULT_PROBE_BLOCKS: Dict[str, int] = {"superconducting": 1, "trapped_ion": 10}
 
-# research/benchmark.py constants and default configuration (regime="nisq").
+# regime="nisq" constants, as in research/nisq_benchmark.py.
 _NISQ_T_CALIB_S = 0.0
 _NISQ_T_MEASURE_S = 3600.0
-_NISQ_SPAM_SPREAD = 0.5      # per-qubit readout-error heterogeneity (benchmark --spam-spread)
+_NISQ_SPAM_SPREAD = 0.5      # per-qubit readout-error heterogeneity
 _SPAM_CLIP_MAX = 0.499
 # Probe family whose shot chunks define each parameter's comparison truth in
-# a time-resolved run (benchmark.TRUTH_FAMILIES).
-_TRUTH_FAMILIES = {"T1_s": ("t1_",), "T2_s": ("ramsey_X_", "ramsey_Y_", "echo_"),
+# a time-resolved run (nisq_benchmark.TRUTH_FAMILIES).
+_TRUTH_FAMILIES = {"T1_s": ("t1_",), "T2_s": ("echo_",),
                    "delta_omega": ("ramsey_X_", "ramsey_Y_"),
                    "epsilon_sx": ("rb_",)}
-# research/ideal_parity.py and benchmark.py seed offsets per architecture.
+# research/ideal_parity.py seed offsets per architecture.
 _ARCH_SEED_OFFSET = {"superconducting": 0, "trapped_ion": 100_000}
 
 
@@ -537,7 +537,7 @@ def run_ibm(backend, qubits: Sequence[int], shots: Optional[Dict[str, int]] = No
 # --------------------------------------------------------------------------
 
 def _time_resolved_truth(truth, sim_result) -> Dict[str, float]:
-    """research/benchmark._time_resolved_truth: per parameter, the
+    """research/nisq_benchmark._time_resolved_truth: per parameter, the
     shot-weighted mean over the chunks of the probe family that measures it."""
     out: Dict[str, float] = {}
     for param, prefixes in _TRUTH_FAMILIES.items():
@@ -602,8 +602,10 @@ def rb_gate_error(truth: Any, t_s: float) -> float:
 def _simulate_one(architecture: str, regime: str, seed: int, qubit: int,
                   shots: Dict[str, int], probe_blocks: int):
     """One simulated qubit, exactly as one instance of research/ideal_parity.py
-    (regime="ideal") or research/benchmark.py with default settings
-    (regime="nisq"). Returns (InversionResult, profile, truth dict, engine log)."""
+    (regime="ideal"), or with the noise mechanisms of research/nisq_benchmark.py
+    (regime="nisq"; that benchmark also draws each qubit's coherent share of the
+    gate error and its prior error, which here keep the simulator's defaults).
+    Returns (InversionResult, profile, truth dict, engine log)."""
     if regime == "ideal":
         truth = sim.generate_device(architecture, n_qubits=1, seed=seed, regime="ideal",
                                     spam_spread_frac=0.0, perturbation_frac=None,
@@ -612,7 +614,7 @@ def _simulate_one(architecture: str, regime: str, seed: int, qubit: int,
                                                perturbation_frac=None)
         t_s = 0.0
     else:
-        # Every simulator mechanism, as research/benchmark.py's defaults apply
+        # Every simulator mechanism, as research/nisq_benchmark.py applies
         # them: 1/f detuning drift and T1 telegraph switching exist for
         # superconducting qubits only, the motional-heating gate error for
         # trapped ions only; crosstalk needs two qubits and cannot act here.
@@ -684,8 +686,8 @@ def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
 
     Each qubit is an independent simulated device, generated and probed
     exactly as one instance of the research benchmarks:
-      regime="nisq"  (default) research/benchmark.py with its default
-                     settings: every simulator mechanism (crosstalk excepted,
+      regime="nisq"  (default) the noise mechanisms of
+                     research/nisq_benchmark.py: every simulator mechanism (crosstalk excepted,
                      as each qubit is a separate one-qubit device). T1 drift and
                      two-state T1 switching, 1/f frequency drift and
                      quasi-static dephasing (superconducting); OU frequency
@@ -698,9 +700,9 @@ def run_simulation(architecture: str = "superconducting", n_qubits: int = 3,
                      stationary Markovian noise.
     The true epsilon_sx is the error per pulse randomized benchmarking
     measures on the simulated qubit (rb_gate_error), in both regimes.
-    Qubit i uses seed (seed + i); seed defaults to the benchmarks' offset for
-    the architecture (0 superconducting, 100000 trapped ion), so with default
-    settings qubit i reproduces benchmark instance i.
+    Qubit i uses seed (seed + i); seed defaults to research/ideal_parity.py's
+    offset for the architecture (0 superconducting, 100000 trapped ion), so with
+    regime="ideal" qubit i reproduces that benchmark's instance i.
     probe_blocks (default DEFAULT_PROBE_BLOCKS[architecture]: 1 superconducting,
     10 trapped ion) applies to regime="nisq" only (the ideal benchmark runs each
     circuit's shots consecutively).

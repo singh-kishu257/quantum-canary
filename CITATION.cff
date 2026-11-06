@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use Quantum Canary, please cite it as below."
+type: software
+title: "Quantum Canary"
+abstract: >-
+  Qubit health checks for IBM superconducting and IonQ trapped-ion hardware.
+  On IBM, from 74 single-qubit probe circuits (8,640 shots per qubit) in one
+  short job, Quantum Canary estimates T1, T2, T2*, the frequency offset and the
+  single-qubit gate error; on IonQ it estimates the gate error by randomized
+  benchmarking. Every estimate has an uncertainty, every fit is checked against
+  its noise model, every qubit gets a health status, and checks can be compared
+  to detect changes.
+authors:
+  - given-names: Kanishka
+    family-names: Singh
+    affiliation: "Joint Quantum Institute, University of Maryland"
+version: 0.9.0
+license: "MIT"
+repository-code: "https://github.com/singh-kishu257/quantum-canary"
+keywords:
+  - quantum computing
+  - qubit characterization
+  - randomized benchmarking
+  - drift detection
+  - superconducting qubits
+  - trapped ions

@@ -5,14 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "quantum-canary"
 dynamic = ["version"]
-description = "Low-shot recovery of T1, T2, T2*, qubit detuning and single-qubit gate error from a fixed set of probe circuits, on IBM hardware or in simulation."
+description = "Qubit health checks: T1, T2, T2*, frequency offset and single-qubit gate error on IBM hardware, gate error on IonQ, with uncertainties, a model check and drift detection."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Kanishka Singh" }]
 requires-python = ">=3.10"
 keywords = ["quantum computing", "qubit characterization", "T1", "T2", "Ramsey",
-            "randomized compiling", "Qiskit", "NISQ"]
+            "randomized benchmarking", "drift detection", "Qiskit", "IBM Quantum",
+            "IonQ", "NISQ"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
@@ -39,6 +40,7 @@ quantum-canary = "quantum_canary.cli:main"
 
 [project.urls]
 Repository = "https://github.com/singh-kishu257/quantum-canary"
+Issues = "https://github.com/singh-kishu257/quantum-canary/issues"
 
 [tool.setuptools.dynamic]
 version = { attr = "quantum_canary.__version__" }

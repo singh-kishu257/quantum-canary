@@ -1,7 +1,7 @@
 """Command-line interface: `quantum-canary` (or `python -m quantum_canary`).
 
-
-a few examples:
+Run with no arguments for the banner, the commands, examples and credentials
+(_EPILOG). A few examples:
 
   quantum-canary check ibm_kingston 13,14            check qubits on IBM hardware
   quantum-canary check fake_fez 13,14                the same, locally, no account
@@ -20,6 +20,27 @@ from __future__ import annotations
 import argparse
 import sys
 from typing import List, Optional
+
+_EPILOG = """\
+examples:
+  quantum-canary check ibm_kingston 13,14            check qubits on IBM hardware
+  quantum-canary check fake_fez 13,14                the same, locally, no account
+  quantum-canary check qpu.forte-1 0,3               IonQ ions, gate error only
+  quantum-canary check ibm_kingston 13,14 --json before.json
+                                                     also save the result
+  quantum-canary compare before.json after.json      what changed between two checks
+  quantum-canary compare c0.json c1.json c2.json     every later check against the first
+
+credentials:
+  IBM   your account saved with QiskitRuntimeService.save_account(), or the
+        QISKIT_IBM_TOKEN and QISKIT_IBM_INSTANCE environment variables
+  IonQ  the IONQ_API_KEY environment variable
+  or name a file holding the secret: --ibm-token-file, --ibm-instance-file,
+  --ionq-token-file (see quantum-canary check -h)
+
+Everything else (simulation, repeated checks between jobs) is in the Python API:
+import quantum_canary as canary. Guide: https://github.com/singh-kishu257/quantum-canary
+"""
 
 
 def _qubits(text: str) -> List[int]:
@@ -83,7 +104,9 @@ def _cmd_compare(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     from . import __version__
     ap = argparse.ArgumentParser(prog="quantum-canary",
-                                 description="Check the health of qubits on IBM or IonQ hardware.")
+                                 description="Check the health of qubits on IBM or IonQ hardware.",
+                                 epilog=_EPILOG,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"quantum-canary {__version__}")
     sub = ap.add_subparsers(dest="command", required=True)
     p = sub.add_parser("check", help="measure T1, T2, T2*, frequency offset and gate error of qubits")
@@ -113,6 +136,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (AttributeError, ValueError):
             pass
     parser = build_parser()
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        from .display import banner
+        print(banner())
+        print()
+        parser.print_help()
+        return 0
     args = parser.parse_args(argv)
     if args.command == "compare" and len(args.checks) < 2:
         parser.error("compare needs at least two files")

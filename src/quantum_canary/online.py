@@ -85,13 +85,12 @@ _PROBE_DOF = {
 }
 # Nominal family-wise false-YELLOW rate for one qubit-round, Bonferroni-split
 # over the len(_PROBE_DOF) probes. False rates measured on correctly
-# specified ideal data at 8,700 shots (2026-10-15, 300 qubits per
-# architecture, with the former gate-repetition gate probe): per probe over
-# its limit, t1 1.0%/0.3%, Ramsey 1.3%/1.0%, echo 0.3%/0.7% (SC/TI), all
-# within their 95% intervals of 1.25%. A whole qubit was non-GREEN 9.0% SC /
-# 7.3% TI of the time: 5.0% / 3.0% from a fit over its limit and 4.3% / 4.3%
-# from the T2*/T2 rule, which estimation noise alone trips. The
-# randomized-benchmarking gate probe's rate has not been measured this way.
+# specified ideal data at 8,640 shots (research/data/ideal_parity.csv, 500
+# qubits per architecture): per probe over its limit, t1 1.2%/0.4%, Ramsey
+# 1.4%/0.6%, echo 0.6%/1.2% and RB 2.4%/2.6% (SC/TI); RB's chi2 weights come
+# from only 5 to 15 sequences per end state. A whole qubit was YELLOW 9.2% SC /
+# 8.8% TI of the time: 5.6% / 4.8% with a fit over its limit and 3.8% / 4.0%
+# from the T2*/T2 rule, which estimation noise alone trips.
 _HEALTH_FAMILY_ALPHA = 0.05
 
 

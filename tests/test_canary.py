@@ -104,6 +104,22 @@ def test_cli_arguments():
     assert args.checks == ["a.json", "b.json", "c.json"]
 
 
+def test_cli_without_command_prints_banner_and_help(capsys):
+    from quantum_canary import cli
+    assert cli.main([]) == 0
+    out = capsys.readouterr().out
+    assert canary.banner() in out
+    assert "usage: quantum-canary" in out and "examples:" in out and "credentials:" in out
+
+
+def test_banner_box_is_closed_and_aligned():
+    lines = canary.banner().split("\n")
+    assert len({len(line) for line in lines}) == 1
+    assert lines[0][0] == "╔" and lines[-1][0] == "╚"
+    assert all(line[0] == "║" and line[-1] == "║" for line in lines[1:-1])
+    assert f"v{canary.__version__}" in canary.banner()
+
+
 def test_ionq_priors_from_characterization():
     from qiskit_ionq.ionq_client import Characterization
 

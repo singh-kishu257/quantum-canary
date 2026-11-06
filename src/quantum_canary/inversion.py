@@ -1,8 +1,3 @@
-'''
-Core code of Quantum Canary
-
-'''
-
 from __future__ import annotations
 import datetime
 import dataclasses

@@ -271,6 +271,9 @@ def simulate(n_qubits: int = 3, architecture: str = "superconducting",
              regime: str = "nisq", seed: Optional[int] = None,
              probe_blocks: Optional[int] = None) -> Report:
     """Check simulated qubits, no backend needed; report[q].truth holds the true values.
+    regime="nisq" (the default) adds noise that Canary's model leaves out (drift, slow
+    dephasing, coherent gate error, stale calibration; see runner.run_simulation);
+    regime="ideal" follows the model exactly.
     probe_blocks defaults to runner.DEFAULT_PROBE_BLOCKS[architecture]."""
     return Report(runner.run_simulation(architecture, n_qubits=n_qubits, regime=regime, seed=seed,
                                         probe_blocks=probe_blocks))
