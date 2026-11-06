@@ -14,6 +14,7 @@ authors:
   - given-names: Kanishka
     family-names: Singh
     affiliation: "Joint Quantum Institute, University of Maryland"
+    orcid: "https://orcid.org/0009-0001-9611-1615"
 version: 0.9.0
 license: "MIT"
 repository-code: "https://github.com/singh-kishu257/quantum-canary"
