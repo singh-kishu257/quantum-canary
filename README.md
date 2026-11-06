@@ -1,5 +1,7 @@
 # Quantum Canary
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23994667.svg)](https://doi.org/10.5281/zenodo.23994667)
+
 Qubit health checks for IBM superconducting hardware, and gate-error checks for IonQ trapped ions.
 
 1. **Before your job**: check the qubits you will use.
