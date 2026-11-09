@@ -119,7 +119,8 @@ the vendors' libraries:
 - **YELLOW**: a probe's χ²/dof is over its limit (that probe's numbers may be
   wrong), or T2\* and T2 differ by more than 20% (slow frequency noise). The
   report says which.
-- **RED**: a fit did not converge. Re-run the check.
+- **RED**: a fit did not converge. Generally try to avoid using such uncertain
+  qubits in your workflows, and try to re-characterize if feasible. 
 - On simulated qubits that follow the model exactly, each probe goes over its
   limit about 1% of the time (randomized benchmarking about 2.5%), and a qubit
   comes out YELLOW about 9% of the time: a little over half from a fit, the
