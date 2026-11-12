@@ -107,3 +107,21 @@ c.save(fig, "fig8" if RUN_GLOB.startswith("ionq_qpu") else "fig8_test")
 for k in range(len(runs)):
     print(f"run {chr(65 + k)}: median eps {np.median(eps[k]):.2e}, poor fits {sum(x['poor_fit'] for x in runs[k]['results'])}")
 print(f"|z| <= 2: {inside}/{len(zf)}")
+# Timing and cost quoted in the text: IonQ's measured execution time per job, and its per-circuit gate counts.
+from datetime import datetime
+ts = lambda x: datetime.fromisoformat(x.replace("Z", "+00:00")).timestamp()
+jobs = [t for r in runs for t in r.get("ionq_job_times") or []]
+if jobs and all(t.get("execution_duration_ms") for t in jobs):
+    per_run = [sum(t["execution_duration_ms"] for t in r["ionq_job_times"]) / 6e4 for r in runs]
+    print("execution per run (min):", [round(m, 1) for m in per_run], f"mean {np.mean(per_run):.1f}; jobs per run",
+          [len(r["ionq_job_times"]) for r in runs])
+    print(f"first job started to last job completed: {(max(ts(t['completed_at']) for t in jobs) - min(ts(t['started_at']) for t in jobs)) / 3600:.1f} h")
+    gate_shots = [sum(c["estimate_context"]["1q_gates"] for c in r["ionq_estimates"][0]["raw"]) * r["shots"] for r in runs]
+    ms = [6e4 * m / g for m, g in zip(per_run, gate_shots)]
+    print("execution per single-qubit gate and shot (ms):", [round(x, 3) for x in ms])
+    longest = sorted(c["estimate_context"]["1q_gates"] for c in runs[0]["ionq_estimates"][0]["raw"])[-30:]
+    print(f"longest circuits ({max(runs[0]['rb_lengths'])} Cliffords, all ions): median {np.median(longest):.0f} gates, "
+          f"about {np.median(longest) * np.mean(ms) / 1e3:.2f} s per shot")
+if est and est[0].get("cost") is not None:
+    print(f"cost per check: shared circuits {parallel:,.0f} USD (IonQ's estimate, mean over runs); one ion at a time "
+          f"{sequential:,.0f} USD (rate card)")

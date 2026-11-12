@@ -147,7 +147,8 @@ def table_h4():
                      f"{np.median(ratio):.2f} [{np.percentile(ratio, 25):.2f}, {np.percentile(ratio, 75):.2f}]",
                      f"{f(s['bias'])} [{f(s['bias'] - s['bias_ci'])}, {f(s['bias'] + s['bias_ci'])}]",
                      f"{f(s['loa_lo'])} to {f(s['loa_hi'])}"])
-    rows.append(["IBM calibration (sx gate error)", f"{np.median(ibm.dropna()):.3e}", "1", "–", "–"])
+    # Over the qubits of the run only: the calibration also lists qubits IBM did not report operational.
+    rows.append(["IBM calibration (sx gate error)", f"{np.median(ibm.reindex(v.index).dropna()):.3e}", "1", "–", "–"])
     cap = ("Gate error against IBM's own published sx gate error (IBM's randomized benchmarking, measured about 12 h "
            "before the run; not independent of drift since then).")
     return "Table H4", cap, header, rows
@@ -231,7 +232,8 @@ def table_h7():
     cap = ("Drift on ibm_kingston over the sandwich (Fig. 7). Changed: Canary's three checks differ beyond their error "
            "bars (Cochran's Q, 2 dof, on the error bars canary.compare uses; Holm over every qubit and parameter). "
            "Spearman ρ: per qubit, QE's change QE2 − QE1 against Canary's change over the same interval (its "
-           "trajectory interpolated linearly to the times of QE's jobs); 95% CI from Fieller's standard error, Holm "
+           "trajectory interpolated linearly to the times of QE's jobs); 95% CI from Fisher's z transform with "
+           "Fieller's standard error √(1.06/(n − 3)), Holm "
            "over the four parameters. Disagreement: (Canary change − QE change) / combined standard error; SD 1 and "
            "95% within ±2 if both tools see the same change and their error bars are right. QE: floor-fixed refits "
            "for T1 and ε; Δω only where both QE values lie inside Canary's range.")
@@ -316,11 +318,62 @@ def esc(s):
 
 
 def latex(title, cap, header, rows):
-    body = [r"\begin{table*}[!t]", r"\centering", r"\footnotesize", f"\\caption{{{esc(cap)}}}",
+    # In the manuscript the drift figure (fig7.pdf) is numbered by LaTeX, not "Fig. 7".
+    cap = esc(cap).replace("(Fig. 7)", r"(Fig.~\ref{fig:drift})")
+    body = [r"\begin{table*}[!t]", r"\centering", r"\footnotesize", f"\\caption{{{cap}}}",
             f"\\label{{tab:{title.split()[-1].lower()}}}", r"\begin{adjustbox}{max width=\linewidth}",
             f"\\begin{{tabular}}{{{'l' * len(header)}}}", r"\hline", " & ".join(esc(x) for x in header) + r" \\", r"\hline"]
     body += [" & ".join(esc(x) for x in r) + r" \\" for r in rows]
     return "\n".join(body + [r"\hline", r"\end{tabular}", r"\end{adjustbox}", r"\end{table*}", ""])
+
+
+def text_numbers():
+    """Numbers the manuscript's text quotes that no table shows (printed only)."""
+    import json
+    from datetime import datetime
+    from quantum_canary import inversion as inv
+    groups = json.load(open(h.RUN / "qubits.json"))["groups"]
+    print("groups of", " and ".join(str(len(g)) for g in groups), "qubits")
+    # Merged circuits: a qubit whose probe is shorter than its group's longest would read T1 well below its prior
+    # (about the ratio of the two priors) if it waited between its probe and the readout.
+    for step in h.CANARY_STEPS:
+        qs = {q["qubit"]: q for q in json.load(open(h.RUN / f"{step}.json"))["report"]["qubits"]}
+        short = [q for g in groups for q in g
+                 if qs[q]["T1_prior_s"] < 0.6 * max(qs[k]["T1_prior_s"] for k in g)]
+        ratio = [qs[q]["result"]["T1_s"] / qs[q]["T1_prior_s"] for q in short]
+        print(f"{step}: {len(short)} qubits with prior T1 < 60% of their group's longest; median T1/prior "
+              f"{np.median(ratio):.2f}")
+    for step in h.CANARY_STEPS:
+        r = json.load(open(h.RUN / f"{step}.json"))
+        print(f"{step}: frame-update advice on {sum(bool(x) for x in r['frequency_offset'].values())}, decoupling "
+              f"advice on {sum(bool(x) for x in r['dynamical_decoupling'].values())} of {len(r['report']['qubits'])} qubits")
+    t = h.timing()
+    print("wall (s):", {s: round(t[s]["wall_s"]) for s in t}, "queue (s):", {s: round(t[s]["queue_s"]) for s in t})
+    # QPU time per circuit execution: IBM's metered usage over the shots of every circuit submitted.
+    r = json.load(open(h.RUN / "C1.json"))["report"]
+    q0 = r["qubits"][0]
+    prof = inv.BackendProfile(architecture="superconducting", T1_prior_s=q0["T1_prior_s"], T2_prior_s=q0["T2_prior_s"],
+                              dt_ns=q0["dt_ns"] or 0.2222, prior_confidence="prior_informed",
+                              custom_arch=dict(inv.ARCH_DEFAULTS["superconducting"], eps_typical=q0["eps_prior"]))
+    n = {"t1": len(prof.t1_delays_s), "ramsey": 2 * len(prof.ramsey_delays_s), "gate": sum(inv._RB_SEQUENCES),
+         "echo": len(prof.echo_delays_s)}
+    canary_exec = len(r["groups"]) * sum(n[k] * r["shots"][k] for k in n)
+    for s in h.QE_STEPS:
+        qe_d = json.load(open(h.RUN / f"{s}.json"))
+        qe_exec = sum(x["shots"] for fam in ("t1", "hahn", "ramsey", "rb") for x in qe_d[fam]["raw"])
+        print(f"{s}: {qe_exec:,} circuit executions, {1e3 * t[s]['qpu_s'] / qe_exec:.2f} ms of QPU time each")
+    for s in h.CANARY_STEPS:
+        print(f"{s}: {canary_exec:,} circuit executions, {1e3 * t[s]['qpu_s'] / canary_exec:.2f} ms of QPU time each")
+    # Age of IBM's published sx gate error at the start of C1.
+    cal_c1 = json.load(open(h.RUN / "calibration_C1.json"))
+    start = datetime.fromisoformat(t["C1"]["start_utc"])
+    run_qubits = {q["qubit"] for q in r["qubits"]}
+    age = [(start - datetime.fromisoformat(p["date"])).total_seconds() / 3600
+           for g in cal_c1["gates"] if g["gate"] == "sx" and g["qubits"][0] in run_qubits
+           for p in g["parameters"] if p["name"] == "gate_error"]
+    print(f"age of IBM's sx gate error at C1: median {np.median(age):.1f} h ({min(age):.1f}-{max(age):.1f} h)")
+    dr = drift_table()
+    print(f"drift alarms (Table H8): Canary {int(dr.fc.sum())}, of which QE also flagged {int((dr.fc & dr.fq).sum())}")
 
 
 tables = [fn() for fn in (table_h1, table_h2, table_h3, table_h4, table_h5, table_h6, table_h7, table_h8, table_h9)]
@@ -328,3 +381,4 @@ tables = [fn() for fn in (table_h1, table_h2, table_h3, table_h4, table_h5, tabl
                                       "\n".join(markdown(*t) for t in tables), encoding="utf-8")
 (OUT_DIR / "tables_hw.tex").write_text("\n".join(latex(*t) for t in tables), encoding="utf-8")
 print("saved:", OUT_DIR / "tables_hw.md", OUT_DIR / "tables_hw.tex")
+text_numbers()

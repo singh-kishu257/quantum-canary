@@ -90,6 +90,8 @@ def a2():
     qe = np.array([ref.loc[r[0], "default"] / ref.loc[r[0], "floor_fixed"] for r in ok])
     print(f"A2 {len(rows)} qubits, interior exact solution for {len(ok)}; free/fixed EPC ratio median: exact interpolation "
           f"{np.median(mine):.3f}, QE saved {np.median(qe):.3f}; |mine/QE - 1| median {np.median(np.abs(mine / qe - 1)):.1e}")
+    every = (ref["default"] / ref["floor_fixed"]).replace([np.inf, -np.inf], np.nan).dropna()
+    print(f"   QE default / floor-fixed error over every qubit with both values: n {len(every)}, median {np.median(every):.3f}")
     B = np.array([r[3][2] for r in ok])
     print(f"   free floor median {np.median(B):.3f}, share > 1/2 {np.mean(B > 0.5):.2f}")
     chis = np.array([r[4][2] for r in rows])
@@ -140,7 +142,7 @@ def a4():
     d = h.load()
     v, _ = h.wide(d, "delta_omega")
     rng = h.canary_dw_range_hz()
-    dev, change = [], []
+    dev, change, change_x = [], [], []
     for q in json.load(open(h.RUN / "C1.json"))["report"]["qubits"]:
         prof = inv.BackendProfile(architecture="superconducting", T1_prior_s=q["T1_prior_s"], T2_prior_s=q["T2_prior_s"],
                                   dt_ns=q["dt_ns"] or 0.2222, prior_confidence="prior_informed",
@@ -148,9 +150,18 @@ def a4():
         dl = np.array(prof.ramsey_delays_s)
         dev.append(np.max(np.abs(dl / dl[0] - [1, 5, 10, 15])))
         w, step = 2 * np.pi * 1e3, 2 * np.pi / dl[0]
-        change.append(max(np.max(np.abs(np.cos(w * dl) - np.cos((w + k * step) * dl))) for k in (1, 2)) / 2)
+        # P1 = (1 - e cos)/2 in the x quadrature and (1 - e sin)/2 in the y quadrature (Eq. 2, no decay)
+        dx = max(np.max(np.abs(np.cos(w * dl) - np.cos((w + k * step) * dl))) for k in (1, 2)) / 2
+        dy = max(np.max(np.abs(np.sin(w * dl) - np.sin((w + k * step) * dl))) for k in (1, 2)) / 2
+        change_x.append(dx)
+        change.append(max(dx, dy))
+    change = np.array(change)
+    shot = np.sqrt(0.25 / 600)
     print(f"A4 delay ratio deviation from (1, 5, 10, 15): median {np.median(dev):.1e}, max {np.max(dev):.1e}; change of predicted "
-          f"P1 for aliases k = 1, 2: median {np.median(change):.1e}, max {np.max(change):.1e}")
+          f"P1 for aliases k = 1, 2, both quadratures: median {np.median(change):.1e}, max {np.max(change):.1e} "
+          f"(x quadrature alone: median {np.median(change_x):.1e}, max {np.max(change_x):.1e})")
+    print(f"   qubits whose change exceeds 0.02: {np.sum(change > 0.02)}/{len(change)}; exceeds the 600-shot noise "
+          f"at P1 = 1/2 ({shot:.4f}): {np.sum(change > shot)}/{len(change)}")
     hl = d[(d.tool == "canary") & (d.parameter == "delta_omega")].pivot(index="qubit", columns="step", values="health")
     near = {"C1": "QE1", "C2": "QE2", "C3": "QE2"}
     q1 = v.QE1.dropna()

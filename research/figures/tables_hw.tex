@@ -82,7 +82,7 @@ Canary C2 & 2.177e-04 & 0.96 [0.80, 1.15] & $-$4.23 [$-$10.9, 2.41] & $-$86.0 to
 QE1 default & 9.828e-04 & 3.90 [1.84, 6.69] & 91.2 [78.7, 104] & $-$63.8 to 246 \\
 QE1 floor fixed & 2.487e-04 & 1.10 [0.89, 1.32] & 5.68 [$-$0.891, 12.3] & $-$75.3 to 86.6 \\
 QE2 floor fixed & 2.580e-04 & 1.10 [0.92, 1.31] & 7.89 [1.03, 14.7] & $-$76.5 to 92.3 \\
-IBM calibration (sx gate error) & 2.311e-04 & 1 & -- & -- \\
+IBM calibration (sx gate error) & 2.305e-04 & 1 & -- & -- \\
 \hline
 \end{tabular}
 \end{adjustbox}
@@ -132,7 +132,7 @@ C3 & 8,640 & 1 & 15.0 & 268 & 904 & 237 & 1,171 & 276 \\
 \begin{table*}[!t]
 \centering
 \footnotesize
-\caption{Drift on ibm\_kingston over the sandwich (Fig. 7). Changed: Canary's three checks differ beyond their error bars (Cochran's Q, 2 dof, on the error bars canary.compare uses; Holm over every qubit and parameter). Spearman $\rho$: per qubit, QE's change QE2 $-$ QE1 against Canary's change over the same interval (its trajectory interpolated linearly to the times of QE's jobs); 95\% CI from Fieller's standard error, Holm over the four parameters. Disagreement: (Canary change $-$ QE change) / combined standard error; SD 1 and 95\% within $\pm$2 if both tools see the same change and their error bars are right. QE: floor-fixed refits for $T_1$ and $\varepsilon$; $\Delta\omega$ only where both QE values lie inside Canary's range.}
+\caption{Drift on ibm\_kingston over the sandwich (Fig.~\ref{fig:drift}). Changed: Canary's three checks differ beyond their error bars (Cochran's Q, 2 dof, on the error bars canary.compare uses; Holm over every qubit and parameter). Spearman $\rho$: per qubit, QE's change QE2 $-$ QE1 against Canary's change over the same interval (its trajectory interpolated linearly to the times of QE's jobs); 95\% CI from Fisher's z transform with Fieller's standard error $\surd$(1.06/(n $-$ 3)), Holm over the four parameters. Disagreement: (Canary change $-$ QE change) / combined standard error; SD 1 and 95\% within $\pm$2 if both tools see the same change and their error bars are right. QE: floor-fixed refits for $T_1$ and $\varepsilon$; $\Delta\omega$ only where both QE values lie inside Canary's range.}
 \label{tab:h7}
 \begin{adjustbox}{max width=\linewidth}
 \begin{tabular}{lllllll}

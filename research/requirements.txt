@@ -1,17 +1,24 @@
-# Quantum Canary research pipeline (research/*.py and the CI workflows).
-# Qiskit packages are pinned to the versions the 1c self-test and the
-# benchmarks were last run with; qiskit-ionq is required by the 1c
-# self-test (trapped-ion GPI2 native pair, test F).
-numpy>=1.26
-scipy>=1.11
+# Quantum Canary research pipeline (research/*.py, research/fig_generation/*.py and the CI workflows).
+#
+# Pinned to the stack that produced the simulation data, as recorded in
+# research/data/nisq_benchmark.csv.meta.json and every shard's metadata
+# (Python 3.12.15, commit 805ed93); the ideal_parity and nisq_benchmark
+# workflows install this file on Python 3.12.
+#
+# The IBM and IonQ hardware runs and the figures and tables used, on Python 3.14.2:
+#   qiskit==2.5.2 qiskit-aer==0.17.2 qiskit-ibm-runtime==0.50.0
+#   qiskit-experiments==0.14.2 qiskit-ionq==1.1.1 numpy==2.5.3 scipy==1.18.1
+#   pandas==3.0.6 matplotlib==3.11.2 requests==2.34.2
+# (from research/data/hardware/ibm_kingston_20261026T014902Z/C1.json.meta.json and
+# the environment the figures were made in). The inversion and simulation
+# modules are the same in both.
+numpy==2.5.4
+scipy==1.18.1
 qiskit==2.4.2
 qiskit-aer==0.17.2
 qiskit-ionq==1.1.1
-requests>=2.31
-# 3_benchmark.py head-to-head (T1, T2Hahn, T2Ramsey, StandardRB).
+qiskit-ibm-runtime==0.51.0
 qiskit-experiments==0.14.2
-
-# Hardware scripts (5_ibm_hardware.py) and figures (fig_generation/).
-qiskit-ibm-runtime>=0.20
-pandas>=2.0
-matplotlib>=3.7
+requests==2.34.2
+pandas==3.0.6
+matplotlib==3.11.2

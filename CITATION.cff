@@ -15,8 +15,8 @@ authors:
     family-names: Singh
     affiliation: "Joint Quantum Institute, University of Maryland"
     orcid: "https://orcid.org/0009-0001-9611-1615"
-version: 0.9.0
-date-released: "2026-11-05"
+version: 0.9.1
+date-released: "2026-11-11"
 license: "MIT"
 repository-code: "https://github.com/singh-kishu257/quantum-canary"
 keywords:

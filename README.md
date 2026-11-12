@@ -169,6 +169,33 @@ Quantum Canary never prices runs itself.
 - `canary.runner.run_simulation(...)` and `canary.simulation`: the device
   simulator Canary was validated on, with every noise model and its source.
 
+## Reproducing the paper
+
+Everything behind the paper's figures, tables and Appendix A is in `research/`.
+Install the pinned stack (it records the versions each part used) and the package:
+
+```bash
+pip install -r research/requirements.txt
+pip install -e .
+cd research/fig_generation
+```
+
+| Data (in `research/data/`) | Produced by | Paper output | Script in `research/fig_generation/` |
+|---|---|---|---|
+| `ideal_parity.csv` | `research/ideal_parity.py` (workflow `ideal_parity.yml`) | Fig. 2, Appendix A5 | `fig2.py`, `derivations.py` |
+| `nisq_benchmark.csv` (+ `shard_inputs/` metadata) | `research/nisq_benchmark.py` (workflow `nisq_benchmark.yml`) | Figs. 3, 4, S1; Tables IV, S1–S6; the simulated predictions in Fig. 5 and Tables H1, H3 | `fig3.py`, `fig4.py`, `fig5.py`, `table1.py`, `fig6.py`, `table_hw.py` |
+| `hardware/ibm_kingston_20261026T014902Z/` | `research/ibm_hardware.py sandwich ibm_kingston` | Figs. 5, S2; Tables H1–H9; Appendix A2, A4 | `fig6.py`, `fig7.py`, `table_hw.py`, `derivations.py` |
+| `hardware/ionq_qpu.forte-1_[A-D]_*` | `research/ionq_hardware.py submit A,B,C,D qpu.forte-1 MAX_COST`, then `collect qpu.forte-1` | Fig. 6 | `fig8.py` |
+| none | | Fig. 1 (architecture) and Appendix A1, A3 | `fig1.py`, `derivations.py` |
+
+Each script writes to `research/figures/` (`figN.pdf`; `table1.tex`, `tables_supp.tex`,
+`tables_hw.tex`). Script and paper numbering differ for three figures: `fig6.py` is Fig. 5,
+`fig8.py` is Fig. 6, and `fig5.py` and `fig7.py` are Figs. S1 and S2. `table_hw.py`,
+`fig8.py` and `derivations.py` also print the numbers the text quotes that no table shows.
+Hardware data other than the `ibm_kingston_20261026T014902Z` run and IonQ runs A–D, and
+everything in `research/data/archive/`, come from earlier versions of the package and are
+not used.
+
 ## Citing
 
 If Quantum Canary helps your work, please cite it: the "Cite this repository"

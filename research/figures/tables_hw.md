@@ -56,7 +56,7 @@ Gate error against IBM's own published sx gate error (IBM's randomized benchmark
 | QE1 default | 9.828e-04 | 3.90 [1.84, 6.69] | 91.2 [78.7, 104] | -63.8 to 246 |
 | QE1 floor fixed | 2.487e-04 | 1.10 [0.89, 1.32] | 5.68 [-0.891, 12.3] | -75.3 to 86.6 |
 | QE2 floor fixed | 2.580e-04 | 1.10 [0.92, 1.31] | 7.89 [1.03, 14.7] | -76.5 to 92.3 |
-| IBM calibration (sx gate error) | 2.311e-04 | 1 | – | – |
+| IBM calibration (sx gate error) | 2.305e-04 | 1 | – | – |
 
 ## Table H5
 
@@ -85,7 +85,7 @@ Cost of each run on 154 qubits. QPU: IBM's measured usage. IBM-side: merged crea
 
 ## Table H7
 
-Drift on ibm_kingston over the sandwich (Fig. 7). Changed: Canary's three checks differ beyond their error bars (Cochran's Q, 2 dof, on the error bars canary.compare uses; Holm over every qubit and parameter). Spearman ρ: per qubit, QE's change QE2 − QE1 against Canary's change over the same interval (its trajectory interpolated linearly to the times of QE's jobs); 95% CI from Fieller's standard error, Holm over the four parameters. Disagreement: (Canary change − QE change) / combined standard error; SD 1 and 95% within ±2 if both tools see the same change and their error bars are right. QE: floor-fixed refits for T1 and ε; Δω only where both QE values lie inside Canary's range.
+Drift on ibm_kingston over the sandwich (Fig. 7). Changed: Canary's three checks differ beyond their error bars (Cochran's Q, 2 dof, on the error bars canary.compare uses; Holm over every qubit and parameter). Spearman ρ: per qubit, QE's change QE2 − QE1 against Canary's change over the same interval (its trajectory interpolated linearly to the times of QE's jobs); 95% CI from Fisher's z transform with Fieller's standard error √(1.06/(n − 3)), Holm over the four parameters. Disagreement: (Canary change − QE change) / combined standard error; SD 1 and 95% within ±2 if both tools see the same change and their error bars are right. QE: floor-fixed refits for T1 and ε; Δω only where both QE values lie inside Canary's range.
 
 | Parameter | n | Changed over C1–C3 (Canary) | Spearman ρ [95% CI] | p (Holm) | Disagreement SD (robust) | \|z\| ≤ 2 (%) |
 |---|---|---|---|---|---|---|
