@@ -12,7 +12,7 @@ Qubit health checks for IBM superconducting hardware, and gate-error checks for 
    depend on that qubit may be inaccurate.
 5. Demonstrated **15 seconds** to characterize 154 operational qubits of
    a full IBM Heron r2 chip and **32 Minutes** for 10 ions on IonQ Forte-1.
-6. Scales **per group**, not per qubit.
+6. Scales **per qubit groups**, not per qubit. Execution per group happens in parallel.
 
 Each check is its own short job consisting of 74 circuits per qubit for a total
 of **8,640** shots per qubit. Each check characterizes critical qubit properties:
