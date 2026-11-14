@@ -1,6 +1,6 @@
 # Quantum Canary
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23994666.svg)](https://doi.org/10.5281/zenodo.23994666)[![PyPI Downloads](https://static.pepy.tech/personalized-badge/quantum-canary?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/quantum-canary)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23994666.svg)](https://doi.org/10.5281/zenodo.23994666)[![PyPI Downloads](https://static.pepy.tech/personalized-badge/quantum-canary?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/quantum-canary)[![CI Status](https://github.com/singh-kishu257/quantum-canary/actions/workflows/<WORKFLOW_FILENAME>/badge.svg)](https://github.com/singh-kishu257/quantum-canary/actions)[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)[![PyPI Version](https://img.shields.io/pypi/v/quantum-canary.svg)](https://pypi.org/project/quantum-canary/)[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Qubit health checks for IBM superconducting hardware, and gate-error checks for IonQ trapped ions.
 
