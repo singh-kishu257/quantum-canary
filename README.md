@@ -10,11 +10,15 @@ Qubit health checks for IBM superconducting hardware, and gate-error checks for 
    useful in long workflows).
 4. **After**: check again and compare. If a qubit changed, results that
    depend on that qubit may be inaccurate.
+5. Demonstrated **15 seconds** to characterize 154 operational qubits of
+   a full IBM Heron r2 chip and **32 Minutes** for 10 ions on IonQ Forte-1.
+6. Scales **per group**, not per qubit.
 
-Each check is its own short job: 74 circuits per qubit (8,640 shots) that
-measure T1, T2 (echo), T2\* (Ramsey), the qubit's frequency offset Δω and
+Each check is its own short job consisting of 74 circuits per qubit for a total
+of **8,640** shots per qubit. Each check characterizes critical qubit properties:
+T1, T2 (echo), T2\* (Ramsey), the qubit's frequency offset Δω and
 its single-qubit gate error (randomized benchmarking: 60 random Clifford
-sequences, error per pulse), with error bars and a check that the fits can be
+sequences, error per pulse). Analysis includes error bars and a check that the fits can be
 trusted. Qubits are probed in at most two parallel groups, never two
 neighbours in the same circuit, so checking more qubits costs little extra
 QPU time.
@@ -36,7 +40,7 @@ from qiskit_ibm_runtime import QiskitRuntimeService
 backend = QiskitRuntimeService().backend("ibm_kingston")
 
 before = canary.check(backend, [13, 14])     # one short job
-before.print()                               # numbers, fit, health, DD advice
+before.print()                               # numbers, fit, health, DD/frame advice
 before[13].t1, before[13].t2_star, before[13].health
 
 # ... run your jobs ...
@@ -44,7 +48,7 @@ before[13].t1, before[13].t2_star, before[13].health
 after = canary.check(backend, [13, 14])
 d = canary.compare(before, after)
 d.print()
-d.changed                                    # qubits that moved beyond their error bars
+d.changed                                    # qubits that moved beyond their error bars, Holm corrected
 ```
 
 To check between jobs, as often as you like:
@@ -54,7 +58,7 @@ mon = canary.Monitor(backend, [13, 14])
 mon.check()                    # baseline
 for batch in my_batches:
     sampler.run(batch).result()            # your job, untouched
-    mon.check()                            # a few seconds of QPU time
+    mon.check()                            # a few seconds of QPU time (SC)
     if mon.changed:                        # moved since the baseline?
         ...                                # re-check, re-learn mitigation or move qubits
 mon.print()                    # every check against the baseline
