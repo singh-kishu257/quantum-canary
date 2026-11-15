@@ -1,8 +1,9 @@
 # Quantum Canary
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23994666.svg)](https://doi.org/10.5281/zenodo.23994666) [![PyPI Downloads](https://static.pepy.tech/personalized-badge/quantum-canary?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/quantum-canary) [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/) [![PyPI Version](https://img.shields.io/pypi/v/quantum-canary.svg)](https://pypi.org/project/quantum-canary/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/singh-kishu257/quantum-canary/blob/main/demo.ipynb) [![Qiskit](https://img.shields.io/badge/Qiskit-Compatible-6929C4.svg)](https://www.ibm.com/quantum/qiskit)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23994666.svg)](https://doi.org/10.5281/zenodo.23994666) [![PyPI Downloads](https://static.pepy.tech/personalized-badge/quantum-canary?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/quantum-canary) [![Python Version](https://img.shields.io/badge/python-3.10%2B-violet.svg)](https://www.python.org/) [![PyPI Version](https://img.shields.io/pypi/v/quantum-canary.svg)](https://pypi.org/project/quantum-canary/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/singh-kishu257/quantum-canary/blob/main/demo.ipynb) [![Qiskit](https://img.shields.io/badge/Qiskit-Compatible-6929C4.svg)](https://www.ibm.com/quantum/qiskit)
 
-Qubit health checks for IBM superconducting hardware, and gate-error checks for IonQ trapped ions.
+Parallel, information efficient characterization of qubit coherence, frequency offset, and gate error with calibrated uncertainties and drift detection.
+Checks for IBM superconducting hardware, and gate-error checks for IonQ trapped ions.
 
 1. **Before your job**: check the qubits you will use.
 2. **Your jobs**: run as normal, without Canary interrupting.
